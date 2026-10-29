@@ -56,8 +56,8 @@ reported unresolved rather than retried indefinitely.
 | Module | Role | Status |
 | --- | --- | --- |
 | `draftcheck/llm_parsing.py` | Pulls a single JSON object out of model output; strips `<think>` blocks and code fences; raises `JSONParseError` with the raw text attached | **BUILT** |
-| `draftcheck/config.py` | Loads settings and secrets from `.env` via python-dotenv; no secrets in code | PLANNED |
-| `draftcheck/llm_client.py` | Thin wrapper over the OpenAI-compatible Baseten endpoint; retries and timeouts | PLANNED |
+| `draftcheck/config.py` | Locates `.env` with `find_dotenv` and builds a frozen `Provider` (name, base_url, model, api_key); raises `ConfigError` naming any missing variable, and masks the key in `repr` | **BUILT** |
+| `draftcheck/llm_client.py` | `LLMClient.chat(system, user)` over the OpenAI-compatible Baseten endpoint at `temperature=0`; returns reply text, latency, token usage, and model id | **BUILT** |
 | `draftcheck/render.py` | PDF/image to raster pages via pypdfium2 + pillow | PLANNED |
 | `draftcheck/prompts.py` | Prompt text for extraction and for correction wording | PLANNED |
 | `draftcheck/schema.py` | pydantic models for the extracted drawing, findings, and corrections | PLANNED |
@@ -81,8 +81,14 @@ draftCheck/
 │   └── ARCHITECTURE.md         # this file
 ├── draftcheck/
 │   ├── __init__.py
+│   ├── config.py               # BUILT
+│   ├── llm_client.py           # BUILT
 │   └── llm_parsing.py          # BUILT
+├── scripts/
+│   ├── __init__.py
+│   └── smoke_test.py           # python -m scripts.smoke_test
 ├── tests/
+│   ├── test_config.py
 │   └── test_llm_parsing.py
 ├── CLAUDE.md                   # working rules for Claude Code
 ├── LICENSE                     # MIT
@@ -109,6 +115,7 @@ draftCheck/
 | 2026-10-27 | MIT license | Hackathon rules require a public repo; MIT makes it genuinely open source |
 | 2026-10-28 | pypdfium2 to render PDFs to images; reportlab to generate synthetic test drawings | Permissive licenses; testable locally without external services |
 | 2026-10-28 | Branch protection with required CI and no required review | Solo developer, so CI is the gate instead of a reviewer |
+| 2026-10-28 | `.env` lives at the repo root; config uses `find_dotenv` to locate it from any worktree | One secret file, never committed, works from the main folder and Claude Code worktrees |
 
 ## 8. Status
 
