@@ -219,6 +219,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# DraftCheck run outputs (spike dumps, overlays, redlined PDFs)
+outputs/
+
 # Claude Code
 .claude/worktrees/
 .claude/settings.local.json
