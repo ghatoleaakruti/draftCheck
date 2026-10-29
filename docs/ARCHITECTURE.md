@@ -58,7 +58,7 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/llm_parsing.py` | Pulls a single JSON object out of model output; strips `<think>` blocks and code fences; raises `JSONParseError` with the raw text attached | **BUILT** |
 | `draftcheck/config.py` | Locates `.env` with `find_dotenv` and builds a frozen `Provider` (name, base_url, model, api_key); raises `ConfigError` naming any missing variable, and masks the key in `repr` | **BUILT** |
 | `draftcheck/llm_client.py` | `LLMClient.chat(system, user)` over the OpenAI-compatible Baseten endpoint at `temperature=0`; returns reply text, latency, token usage, and model id | **BUILT** |
-| `draftcheck/render.py` | PDF/image to raster pages via pypdfium2 + pillow | PLANNED |
+| `draftcheck/render.py` | `load_pages(path, dpi, max_side)` rasterizes a PDF with pypdfium2 or loads a PNG/JPG with pillow; returns `PageImage` (PNG bytes, width, height) per page, scaled down to `max_side` | **BUILT** |
 | `draftcheck/prompts.py` | Prompt text for extraction and for correction wording | PLANNED |
 | `draftcheck/schema.py` | pydantic models for the extracted drawing, findings, and corrections | PLANNED |
 | `draftcheck/rules.py` | Deterministic rule functions; each carries a `source` field citing the reference | PLANNED |
@@ -66,6 +66,8 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/redline.py` | Overlays markup on the original PDF; library to be chosen in Layer 2 | PLANNED |
 | `draftcheck/api.py` | FastAPI app: upload, confirm, results endpoints | PLANNED |
 | `frontend/` | Upload page, extraction review/edit screen, findings view | PLANNED |
+| `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch | **BUILT** |
+| `scripts/smoke_test.py` | One-shot check that the configured model answers over the network | **BUILT** |
 
 Rule text is always written in our own words with a `source` citation — no standards text
 is copied into the code.
@@ -83,13 +85,22 @@ draftCheck/
 │   ├── __init__.py
 │   ├── config.py               # BUILT
 │   ├── llm_client.py           # BUILT
-│   └── llm_parsing.py          # BUILT
+│   ├── llm_parsing.py          # BUILT
+│   └── render.py               # BUILT
+├── samples/
+│   └── generated/              # synthetic drawings, regenerable from scripts/
+│       ├── plate_001.pdf       # the drawing
+│       ├── plate_001.gt.json   # ground truth, bboxes normalized top-left 0..1
+│       └── plate_001.png       # rendered preview
 ├── scripts/
 │   ├── __init__.py
+│   ├── make_sample_drawing.py  # python -m scripts.make_sample_drawing
 │   └── smoke_test.py           # python -m scripts.smoke_test
 ├── tests/
 │   ├── test_config.py
-│   └── test_llm_parsing.py
+│   ├── test_llm_parsing.py
+│   ├── test_render.py
+│   └── test_sample_drawing.py
 ├── CLAUDE.md                   # working rules for Claude Code
 ├── LICENSE                     # MIT
 ├── README.md
