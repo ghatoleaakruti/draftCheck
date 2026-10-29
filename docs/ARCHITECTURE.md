@@ -44,9 +44,11 @@ Stage notes:
 | Stage | What happens | Status |
 | --- | --- | --- |
 | Render | PDF page rasterized to an image the model can see, via `render.load_pages` | **BUILT** |
-| Extract | Model returns a JSON object; parsed by `llm_parsing.extract_json`. Runs today via `scripts/extract_spike.py`; not yet wired into an app | **BUILT** |
+| Extract | Model returns a JSON object; parsed by `llm_parsing.extract_json`, then validated by `schema.parse_drawing`. Wired up as `pipeline.extract` | **BUILT** |
 | Confirm | User reviews and edits the extracted values before any checking | PLANNED |
-| Check | Python rules produce pass/fail per rule, with no model involvement, via `rules.run_rules` | **BUILT** |
+| Check | Python rules produce pass/fail per rule, with no model involvement, via `rules.run_rules`, wrapped as `pipeline.check` | **BUILT** |
+
+Render → Extract → Check runs end to end today from one command, `python -m draftcheck.cli check` — see §4.3.
 | Correct | Agent proposes a fix, rules re-run to verify it; **max 3 rounds**, then stop | PLANNED |
 | Output | Annotated PDF with redline markup and a findings list | PLANNED |
 
@@ -64,6 +66,8 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/prompts.py` | `EXTRACTION_SYSTEM` and `EXTRACTION_USER`: the model is a transcription engine that reports what is printed and never invents or repairs a callout; the user prompt fixes the JSON key set and the field rules, including each dimension's `from_ref`/`to_ref` endpoints (§4.2). Correction wording still to come | **BUILT** |
 | `draftcheck/schema.py` | pydantic v2 models for the extracted drawing (`Drawing`, `Dimension`, `FCF`, `DatumFeature`, `DatumRef`, `TitleBlock`, `GeneralTolerance`) and for rule output (`Finding`); `Units` and the 14-value `Characteristic` enum, plus `FORM_CONTROLS`. `parse_drawing(data)` validates a raw extraction dict: unknown keys are ignored, missing ids become `DT1…`/`D1…`/`F1…` (datums, dimensions, frames), and any item it cannot read is dropped into `Drawing.parse_issues` | **BUILT** |
 | `draftcheck/rules.py` | `Rule` dataclass (id, title, category, severity, `source`, `check`), the `RULES` registry, and `run_rules(drawing)`. Six rules today — see §4.1. Output is sorted by rule id then item ids, so the same drawing always gives the same list | **BUILT** |
+| `draftcheck/pipeline.py` | The two stages of one run, with no printing and no argument parsing, so the CLI and later the API can both drive them. `extract(path, client, dpi)` renders **page 1 only**, calls `chat_json` with the extraction prompts, and validates the reply with `parse_drawing`; it returns an `ExtractionResult` (the `Drawing` plus raw reply text, latency, model id, token usage, attempts). `check(drawing)` wraps `run_rules` | **BUILT** |
+| `draftcheck/cli.py` | The `check` subcommand — see §4.3. Writes the run's files, prints the findings table and any `parse_issues`, and sets the exit code | **BUILT** |
 | `draftcheck/agent.py` | Correction loop: propose, re-check, stop at 3 rounds | PLANNED |
 | `draftcheck/redline.py` | Overlays markup on the original PDF; library to be chosen in Layer 2 | PLANNED |
 | `draftcheck/api.py` | FastAPI app: upload, confirm, results endpoints | PLANNED |
@@ -126,6 +130,49 @@ endpoint information parses fine, and MFG-001 simply has nothing to check.
 On the 2026-10-29 spike run the model filled all six of plate_001's dimensions correctly,
 including both overall sizes and both hole locations.
 
+### 4.3 The `check` command — BUILT
+
+```
+python -m draftcheck.cli check <drawing> [--from-json path] [--out dir] [--dpi n]
+```
+
+`--from-json` loads a saved extraction instead of calling the model, which makes a run
+free, offline, and repeatable; it is how the CLI tests exercise the whole command. The
+drawing is still rendered in that mode, so a bad path fails loudly rather than appearing
+to pass on a saved extraction.
+
+Each run writes to `--out`, defaulting to `outputs/runs/<drawing-name>/`:
+
+| File | Contents |
+| --- | --- |
+| `extraction.json` | The validated `Drawing`, including `parse_issues` |
+| `findings.json` | The findings list, in `run_rules` order |
+| `raw.txt` | The model's reply exactly as received. **Only written when the model ran** |
+
+Exit codes are meant for CI: `0` clean, `1` at least one error-severity finding, `2` the
+run could not happen at all (unreadable drawing, bad JSON, missing config, model failure).
+A warning-only run still exits `0`.
+
+A real run on 2026-10-29, against `meta-models/muse-spark-open-1026`:
+
+```
+$ python -m draftcheck.cli check samples/generated/plate_001.pdf
+Drawing:  samples/generated/plate_001.pdf
+Model:    meta-models/muse-spark-open-1026
+Calling the model...
+Latency:  24.70s  (attempts: 1)
+
+RULE     SEVERITY  ITEMS  MESSAGE
+GDT-001  error     fcf_1  Feature control frame fcf_1 references datum C, but no datum
+                          feature symbol on the drawing defines C. ...
+
+1 error(s), 0 warning(s).
+Wrote extraction.json, findings.json, raw.txt to outputs/runs/plate_001/
+```
+
+That is the error seeded into plate_001 by `scripts/make_sample_drawing.py`, found end to
+end from the PDF with no hand-edited input — the first full Render → Extract → Check pass.
+
 ## 5. Repo layout (what exists today)
 
 ```
@@ -137,9 +184,11 @@ draftCheck/
 │   └── ARCHITECTURE.md         # this file
 ├── draftcheck/
 │   ├── __init__.py
+│   ├── cli.py                  # BUILT  python -m draftcheck.cli check <drawing>
 │   ├── config.py               # BUILT
 │   ├── llm_client.py           # BUILT
 │   ├── llm_parsing.py          # BUILT
+│   ├── pipeline.py             # BUILT
 │   ├── prompts.py              # BUILT
 │   ├── render.py               # BUILT
 │   ├── rules.py                # BUILT
@@ -158,9 +207,11 @@ draftCheck/
 ├── tests/
 │   ├── fixtures/               # frozen inputs the tests parse
 │   │   └── plate_001.model.json  # real extraction output from the 2026-10-29 spike run
+│   ├── test_cli.py
 │   ├── test_config.py
 │   ├── test_llm_client.py
 │   ├── test_llm_parsing.py
+│   ├── test_pipeline.py
 │   ├── test_render.py
 │   ├── test_rules.py
 │   ├── test_sample_drawing.py
@@ -196,13 +247,16 @@ draftCheck/
 | 2026-10-29 | Dimensions carry `from_ref`/`to_ref` endpoints, and extraction asks for the physical edge name even when that edge is also a datum | A rule needs geometry, not labels: "20 from the left edge to hole 1" is checkable, "20 from datum B" is not, and on plate_001 those are the same edge. Keeping both fields optional means a drawing without them still parses and MFG-001 simply has nothing to check |
 | 2026-10-29 | `MIN_EDGE_MATERIAL_RATIO = 1.0` is a module constant, and MFG-001 is a warning rather than an error | Edge distance is shop practice, not a standard — it varies with process, material, and thickness. A named constant makes the number reviewable and tunable instead of buried, and a warning says "look at this" rather than "this is wrong" |
 | 2026-10-29 | Datum feature symbols get ids (`DT1`, `DT2`, …) assigned per symbol, not per label | Findings pointed at `datum[0]`, a list position that shifts whenever extraction output changes. An id per symbol survives that, and assigning per symbol keeps two symbols claiming the same letter distinguishable — which is exactly the case GDT-002 reports |
+| 2026-10-29 | The run logic lives in `pipeline.py`; `cli.py` only parses arguments, prints, and sets the exit code | The FastAPI layer needs the same two steps without a terminal attached. Keeping printing out of `pipeline` means the API can import it as-is instead of the CLI growing a second copy of the flow |
+| 2026-10-29 | `extract` sends page 1 only | Every sample is a single sheet, and sending every page of a long PDF would spend tokens nobody asked for. Multi-page sheets are a later decision, not an accidental default |
+| 2026-10-29 | `check` exits 1 on error-severity findings, 2 on a failed run, and still renders the drawing under `--from-json` | A reviewer needs "the drawing is wrong" and "the tool broke" to be different outcomes, which a single non-zero code cannot express. Rendering even when the extraction is loaded from disk stops a typo'd drawing path from quietly passing |
 | 2026-10-29 | Lenient parsing: bad bboxes become None, unknown units become None, and an item that cannot be read at all is dropped and recorded in `Drawing.parse_issues` instead of failing the parse | Model output is imperfect; the user confirms data in the UI, and rules flag missing values instead of crashing. One unreadable callout must not cost us the rest of the drawing, and `parse_issues` keeps the loss visible rather than silent |
 
 ## 8. Status
 
 | Layer | What it covers | State |
 | --- | --- | --- |
-| 1 | Extraction + JSON schema + rule engine + test generator | BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`, `rules.py` with 6 rules. More rules can be added to the registry as the sample set grows |
+| 1 | Extraction + JSON schema + rule engine + test generator | BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`, `rules.py` with 6 rules, and `pipeline.py` + `cli.py` joining them into one `check` command that runs a drawing end to end. More rules can be added to the registry as the sample set grows |
 | 2 | Agent correction loop + redlined PDF | PLANNED |
 | 3 | Web UI + live deploy | PLANNED |
 | 4 | After hackathon: SAM 3.1 precision, revisions, link to Research Paper Recommender | PLANNED (post-hackathon) |
