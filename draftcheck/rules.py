@@ -8,11 +8,20 @@ Rule wording is our own. Each rule's ``source`` names the standard and the topic
 from; no standards text is reproduced here, and no section numbers are claimed.
 """
 
+import re
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from draftcheck.schema import FORM_CONTROLS, BBox, Characteristic, Drawing, Finding
+from draftcheck.schema import (
+    FORM_CONTROLS,
+    BBox,
+    Characteristic,
+    DatumFeature,
+    Dimension,
+    Drawing,
+    Finding,
+)
 
 
 @dataclass(frozen=True)
@@ -92,21 +101,21 @@ GDT_001 = Rule(
 
 
 def _check_duplicate_datum(drawing: Drawing) -> list[Finding]:
-    positions: dict[str, list[int]] = defaultdict(list)
-    for index, datum in enumerate(drawing.datums):
-        positions[datum.label].append(index)
+    by_label: dict[str, list[DatumFeature]] = defaultdict(list)
+    for datum in drawing.datums:
+        by_label[datum.label].append(datum)
 
     findings: list[Finding] = []
-    for label, indices in positions.items():
-        if len(indices) < 2:
+    for label, datums in by_label.items():
+        if len(datums) < 2:
             continue
         findings.append(
             _finding(
                 GDT_002,
-                f"Datum {label} is defined {len(indices)} times. Each datum label must "
+                f"Datum {label} is defined {len(datums)} times. Each datum label must "
                 "identify one feature, so an inspector cannot tell which to measure from.",
-                [f"datum[{index}]" for index in indices],
-                _first_bbox([drawing.datums[index].bbox for index in indices]),
+                [datum.id or "" for datum in datums],
+                _first_bbox([datum.bbox for datum in datums]),
             )
         )
     return findings
@@ -253,9 +262,143 @@ DIM_001 = Rule(
 )
 
 
+# --- MFG-001: hole too close to edge --------------------------------------------------
+
+#: How much solid material must be left between a hole's wall and the part edge, as a
+#: multiple of the hole diameter. One diameter is a common shop rule of thumb for drilled
+#: and punched holes in plate; thinner webs tend to bulge, tear, or break out. Tune this
+#: for a specific process or material — it is a default, not a law.
+MIN_EDGE_MATERIAL_RATIO = 1.0
+
+#: The outer edges a dimension can run to, and which edge faces each one across the part.
+_OPPOSITE_EDGE = {
+    "left_edge": "right_edge",
+    "right_edge": "left_edge",
+    "bottom_edge": "top_edge",
+    "top_edge": "bottom_edge",
+}
+
+#: The two edge pairs an overall size dimension can span.
+_OVERALL_SPANS = (("left_edge", "right_edge"), ("bottom_edge", "top_edge"))
+
+_HOLE_REF = re.compile(r"^hole_(\d+)_center$")
+
+
+def _ref(value: str | None) -> str | None:
+    """Normalize one ``from_ref``/``to_ref`` value for comparison."""
+    return value.strip().lower() if isinstance(value, str) else None
+
+
+def _hole_number(ref: str | None) -> int | None:
+    """The hole number in a ``hole_N_center`` reference, or ``None`` for anything else."""
+    match = _HOLE_REF.match(ref) if ref else None
+    return int(match.group(1)) if match else None
+
+
+def _hole_diameter(drawing: Drawing) -> float | None:
+    """The hole diameter to check against, or ``None`` when the drawing gives none.
+
+    With several diameter callouts we cannot yet tell which hole each belongs to, so we
+    take the largest: the biggest hole leaves the least material, which is the
+    conservative reading. Without a diameter there is nothing to compute, and the rule
+    stays silent rather than guessing.
+    """
+    diameters = [
+        dimension.value
+        for dimension in drawing.dimensions
+        if (dimension.feature_type or "").strip().lower() == "diameter"
+    ]
+    return max(diameters) if diameters else None
+
+
+def _overall_size(drawing: Drawing, edge_a: str, edge_b: str) -> Dimension | None:
+    """The dimension that spans the part from ``edge_a`` to ``edge_b``, if one exists."""
+    for dimension in drawing.dimensions:
+        if {_ref(dimension.from_ref), _ref(dimension.to_ref)} == {edge_a, edge_b}:
+            return dimension
+    return None
+
+
+def _number(value: float) -> str:
+    """Format a measurement without trailing zeros, e.g. 16.0 -> "16"."""
+    return f"{value:g}"
+
+
+def _check_hole_edge_distance(drawing: Drawing) -> list[Finding]:
+    diameter = _hole_diameter(drawing)
+    if diameter is None:
+        return []
+
+    minimum = MIN_EDGE_MATERIAL_RATIO * diameter
+    radius = diameter / 2
+
+    # Which overall size dimension, if any, spans the part across each edge.
+    overall: dict[str, Dimension] = {}
+    for edge_a, edge_b in _OVERALL_SPANS:
+        span = _overall_size(drawing, edge_a, edge_b)
+        if span is not None:
+            overall[edge_a] = span
+            overall[edge_b] = span
+
+    # (hole number, edge) -> (material left, dimension ids, bbox). Measured distances are
+    # collected separately from derived ones so a printed dimension always wins over a
+    # value we worked out ourselves.
+    measured: dict[tuple[int, str], tuple[float, list[str], BBox]] = {}
+    derived: dict[tuple[int, str], tuple[float, list[str], BBox]] = {}
+
+    for dimension in drawing.dimensions:
+        refs = [_ref(dimension.from_ref), _ref(dimension.to_ref)]
+        edges = [ref for ref in refs if ref in _OPPOSITE_EDGE]
+        holes = [number for number in map(_hole_number, refs) if number is not None]
+        if len(edges) != 1 or len(holes) != 1:
+            continue
+        edge, hole = edges[0], holes[0]
+        measured[(hole, edge)] = (dimension.value - radius, [dimension.id or ""], dimension.bbox)
+
+        # The drawing locates the hole from one edge only. If it also gives the overall
+        # size across that direction, the distance to the facing edge is the remainder.
+        span = overall.get(edge)
+        if span is not None:
+            derived[(hole, _OPPOSITE_EDGE[edge])] = (
+                span.value - dimension.value - radius,
+                [dimension.id or "", span.id or ""],
+                dimension.bbox,
+            )
+
+    findings: list[Finding] = []
+    for (hole, edge), (material, ids, bbox) in sorted({**derived, **measured}.items()):
+        if material >= minimum:
+            continue
+        findings.append(
+            _finding(
+                MFG_001,
+                f"Hole {hole} leaves {_number(material)} of material between its wall and "
+                f"the {edge.replace('_', ' ')}, under the {_number(minimum)} minimum for a "
+                f"{_number(diameter)} hole ({_number(MIN_EDGE_MATERIAL_RATIO)}x the "
+                "diameter). A web this thin can tear out or bulge when the hole is made.",
+                ids,
+                bbox,
+            )
+        )
+    return findings
+
+
+MFG_001 = Rule(
+    id="MFG-001",
+    title="Hole too close to edge",
+    category="manufacturability",
+    severity="warning",
+    source=(
+        "General design-for-manufacturing practice for hole edge distance; the threshold "
+        "is configurable via MIN_EDGE_MATERIAL_RATIO"
+    ),
+    check=_check_hole_edge_distance,
+)
+
+
 #: Every rule the engine runs, in registry order. ``run_rules`` sorts the output itself,
 #: so the order here does not affect results.
-RULES: list[Rule] = [GDT_001, GDT_002, GDT_003, GDT_004, DIM_001]
+RULES: list[Rule] = [GDT_001, GDT_002, GDT_003, GDT_004, DIM_001, MFG_001]
 
 
 def run_rules(drawing: Drawing) -> list[Finding]:

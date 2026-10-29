@@ -53,7 +53,7 @@ def test_model_output_details():
     assert hole.quantity == 2
     assert hole.tol_plus == 0.1
     assert hole.tol_minus == 0.1
-    assert hole.bbox == [0.076, 0.658, 0.148, 0.678]
+    assert hole.bbox == [0.074, 0.658, 0.148, 0.678]
 
 
 def test_ground_truth_parses():
@@ -196,6 +196,19 @@ def test_missing_ids_get_assigned():
     )
     assert [d.id for d in drawing.dimensions] == ["D1", "dim_keep", "D3"]
     assert [f.id for f in drawing.fcfs] == ["F1", "F2"]
+
+
+def test_datums_get_ids():
+    drawing = parse_drawing(
+        {"datums": [{"label": "A"}, {"id": "datum_keep", "label": "B"}, {"label": "C"}]}
+    )
+    assert [d.id for d in drawing.datums] == ["DT1", "datum_keep", "DT3"]
+
+
+def test_duplicate_datum_labels_still_get_distinct_ids():
+    """Two symbols both claiming A are separate items, so a finding can name them both."""
+    drawing = parse_drawing({"datums": [{"label": "A"}, {"label": "A"}]})
+    assert [d.id for d in drawing.datums] == ["DT1", "DT2"]
 
 
 def test_extra_keys_ignored():

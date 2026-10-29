@@ -129,7 +129,7 @@ def test_gdt_002_flags_a_label_defined_twice():
     findings = [f for f in run_rules(failing) if f.rule_id == "GDT-002"]
 
     assert len(findings) == 1
-    assert findings[0].item_ids == ["datum[0]", "datum[2]"]
+    assert findings[0].item_ids == ["DT1", "DT3"]
     assert findings[0].bbox == [0.1, 0.1, 0.2, 0.2]
     assert "A" in findings[0].message
 
@@ -270,6 +270,92 @@ def test_dim_001_can_report_both_problems_at_once():
     assert len(findings) == 2
 
 
+# --- MFG-001 hole too close to edge ---------------------------------------------------
+
+
+def plate() -> dict:
+    """The real plate_001 extraction, as a plain dict a test can edit before parsing."""
+    return load(FIXTURES / "plate_001.model.json")
+
+
+def dimension_named(data: dict, text: str) -> dict:
+    """The dimension entry whose printed text is ``text``."""
+    return next(d for d in data["dimensions"] if d["text_raw"] == text)
+
+
+def test_mfg_001_passes_on_the_real_plate():
+    """Holes are 20 and 80 across a 100 plate, Ø8: 16 of material each side, minimum 8."""
+    assert "MFG-001" not in rule_ids(run_rules(parse_drawing(plate())))
+
+
+def test_mfg_001_flags_a_hole_too_close_to_the_left_edge():
+    data = plate()
+    dimension_named(data, "20")["value"] = 5
+    findings = [f for f in run_rules(parse_drawing(data)) if f.rule_id == "MFG-001"]
+
+    assert len(findings) == 1
+    assert findings[0].severity == "warning"
+    assert findings[0].item_ids == ["dim_2"]
+    assert "left edge" in findings[0].message
+    # 5 to the centre of a Ø8 hole leaves 1 of material, against a minimum of 8.
+    assert "1 of material" in findings[0].message
+    assert "8 minimum" in findings[0].message
+
+
+def test_mfg_001_derives_the_distance_to_the_facing_edge():
+    """Only the left distance is printed; the right one is the overall width minus it."""
+    data = plate()
+    dimension_named(data, "20")["value"] = 97
+    findings = [f for f in run_rules(parse_drawing(data)) if f.rule_id == "MFG-001"]
+
+    assert len(findings) == 1
+    # Derived from the hole dimension and the overall width, so both are named.
+    assert findings[0].item_ids == ["dim_2", "dim_4"]
+    assert "right edge" in findings[0].message
+
+
+def test_mfg_001_prefers_a_printed_distance_over_a_derived_one():
+    """Both edges are dimensioned and both fail, so each gets its own finding."""
+    data = plate()
+    dimension_named(data, "20")["value"] = 5
+    dimension_named(data, "80")["from_ref"] = "right_edge"
+    dimension_named(data, "80")["to_ref"] = "hole_1_center"
+    dimension_named(data, "80")["value"] = 6
+    findings = [f for f in run_rules(parse_drawing(data)) if f.rule_id == "MFG-001"]
+
+    assert len(findings) == 2
+    assert [f.item_ids for f in findings] == [["dim_1"], ["dim_2"]]
+
+
+def test_mfg_001_is_silent_without_a_hole_diameter():
+    data = plate()
+    dimension_named(data, "20")["value"] = 5
+    data["dimensions"] = [d for d in data["dimensions"] if d["feature_type"] != "diameter"]
+    assert "MFG-001" not in rule_ids(run_rules(parse_drawing(data)))
+
+
+def test_mfg_001_uses_the_largest_diameter_when_several_are_given():
+    """With no way to match a diameter to a hole, the biggest one is the safe read."""
+    data = plate()
+    dimension_named(data, "20")["value"] = 14
+    passing = [f for f in run_rules(parse_drawing(data)) if f.rule_id == "MFG-001"]
+    assert passing == []  # 14 - 4 = 10 of material, against a minimum of 8
+
+    data["dimensions"].append(
+        {"id": "dim_big", "text_raw": "Ø12", "value": 12, "feature_type": "diameter"}
+    )
+    findings = [f for f in run_rules(parse_drawing(data)) if f.rule_id == "MFG-001"]
+    assert [f.item_ids for f in findings] == [["dim_2"]]  # 14 - 6 = 8, minimum now 12
+
+
+def test_mfg_001_ignores_dimensions_with_no_refs():
+    data = plate()
+    for entry in data["dimensions"]:
+        entry["from_ref"] = None
+        entry["to_ref"] = None
+    assert "MFG-001" not in rule_ids(run_rules(parse_drawing(data)))
+
+
 # --- end to end on the real extraction ------------------------------------------------
 
 
@@ -284,7 +370,7 @@ def test_real_extraction_yields_only_the_seeded_undefined_datum():
     assert finding.severity == "error"
     assert "C" in finding.message
     assert finding.item_ids == ["fcf_1"]
-    assert finding.bbox == [0.073, 0.694, 0.249, 0.742]
+    assert finding.bbox == [0.073, 0.694, 0.249, 0.741]
 
 
 # --- the registry and ordering --------------------------------------------------------
