@@ -24,7 +24,7 @@ always produces the same verdicts. No rule outcome is ever read out of a model r
 
 ## 3. Pipeline — PARTLY BUILT
 
-Render and Extract work today; every stage after them is still planned.
+Render, Extract, and Check work today; the stages between and after them are still planned.
 
 ```mermaid
 flowchart TD
@@ -46,7 +46,7 @@ Stage notes:
 | Render | PDF page rasterized to an image the model can see, via `render.load_pages` | **BUILT** |
 | Extract | Model returns a JSON object; parsed by `llm_parsing.extract_json`. Runs today via `scripts/extract_spike.py`; not yet wired into an app | **BUILT** |
 | Confirm | User reviews and edits the extracted values before any checking | PLANNED |
-| Check | Python rules produce pass/fail per rule, with no model involvement | PLANNED |
+| Check | Python rules produce pass/fail per rule, with no model involvement, via `rules.run_rules` | **BUILT** |
 | Correct | Agent proposes a fix, rules re-run to verify it; **max 3 rounds**, then stop | PLANNED |
 | Output | Annotated PDF with redline markup and a findings list | PLANNED |
 
@@ -63,7 +63,7 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/render.py` | `load_pages(path, dpi, max_side)` rasterizes a PDF with pypdfium2 or loads a PNG/JPG with pillow; returns `PageImage` (PNG bytes, width, height) per page, scaled down to `max_side` | **BUILT** |
 | `draftcheck/prompts.py` | `EXTRACTION_SYSTEM` and `EXTRACTION_USER`: the model is a transcription engine that reports what is printed and never invents or repairs a callout; the user prompt fixes the JSON key set and the field rules. Correction wording still to come | **BUILT** |
 | `draftcheck/schema.py` | pydantic v2 models for the extracted drawing (`Drawing`, `Dimension`, `FCF`, `DatumFeature`, `DatumRef`, `TitleBlock`, `GeneralTolerance`) and for rule output (`Finding`); `Units` and the 14-value `Characteristic` enum, plus `FORM_CONTROLS`. `parse_drawing(data)` validates a raw extraction dict: unknown keys are ignored, missing ids become `D1…`/`F1…`, and any item it cannot read is dropped into `Drawing.parse_issues` | **BUILT** |
-| `draftcheck/rules.py` | Deterministic rule functions; each carries a `source` field citing the reference | PLANNED |
+| `draftcheck/rules.py` | `Rule` dataclass (id, title, category, severity, `source`, `check`), the `RULES` registry, and `run_rules(drawing)`. Five rules today — see §4.1. Output is sorted by rule id then item ids, so the same drawing always gives the same list | **BUILT** |
 | `draftcheck/agent.py` | Correction loop: propose, re-check, stop at 3 rounds | PLANNED |
 | `draftcheck/redline.py` | Overlays markup on the original PDF; library to be chosen in Layer 2 | PLANNED |
 | `draftcheck/api.py` | FastAPI app: upload, confirm, results endpoints | PLANNED |
@@ -74,6 +74,25 @@ reported unresolved rather than retried indefinitely.
 
 Rule text is always written in our own words with a `source` citation — no standards text
 is copied into the code.
+
+### 4.1 Rules in `rules.py` — BUILT
+
+| Id | Title | Category | Severity | What it catches |
+| --- | --- | --- | --- | --- |
+| GDT-001 | Undefined datum | gdt | error | A feature control frame cites a datum letter that no datum feature symbol on the drawing defines, so the tolerance cannot be measured. One finding per frame per missing letter |
+| GDT-002 | Duplicate datum | gdt | error | The same datum letter is defined more than once, so two features both claim it and an inspector cannot tell which to measure from |
+| GDT-003 | Form control with datum | gdt | error | A control in `FORM_CONTROLS` (flatness, straightness, circularity, cylindricity) carries datum references. A form control describes one feature's own shape, so a datum on it has no meaning |
+| GDT-004 | Position without basic dimensions | gdt | error | The drawing has a position tolerance but no basic dimensions anywhere, so no true location is established. **Drawing-level, not per-feature** — see the limitation below |
+| DIM-001 | Missing units or general tolerance | dimensioning | error | Units are absent; and/or there is no general tolerance while some dimension carries none of its own and is neither basic nor reference, leaving it with no permitted range. Reports the two problems as separate findings |
+
+Every finding names the offending item's id(s) and its bounding box, so the redline stage
+can draw it in the right place. Datum feature symbols have no id of their own in the
+schema, so GDT-002 refers to them positionally as `datum[0]`, `datum[1]`, …
+
+Known limitation — GDT-004 only asks whether the drawing has any basic dimensions at all.
+It cannot yet tell whether the basic dimensions present actually locate the feature a given
+position frame applies to; that needs the `from_ref`/`to_ref` links, which extraction does
+not fill in reliably today.
 
 ## 5. Repo layout (what exists today)
 
@@ -91,6 +110,7 @@ draftCheck/
 │   ├── llm_parsing.py          # BUILT
 │   ├── prompts.py              # BUILT
 │   ├── render.py               # BUILT
+│   ├── rules.py                # BUILT
 │   └── schema.py               # BUILT
 ├── samples/
 │   └── generated/              # synthetic drawings, regenerable from scripts/
@@ -110,6 +130,7 @@ draftCheck/
 │   ├── test_llm_client.py
 │   ├── test_llm_parsing.py
 │   ├── test_render.py
+│   ├── test_rules.py
 │   ├── test_sample_drawing.py
 │   └── test_schema.py
 ├── CLAUDE.md                   # working rules for Claude Code
@@ -139,13 +160,14 @@ draftCheck/
 | 2026-10-28 | Branch protection with required CI and no required review | Solo developer, so CI is the gate instead of a reviewer |
 | 2026-10-28 | `.env` lives at the repo root; config uses `find_dotenv` to locate it from any worktree | One secret file, never committed, works from the main folder and Claude Code worktrees |
 | 2026-10-28 | Extraction spike passed on plate_001: 6/6 dimensions, FCF correct, seeded undefined-datum error preserved | Confirms Muse Spark Open transcribes faithfully; proceed with schema and rule engine |
+| 2026-10-29 | Rules are a registry of `Rule` dataclasses, and `run_rules` sorts its output by rule id then item ids | A fixed order means two runs over the same drawing are directly comparable, which is what the correction loop needs to tell whether a proposed fix actually cleared a finding |
 | 2026-10-29 | Lenient parsing: bad bboxes become None, unknown units become None, and an item that cannot be read at all is dropped and recorded in `Drawing.parse_issues` instead of failing the parse | Model output is imperfect; the user confirms data in the UI, and rules flag missing values instead of crashing. One unreadable callout must not cost us the rest of the drawing, and `parse_issues` keeps the loss visible rather than silent |
 
 ## 8. Status
 
 | Layer | What it covers | State |
 | --- | --- | --- |
-| 1 | Extraction + JSON schema + rule engine + test generator | IN PROGRESS — BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`. LEFT: `rules.py` |
+| 1 | Extraction + JSON schema + rule engine + test generator | BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`, `rules.py` with 5 rules. More rules can be added to the registry as the sample set grows |
 | 2 | Agent correction loop + redlined PDF | PLANNED |
 | 3 | Web UI + live deploy | PLANNED |
 | 4 | After hackathon: SAM 3.1 precision, revisions, link to Research Paper Recommender | PLANNED (post-hackathon) |
