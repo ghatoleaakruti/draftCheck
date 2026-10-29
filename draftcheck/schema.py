@@ -134,6 +134,7 @@ class TitleBlock(Base):
 class DatumFeature(Base):
     """A datum feature symbol placed on the drawing, e.g. the box labelled A."""
 
+    id: str | None = None
     label: Label
     bbox: BBox = None
     confidence: float | None = None
@@ -291,7 +292,14 @@ class Drawing(Base):
 
     @model_validator(mode="after")
     def _assign_ids(self) -> "Drawing":
-        """Give every dimension and frame an id, so findings can point at one item."""
+        """Give every datum, dimension, and frame an id, so findings point at one item.
+
+        Datum ids are assigned per symbol, not per label, so two symbols that both claim
+        label A still get distinct ids and a duplicate-datum finding can name them both.
+        """
+        for index, datum in enumerate(self.datums, start=1):
+            if not datum.id:
+                datum.id = f"DT{index}"
         for index, dimension in enumerate(self.dimensions, start=1):
             if not dimension.id:
                 dimension.id = f"D{index}"

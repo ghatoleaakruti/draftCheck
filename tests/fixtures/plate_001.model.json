@@ -15,8 +15,8 @@
     {
       "label": "A",
       "bbox": [
-        0.441,
-        0.558,
+        0.44,
+        0.575,
         0.469,
         0.608
       ],
@@ -26,9 +26,9 @@
       "label": "B",
       "bbox": [
         0.214,
-        0.3,
+        0.301,
         0.253,
-        0.333
+        0.332
       ],
       "confidence": 0.99
     }
@@ -45,11 +45,13 @@
       "is_reference": false,
       "tol_plus": null,
       "tol_minus": null,
+      "from_ref": "left_edge",
+      "to_ref": "hole_2_center",
       "bbox": [
-        0.439,
+        0.25,
         0.058,
-        0.471,
-        0.085
+        0.662,
+        0.088
       ],
       "confidence": 0.99
     },
@@ -64,11 +66,13 @@
       "is_reference": false,
       "tol_plus": null,
       "tol_minus": null,
+      "from_ref": "left_edge",
+      "to_ref": "hole_1_center",
       "bbox": [
-        0.302,
-        0.102,
-        0.322,
-        0.128
+        0.252,
+        0.101,
+        0.356,
+        0.132
       ],
       "confidence": 0.99
     },
@@ -83,13 +87,15 @@
       "is_reference": false,
       "tol_plus": 0.2,
       "tol_minus": 0.2,
+      "from_ref": "bottom_edge",
+      "to_ref": "top_edge",
       "bbox": [
-        0.182,
-        0.33,
-        0.197,
-        0.395
+        0.178,
+        0.162,
+        0.246,
+        0.565
       ],
-      "confidence": 0.98
+      "confidence": 0.99
     },
     {
       "id": "dim_4",
@@ -102,13 +108,15 @@
       "is_reference": false,
       "tol_plus": 0.2,
       "tol_minus": 0.2,
+      "from_ref": "left_edge",
+      "to_ref": "right_edge",
       "bbox": [
-        0.492,
-        0.612,
-        0.532,
-        0.63
+        0.25,
+        0.61,
+        0.76,
+        0.642
       ],
-      "confidence": 0.98
+      "confidence": 0.99
     },
     {
       "id": "dim_5",
@@ -121,11 +129,13 @@
       "is_reference": false,
       "tol_plus": null,
       "tol_minus": null,
+      "from_ref": "bottom_edge",
+      "to_ref": "hole_2_center",
       "bbox": [
-        0.803,
-        0.442,
-        0.822,
-        0.478
+        0.762,
+        0.36,
+        0.829,
+        0.565
       ],
       "confidence": 0.99
     },
@@ -140,8 +150,10 @@
       "is_reference": false,
       "tol_plus": 0.1,
       "tol_minus": 0.1,
+      "from_ref": null,
+      "to_ref": null,
       "bbox": [
-        0.076,
+        0.074,
         0.658,
         0.148,
         0.678
@@ -175,9 +187,9 @@
         0.073,
         0.694,
         0.249,
-        0.742
+        0.741
       ],
-      "confidence": 0.97
+      "confidence": 0.98
     }
   ],
   "notes": []

@@ -60,6 +60,8 @@ Transcribe every annotation on this drawing into one JSON object with exactly th
       "is_reference": boolean,
       "tol_plus": number or null,
       "tol_minus": number or null,
+      "from_ref": string or null,
+      "to_ref": string or null,
       "bbox": [x0, y0, x1, y1],
       "confidence": number
     }
@@ -93,6 +95,16 @@ such prefix, quantity is 1.
 - tol_plus and tol_minus: positive magnitudes, never signed. "+0.2 / -0.1" gives \
 tol_plus 0.2 and tol_minus 0.1. "±0.05" gives 0.05 for both. If the dimension carries \
 no tolerance of its own, both are null.
+- from_ref and to_ref: the two things the dimension measures between — where its \
+extension lines land. Use exactly one of these values for each:
+    "left_edge", "right_edge", "top_edge", "bottom_edge" — an outer edge of the part
+    "hole_N_center" — the centre of a hole, numbering the holes left to right, then \
+top to bottom, so the leftmost hole in the top row is "hole_1_center"
+    "datum_X" — a datum feature symbol, where X is its letter, e.g. "datum_A"
+    null — when you cannot tell what the dimension measures between
+  When a dimension starts or ends at a physical edge of the part, use the edge name \
+even if that same edge also carries a datum feature symbol. Report what you see the \
+extension lines touching; do not reason about what the dimension ought to measure.
 - characteristic: the GD&T characteristic name as you read the symbol, e.g. "position", \
 "flatness", "perpendicularity", "profile of a surface".
 - diameter_zone: true when the tolerance compartment shows a Ø before the value.
