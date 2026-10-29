@@ -60,8 +60,8 @@ reported unresolved rather than retried indefinitely.
 | Module | Role | Status |
 | --- | --- | --- |
 | `draftcheck/llm_parsing.py` | Pulls a single JSON object out of model output; strips `<think>` blocks and code fences; raises `JSONParseError` with the raw text attached | **BUILT** |
-| `draftcheck/config.py` | Locates `.env` with `find_dotenv` and builds a frozen `Provider` (name, base_url, model, api_key); raises `ConfigError` naming any missing variable, and masks the key in `repr` | **BUILT** |
-| `draftcheck/llm_client.py` | `LLMClient.chat(system, user)` over the OpenAI-compatible Baseten endpoint at `temperature=0`; `chat_json(system, user, images)` additionally sends PNG pages as `image_url` data URIs, parses the reply with `extract_json`, and retries once on `JSONParseError`. Both return latency, token usage, and model id | **BUILT** |
+| `draftcheck/config.py` | Locates `.env` with `find_dotenv` and builds a frozen `Provider` (name, base_url, model, api_key) for one of the providers in `PROVIDER_ENV_VARS` — see §4.4; raises `ConfigError` naming any missing variable, and masks the key in `repr` | **BUILT** |
+| `draftcheck/llm_client.py` | `LLMClient.chat(system, user)` over the configured provider's OpenAI-compatible endpoint at `temperature=0`; `chat_json(system, user, images)` additionally sends PNG pages as `image_url` data URIs, parses the reply with `extract_json`, and retries once on `JSONParseError`. Both return latency, token usage, and model id | **BUILT** |
 | `draftcheck/render.py` | `load_pages(path, dpi, max_side)` rasterizes a PDF with pypdfium2 or loads a PNG/JPG with pillow; returns `PageImage` (PNG bytes, width, height) per page, scaled down to `max_side` | **BUILT** |
 | `draftcheck/prompts.py` | `EXTRACTION_SYSTEM` and `EXTRACTION_USER`: the model is a transcription engine that reports what is printed and never invents or repairs a callout; the user prompt fixes the JSON key set and the field rules, including each dimension's `from_ref`/`to_ref` endpoints (§4.2). Correction wording still to come | **BUILT** |
 | `draftcheck/schema.py` | pydantic v2 models for the extracted drawing (`Drawing`, `Dimension`, `FCF`, `DatumFeature`, `DatumRef`, `TitleBlock`, `GeneralTolerance`) and for rule output (`Finding`); `Units` and the 14-value `Characteristic` enum, plus `FORM_CONTROLS`. `parse_drawing(data)` validates a raw extraction dict: unknown keys are ignored, missing ids become `DT1…`/`D1…`/`F1…` (datums, dimensions, frames), and any item it cannot read is dropped into `Drawing.parse_issues` | **BUILT** |
@@ -73,7 +73,7 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/api.py` | FastAPI app: upload, confirm, results endpoints | PLANNED |
 | `frontend/` | Upload page, extraction review/edit screen, findings view | PLANNED |
 | `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch. The ground truth is written in `schema.py`'s field names — plus `bbox_convention` and `seeded_errors` — so it parses as a `Drawing` and doubles as the target an extraction is scored against | **BUILT** |
-| `scripts/smoke_test.py` | One-shot check that the configured model answers over the network | **BUILT** |
+| `scripts/smoke_test.py` | One-shot check that the configured model answers over the network; `--provider baseten\|meta` picks which one | **BUILT** |
 | `scripts/extract_spike.py` | One extraction pass on a drawing: renders it, calls `chat_json`, and writes `outputs/spike/<name>.raw.txt`, `.json`, and `.overlay.png` (red boxes = model bboxes, green = ground truth from `--gt`). A look-at-it tool; it decides nothing | **BUILT** |
 
 Rule text is always written in our own words with a `source` citation — no standards text
@@ -133,8 +133,12 @@ including both overall sizes and both hole locations.
 ### 4.3 The `check` command — BUILT
 
 ```
-python -m draftcheck.cli check <drawing> [--from-json path] [--out dir] [--dpi n]
+python -m draftcheck.cli check <drawing> [--from-json path] [--provider baseten|meta]
+                                         [--out dir] [--dpi n]
 ```
+
+`--provider` chooses the model to call (§4.4); with no flag it follows `LLM_PROVIDER` in
+`.env`. The run prints the provider and the model id before calling.
 
 `--from-json` loads a saved extraction instead of calling the model, which makes a run
 free, offline, and repeatable; it is how the CLI tests exercise the whole command. The
@@ -158,6 +162,7 @@ A real run on 2026-10-29, against `meta-models/muse-spark-open-1026`:
 ```
 $ python -m draftcheck.cli check samples/generated/plate_001.pdf
 Drawing:  samples/generated/plate_001.pdf
+Provider: baseten
 Model:    meta-models/muse-spark-open-1026
 Calling the model...
 Latency:  24.70s  (attempts: 1)
@@ -172,6 +177,45 @@ Wrote extraction.json, findings.json, raw.txt to outputs/runs/plate_001/
 
 That is the error seeded into plate_001 by `scripts/make_sample_drawing.py`, found end to
 end from the PDF with no hand-edited input — the first full Render → Extract → Check pass.
+
+### 4.4 Two providers — BUILT
+
+Both endpoints are OpenAI-compatible, so one `LLMClient` serves both and nothing above
+`config.py` knows which is in use. `PROVIDER_ENV_VARS` maps a provider name to the three
+variables it needs; `get_provider(name)` takes the name as an argument, falling back to
+`LLM_PROVIDER` and then to `baseten`. Only the chosen provider's variables are required, so
+Meta runs do not need Baseten configured.
+
+| Provider | Model | Variables | Role |
+| --- | --- | --- | --- |
+| `baseten` | `meta-models/muse-spark-open-1026` | `BASETEN_BASE_URL`, `BASETEN_MODEL`, `BASETEN_API_KEY` | **Default.** Open-weight, keeps us eligible for the open-weight bonus prize |
+| `meta` | `muse-spark-1.2` (standard tier) | `META_BASE_URL`, `META_MODEL`, `META_API_KEY` | Comparison model via the Meta Model API |
+
+#### Comparison on plate_001 — 2026-10-29
+
+Same drawing, same prompts, same 200 DPI render; one run each.
+
+| | Baseten (muse-spark-open-1026) | Meta (muse-spark-1.2) |
+| --- | --- | --- |
+| Latency | 17.49 s | 11.44 s |
+| Attempts to valid JSON | 1 | 1 |
+| Dimensions found | 6 / 6 | 6 / 6 |
+| Dimension values | all correct | identical to Baseten |
+| `from_ref` / `to_ref` | 5 of 6 filled, Ø8 left null | identical to Baseten |
+| Per-dimension tolerances | none printed, none invented | same |
+| General tolerance + units | ±0.1, mm | same |
+| FCF | 1: position 0.25 MMC, datums A\|B\|C | same |
+| Datums defined | 2 (A, B) | same |
+| Title block | all 5 fields correct | same |
+| `parse_issues` | none | none |
+| Findings | GDT-001 error on `fcf_1` | same |
+
+Every field the rules read came out the same, so both models produce the same verdict on
+this drawing. The only differences are bounding boxes and confidence values: Meta boxes the
+dimension *text* tightly, while Baseten often boxes the whole dimension line plus its text
+(for the 100 mm overall, `0.25–0.662` wide against Meta's `0.442–0.482`). That matters only
+for redline placement, not for any rule today. One drawing is not an evaluation — this is a
+baseline to widen as the sample set grows.
 
 ## 5. Repo layout (what exists today)
 
@@ -250,6 +294,7 @@ draftCheck/
 | 2026-10-29 | The run logic lives in `pipeline.py`; `cli.py` only parses arguments, prints, and sets the exit code | The FastAPI layer needs the same two steps without a terminal attached. Keeping printing out of `pipeline` means the API can import it as-is instead of the CLI growing a second copy of the flow |
 | 2026-10-29 | `extract` sends page 1 only | Every sample is a single sheet, and sending every page of a long PDF would spend tokens nobody asked for. Multi-page sheets are a later decision, not an accidental default |
 | 2026-10-29 | `check` exits 1 on error-severity findings, 2 on a failed run, and still renders the drawing under `--from-json` | A reviewer needs "the drawing is wrong" and "the tool broke" to be different outcomes, which a single non-zero code cannot express. Rendering even when the extraction is loaded from disk stops a typo'd drawing path from quietly passing |
+| 2026-10-29 | Muse Spark Open on Baseten stays the default; Muse Spark (muse-spark-1.2, standard tier) via Meta Model API as comparison model | Open-weight bonus eligibility; comparison strengthens evaluation; standard tier keeps prompts out of training |
 | 2026-10-29 | Lenient parsing: bad bboxes become None, unknown units become None, and an item that cannot be read at all is dropped and recorded in `Drawing.parse_issues` instead of failing the parse | Model output is imperfect; the user confirms data in the UI, and rules flag missing values instead of crashing. One unreadable callout must not cost us the rest of the drawing, and `parse_issues` keeps the loss visible rather than silent |
 
 ## 8. Status

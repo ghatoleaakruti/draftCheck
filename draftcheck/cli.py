@@ -3,6 +3,10 @@
     python -m draftcheck.cli check samples/generated/plate_001.pdf
     python -m draftcheck.cli check samples/generated/plate_001.pdf \
         --from-json tests/fixtures/plate_001.model.json
+    python -m draftcheck.cli check samples/generated/plate_001.pdf --provider meta
+
+``--provider`` picks between the configured providers (``baseten`` or ``meta``); with no
+flag the provider comes from ``LLM_PROVIDER`` in ``.env``.
 
 ``--from-json`` loads a saved extraction instead of calling the model, which makes a run
 free, offline, and repeatable. It is how the tests exercise the whole command.
@@ -22,7 +26,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from draftcheck.config import ConfigError
+from draftcheck.config import SUPPORTED_PROVIDERS, ConfigError, get_provider
 from draftcheck.llm_client import LLMClient
 from draftcheck.llm_parsing import JSONParseError
 from draftcheck.pipeline import ExtractionResult, check, extract
@@ -95,9 +99,10 @@ def _print_summary(findings: list[Finding], drawing: Drawing) -> None:
     print(f"{errors} error(s), {warnings} warning(s).")
 
 
-def _run_model(drawing_path: Path, dpi: int) -> ExtractionResult:
+def _run_model(drawing_path: Path, dpi: int, provider_name: str | None) -> ExtractionResult:
     """Build a real client and run one extraction pass, reporting progress as it goes."""
-    client = LLMClient()
+    client = LLMClient(provider=get_provider(provider_name))
+    print(f"Provider: {client.provider.name}")
     print(f"Model:    {client.provider.model}")
     print("Calling the model...")
     return extract(drawing_path, client, dpi=dpi)
@@ -119,7 +124,7 @@ def run_check(args: argparse.Namespace) -> int:
             print(f"Source:   {args.from_json} (model not called)")
         else:
             print(f"Drawing:  {drawing_path}")
-            extraction = _run_model(drawing_path, args.dpi)
+            extraction = _run_model(drawing_path, args.dpi, args.provider)
             drawing = extraction.drawing
     except RenderError as exc:
         print(f"Could not read the drawing: {exc}", file=sys.stderr)
@@ -171,6 +176,12 @@ def build_parser() -> argparse.ArgumentParser:
     check_parser.add_argument(
         "--out",
         help=f"Directory for the run's output files. Default: {DEFAULT_OUTPUT_ROOT}/<name>/",
+    )
+    check_parser.add_argument(
+        "--provider",
+        choices=SUPPORTED_PROVIDERS,
+        default=None,
+        help="Which provider to call. Default: the LLM_PROVIDER value in .env.",
     )
     check_parser.add_argument("--dpi", type=int, default=200, help="PDF rasterization DPI.")
     check_parser.set_defaults(handler=run_check)
