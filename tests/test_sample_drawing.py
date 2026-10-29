@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts.make_sample_drawing import build
+from draftcheck.schema import Units, parse_drawing
+from scripts.make_sample_drawing import MARGIN, PAGE_H, PAGE_W, build
 
 EXPECTED_DIM_IDS = {
     "dim_overall_width",
@@ -41,12 +42,25 @@ def test_pdf_is_a_pdf(generated: dict[str, Path]) -> None:
 
 
 def test_sheet_metadata(ground_truth: dict) -> None:
-    assert ground_truth["units"] == "millimeters"
-    assert ground_truth["general_tolerance"] == {"plus": 0.1, "minus": 0.1}
-    assert ground_truth["drawing_id"] == "DC-0001"
-    assert ground_truth["revision"] == "A"
-    assert ground_truth["material"] == "AL 6061-T6"
-    assert ground_truth["scale"] == "1:1"
+    assert ground_truth["units"] == "mm"
+    assert ground_truth["general_tolerance"]["linear_plus_minus"] == 0.1
+    assert ground_truth["title_block"] == {
+        "title": "BRACKET PLATE",
+        "drawing_number": "DC-0001",
+        "revision": "A",
+        "material": "AL 6061-T6",
+        "scale": "1:1",
+    }
+
+
+def test_ground_truth_parses_against_the_schema(ground_truth: dict) -> None:
+    """The ground truth is written in the schema's field names, so it parses cleanly."""
+    drawing = parse_drawing(ground_truth)
+    assert drawing.parse_issues == []
+    assert drawing.units == Units.MM
+    assert len(drawing.dimensions) == 6
+    assert len(drawing.fcfs) == 1
+    assert [datum.label for datum in drawing.datums] == ["A", "B"]
 
 
 def test_has_six_dimensions(ground_truth: dict) -> None:
@@ -62,9 +76,9 @@ def test_every_dimension_is_fully_described(ground_truth: dict) -> None:
         assert dim["quantity"] >= 1, dim["id"]
         # A basic dimension carries no tolerance; a toleranced one must have both limits.
         if dim["is_basic"]:
-            assert dim["tolerance"] is None, dim["id"]
+            assert dim["tol_plus"] is None and dim["tol_minus"] is None, dim["id"]
         else:
-            assert set(dim["tolerance"]) == {"plus", "minus"}, dim["id"]
+            assert dim["tol_plus"] > 0 and dim["tol_minus"] > 0, dim["id"]
 
 
 def test_basic_dimensions_are_the_locating_ones(ground_truth: dict) -> None:
@@ -76,18 +90,18 @@ def test_hole_note_covers_two_holes(ground_truth: dict) -> None:
     hole = next(d for d in ground_truth["dimensions"] if d["id"] == "dim_hole_diameter")
     assert hole["quantity"] == 2
     assert hole["value"] == 8.0
-    assert hole["kind"] == "diameter"
+    assert hole["feature_type"] == "diameter"
 
 
 def test_has_one_feature_control_frame(ground_truth: dict) -> None:
-    frames = ground_truth["feature_control_frames"]
+    frames = ground_truth["fcfs"]
     assert len(frames) == 1
     fcf = frames[0]
     assert fcf["characteristic"] == "position"
-    assert fcf["tolerance_value"] == 0.25
+    assert fcf["tolerance"] == 0.25
     assert fcf["diameter_zone"] is True
-    assert fcf["material_condition"] == "MMC"
-    assert fcf["datum_references"] == ["A", "B", "C"]
+    assert fcf["material_modifier"] == "MMC"
+    assert [ref["label"] for ref in fcf["datum_refs"]] == ["A", "B", "C"]
 
 
 def test_only_datums_a_and_b_are_defined(ground_truth: dict) -> None:
@@ -103,15 +117,16 @@ def test_seeded_error_is_the_missing_datum_c(ground_truth: dict) -> None:
 
     # The error must be real: the FCF cites a datum that no datum symbol defines.
     defined = {datum["label"] for datum in ground_truth["datums"]}
-    referenced = set(ground_truth["feature_control_frames"][0]["datum_references"])
+    referenced = {ref["label"] for ref in ground_truth["fcfs"][0]["datum_refs"]}
     assert referenced - defined == {"C"}
 
 
 def _iter_bboxes(ground_truth: dict):
     """Yield (label, bbox) for every item in the ground truth that carries one."""
-    for key in ("datums", "dimensions", "feature_control_frames", "seeded_errors"):
-        for item in ground_truth[key]:
-            yield item["id"], item["bbox"]
+    for key in ("datums", "dimensions", "fcfs", "seeded_errors"):
+        for item in ground_truth.get(key, []):
+            # Datums are identified by their label; everything else carries an id.
+            yield item.get("id") or item["label"], item["bbox"]
 
 
 def test_every_item_has_a_bbox(ground_truth: dict) -> None:
@@ -119,20 +134,19 @@ def test_every_item_has_a_bbox(ground_truth: dict) -> None:
     assert len(labels) == 2 + 6 + 1 + 1
 
 
-@pytest.mark.parametrize("key", ["datums", "dimensions", "feature_control_frames"])
+@pytest.mark.parametrize("key", ["datums", "dimensions", "fcfs"])
 def test_bboxes_are_valid(ground_truth: dict, key: str) -> None:
-    for item in ground_truth[key]:
-        bbox = item["bbox"]
-        assert len(bbox) == 4, item["id"]
+    for label, bbox in _iter_bboxes({key: ground_truth[key]}):
+        assert len(bbox) == 4, label
         x0, y0, x1, y1 = bbox
-        assert 0.0 <= x0 < x1 <= 1.0, (item["id"], bbox)
-        assert 0.0 <= y0 < y1 <= 1.0, (item["id"], bbox)
+        assert 0.0 <= x0 < x1 <= 1.0, (label, bbox)
+        assert 0.0 <= y0 < y1 <= 1.0, (label, bbox)
 
 
 def test_bboxes_sit_inside_the_sheet_border(ground_truth: dict) -> None:
     """Nothing should be drawn in the 20 pt margin outside the border."""
-    margin_x = 20.0 / ground_truth["page"]["width_pt"]
-    margin_y = 20.0 / ground_truth["page"]["height_pt"]
+    margin_x = MARGIN / PAGE_W
+    margin_y = MARGIN / PAGE_H
     for label, (x0, y0, x1, y1) in _iter_bboxes(ground_truth):
         assert x0 >= margin_x, label
         assert y0 >= margin_y, label

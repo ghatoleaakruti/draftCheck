@@ -1,0 +1,184 @@
+{
+  "units": "MILLIMETERS",
+  "general_tolerance": {
+    "linear_plus_minus": 0.1,
+    "text_raw": "UNLESS OTHERWISE SPECIFIED: ±0.1"
+  },
+  "title_block": {
+    "title": "BRACKET PLATE",
+    "drawing_number": "DC-0001",
+    "revision": "A",
+    "material": "AL 6061-T6",
+    "scale": "1:1"
+  },
+  "datums": [
+    {
+      "label": "A",
+      "bbox": [
+        0.441,
+        0.558,
+        0.469,
+        0.608
+      ],
+      "confidence": 0.99
+    },
+    {
+      "label": "B",
+      "bbox": [
+        0.214,
+        0.3,
+        0.253,
+        0.333
+      ],
+      "confidence": 0.99
+    }
+  ],
+  "dimensions": [
+    {
+      "id": "dim_1",
+      "text_raw": "80",
+      "value": 80,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": true,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "bbox": [
+        0.439,
+        0.058,
+        0.471,
+        0.085
+      ],
+      "confidence": 0.99
+    },
+    {
+      "id": "dim_2",
+      "text_raw": "20",
+      "value": 20,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": true,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "bbox": [
+        0.302,
+        0.102,
+        0.322,
+        0.128
+      ],
+      "confidence": 0.99
+    },
+    {
+      "id": "dim_3",
+      "text_raw": "60 ±0.2",
+      "value": 60,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.2,
+      "tol_minus": 0.2,
+      "bbox": [
+        0.182,
+        0.33,
+        0.197,
+        0.395
+      ],
+      "confidence": 0.98
+    },
+    {
+      "id": "dim_4",
+      "text_raw": "100 ±0.2",
+      "value": 100,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.2,
+      "tol_minus": 0.2,
+      "bbox": [
+        0.492,
+        0.612,
+        0.532,
+        0.63
+      ],
+      "confidence": 0.98
+    },
+    {
+      "id": "dim_5",
+      "text_raw": "30",
+      "value": 30,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": true,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "bbox": [
+        0.803,
+        0.442,
+        0.822,
+        0.478
+      ],
+      "confidence": 0.99
+    },
+    {
+      "id": "dim_6",
+      "text_raw": "2X Ø8 ±0.1",
+      "value": 8,
+      "unit": null,
+      "feature_type": "diameter",
+      "quantity": 2,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.1,
+      "tol_minus": 0.1,
+      "bbox": [
+        0.076,
+        0.658,
+        0.148,
+        0.678
+      ],
+      "confidence": 0.98
+    }
+  ],
+  "fcfs": [
+    {
+      "id": "fcf_1",
+      "text_raw": "⌖ Ø0.25 Ⓜ A B C",
+      "characteristic": "position",
+      "tolerance": 0.25,
+      "diameter_zone": true,
+      "material_modifier": "MMC",
+      "datum_refs": [
+        {
+          "label": "A",
+          "modifier": null
+        },
+        {
+          "label": "B",
+          "modifier": null
+        },
+        {
+          "label": "C",
+          "modifier": null
+        }
+      ],
+      "bbox": [
+        0.073,
+        0.694,
+        0.249,
+        0.742
+      ],
+      "confidence": 0.97
+    }
+  ],
+  "notes": []
+}
