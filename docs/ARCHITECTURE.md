@@ -22,7 +22,9 @@ facts, and turning a rule violation into wording a person can act on. Whether a 
 passes is always computed in plain Python from the extracted data, so the same drawing
 always produces the same verdicts. No rule outcome is ever read out of a model response.
 
-## 3. Pipeline — PLANNED
+## 3. Pipeline — PARTLY BUILT
+
+Render and Extract work today; every stage after them is still planned.
 
 ```mermaid
 flowchart TD
@@ -41,8 +43,8 @@ Stage notes:
 
 | Stage | What happens | Status |
 | --- | --- | --- |
-| Render | PDF page rasterized to an image the model can see | PLANNED |
-| Extract | Model returns a JSON object; parsed by `llm_parsing.extract_json` | PLANNED (parser BUILT) |
+| Render | PDF page rasterized to an image the model can see, via `render.load_pages` | **BUILT** |
+| Extract | Model returns a JSON object; parsed by `llm_parsing.extract_json`. Runs today via `scripts/extract_spike.py`; not yet wired into an app | **BUILT** |
 | Confirm | User reviews and edits the extracted values before any checking | PLANNED |
 | Check | Python rules produce pass/fail per rule, with no model involvement | PLANNED |
 | Correct | Agent proposes a fix, rules re-run to verify it; **max 3 rounds**, then stop | PLANNED |
@@ -57,9 +59,9 @@ reported unresolved rather than retried indefinitely.
 | --- | --- | --- |
 | `draftcheck/llm_parsing.py` | Pulls a single JSON object out of model output; strips `<think>` blocks and code fences; raises `JSONParseError` with the raw text attached | **BUILT** |
 | `draftcheck/config.py` | Locates `.env` with `find_dotenv` and builds a frozen `Provider` (name, base_url, model, api_key); raises `ConfigError` naming any missing variable, and masks the key in `repr` | **BUILT** |
-| `draftcheck/llm_client.py` | `LLMClient.chat(system, user)` over the OpenAI-compatible Baseten endpoint at `temperature=0`; returns reply text, latency, token usage, and model id | **BUILT** |
+| `draftcheck/llm_client.py` | `LLMClient.chat(system, user)` over the OpenAI-compatible Baseten endpoint at `temperature=0`; `chat_json(system, user, images)` additionally sends PNG pages as `image_url` data URIs, parses the reply with `extract_json`, and retries once on `JSONParseError`. Both return latency, token usage, and model id | **BUILT** |
 | `draftcheck/render.py` | `load_pages(path, dpi, max_side)` rasterizes a PDF with pypdfium2 or loads a PNG/JPG with pillow; returns `PageImage` (PNG bytes, width, height) per page, scaled down to `max_side` | **BUILT** |
-| `draftcheck/prompts.py` | Prompt text for extraction and for correction wording | PLANNED |
+| `draftcheck/prompts.py` | `EXTRACTION_SYSTEM` and `EXTRACTION_USER`: the model is a transcription engine that reports what is printed and never invents or repairs a callout; the user prompt fixes the JSON key set and the field rules. Correction wording still to come | **BUILT** |
 | `draftcheck/schema.py` | pydantic models for the extracted drawing, findings, and corrections | PLANNED |
 | `draftcheck/rules.py` | Deterministic rule functions; each carries a `source` field citing the reference | PLANNED |
 | `draftcheck/agent.py` | Correction loop: propose, re-check, stop at 3 rounds | PLANNED |
@@ -68,6 +70,7 @@ reported unresolved rather than retried indefinitely.
 | `frontend/` | Upload page, extraction review/edit screen, findings view | PLANNED |
 | `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch | **BUILT** |
 | `scripts/smoke_test.py` | One-shot check that the configured model answers over the network | **BUILT** |
+| `scripts/extract_spike.py` | One extraction pass on a drawing: renders it, calls `chat_json`, and writes `outputs/spike/<name>.raw.txt`, `.json`, and `.overlay.png` (red boxes = model bboxes, green = ground truth from `--gt`). A look-at-it tool; it decides nothing | **BUILT** |
 
 Rule text is always written in our own words with a `source` citation — no standards text
 is copied into the code.
@@ -86,18 +89,22 @@ draftCheck/
 │   ├── config.py               # BUILT
 │   ├── llm_client.py           # BUILT
 │   ├── llm_parsing.py          # BUILT
+│   ├── prompts.py              # BUILT
 │   └── render.py               # BUILT
 ├── samples/
 │   └── generated/              # synthetic drawings, regenerable from scripts/
 │       ├── plate_001.pdf       # the drawing
 │       ├── plate_001.gt.json   # ground truth, bboxes normalized top-left 0..1
 │       └── plate_001.png       # rendered preview
+├── outputs/                    # git-ignored; spike dumps, overlays, redlined PDFs
 ├── scripts/
 │   ├── __init__.py
+│   ├── extract_spike.py        # python -m scripts.extract_spike <drawing> [--gt ...]
 │   ├── make_sample_drawing.py  # python -m scripts.make_sample_drawing
 │   └── smoke_test.py           # python -m scripts.smoke_test
 ├── tests/
 │   ├── test_config.py
+│   ├── test_llm_client.py
 │   ├── test_llm_parsing.py
 │   ├── test_render.py
 │   └── test_sample_drawing.py
@@ -127,12 +134,13 @@ draftCheck/
 | 2026-10-28 | pypdfium2 to render PDFs to images; reportlab to generate synthetic test drawings | Permissive licenses; testable locally without external services |
 | 2026-10-28 | Branch protection with required CI and no required review | Solo developer, so CI is the gate instead of a reviewer |
 | 2026-10-28 | `.env` lives at the repo root; config uses `find_dotenv` to locate it from any worktree | One secret file, never committed, works from the main folder and Claude Code worktrees |
+| 2026-10-28 | Extraction spike passed on plate_001: 6/6 dimensions, FCF correct, seeded undefined-datum error preserved | Confirms Muse Spark Open transcribes faithfully; proceed with schema and rule engine |
 
 ## 8. Status
 
 | Layer | What it covers | State |
 | --- | --- | --- |
-| 1 | Extraction + JSON schema + rule engine + test generator | IN PROGRESS — `llm_parsing.py` BUILT, rest PLANNED |
+| 1 | Extraction + JSON schema + rule engine + test generator | IN PROGRESS — BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike. LEFT: `schema.py`, `rules.py` |
 | 2 | Agent correction loop + redlined PDF | PLANNED |
 | 3 | Web UI + live deploy | PLANNED |
 | 4 | After hackathon: SAM 3.1 precision, revisions, link to Research Paper Recommender | PLANNED (post-hackathon) |
