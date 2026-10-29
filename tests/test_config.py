@@ -9,12 +9,16 @@ import pytest
 from draftcheck.config import ConfigError, Provider, get_provider
 
 REQUIRED_VARS = ("BASETEN_BASE_URL", "BASETEN_API_KEY", "BASETEN_MODEL")
+META_REQUIRED_VARS = ("META_BASE_URL", "META_API_KEY", "META_MODEL")
 
 FAKE_ENV = {
     "LLM_PROVIDER": "baseten",
     "BASETEN_BASE_URL": "https://example.invalid/v1",
     "BASETEN_API_KEY": "fake-key-not-real",
     "BASETEN_MODEL": "fake-model-id",
+    "META_BASE_URL": "https://meta.invalid/v1",
+    "META_API_KEY": "fake-meta-key-not-real",
+    "META_MODEL": "fake-meta-model-id",
 }
 
 
@@ -25,9 +29,9 @@ def fake_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(key, value)
 
 
-def load() -> Provider:
+def load(name: str | None = None) -> Provider:
     """Call get_provider without ever touching a real .env file."""
-    return get_provider(load_env=False)
+    return get_provider(name, load_env=False)
 
 
 def test_get_provider_reads_env_vars(fake_env: None) -> None:
@@ -74,6 +78,69 @@ def test_unsupported_provider_raises(fake_env: None, monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("LLM_PROVIDER", "some-other-vendor")
     with pytest.raises(ConfigError, match="some-other-vendor"):
         load()
+
+
+def test_meta_provider_reads_meta_env_vars(fake_env: None) -> None:
+    provider = load("meta")
+    assert provider.name == "meta"
+    assert provider.base_url == "https://meta.invalid/v1"
+    assert provider.api_key == "fake-meta-key-not-real"
+    assert provider.model == "fake-meta-model-id"
+
+
+def test_meta_from_llm_provider_env_var(fake_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "meta")
+    assert load().name == "meta"
+
+
+def test_argument_overrides_llm_provider_env_var(fake_env: None) -> None:
+    # LLM_PROVIDER is "baseten" in the fixture; the explicit argument must win.
+    assert load("meta").name == "meta"
+    assert load("meta").model == "fake-meta-model-id"
+
+
+@pytest.mark.parametrize("name", ["META", "  Meta  "])
+def test_provider_name_is_case_and_space_insensitive(fake_env: None, name: str) -> None:
+    assert load(name).name == "meta"
+
+
+@pytest.mark.parametrize("missing", META_REQUIRED_VARS)
+def test_missing_meta_variable_raises_naming_it(
+    fake_env: None, monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    monkeypatch.delenv(missing)
+    with pytest.raises(ConfigError) as excinfo:
+        load("meta")
+    assert missing in str(excinfo.value)
+
+
+@pytest.mark.parametrize("blank", META_REQUIRED_VARS)
+def test_blank_meta_variable_raises_naming_it(
+    fake_env: None, monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    monkeypatch.setenv(blank, "   ")
+    with pytest.raises(ConfigError) as excinfo:
+        load("meta")
+    assert blank in str(excinfo.value)
+
+
+def test_meta_does_not_require_baseten_variables(
+    fake_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for var in REQUIRED_VARS:
+        monkeypatch.delenv(var)
+    assert load("meta").name == "meta"
+
+
+def test_meta_repr_masks_api_key(fake_env: None) -> None:
+    provider = load("meta")
+    assert "fake-meta-key-not-real" not in repr(provider)
+    assert "***" in repr(provider)
+
+
+def test_unsupported_provider_argument_raises(fake_env: None) -> None:
+    with pytest.raises(ConfigError, match="some-other-vendor"):
+        load("some-other-vendor")
 
 
 def test_provider_is_frozen(fake_env: None) -> None:
