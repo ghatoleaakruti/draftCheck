@@ -3,7 +3,7 @@
 Every item below is marked **BUILT** (exists in this repo today) or **PLANNED** (designed,
 not yet written).
 
-Last updated: 2026-10-28
+Last updated: 2026-10-29
 
 ## 1. Overview
 
@@ -62,13 +62,13 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/llm_client.py` | `LLMClient.chat(system, user)` over the OpenAI-compatible Baseten endpoint at `temperature=0`; `chat_json(system, user, images)` additionally sends PNG pages as `image_url` data URIs, parses the reply with `extract_json`, and retries once on `JSONParseError`. Both return latency, token usage, and model id | **BUILT** |
 | `draftcheck/render.py` | `load_pages(path, dpi, max_side)` rasterizes a PDF with pypdfium2 or loads a PNG/JPG with pillow; returns `PageImage` (PNG bytes, width, height) per page, scaled down to `max_side` | **BUILT** |
 | `draftcheck/prompts.py` | `EXTRACTION_SYSTEM` and `EXTRACTION_USER`: the model is a transcription engine that reports what is printed and never invents or repairs a callout; the user prompt fixes the JSON key set and the field rules. Correction wording still to come | **BUILT** |
-| `draftcheck/schema.py` | pydantic models for the extracted drawing, findings, and corrections | PLANNED |
+| `draftcheck/schema.py` | pydantic v2 models for the extracted drawing (`Drawing`, `Dimension`, `FCF`, `DatumFeature`, `DatumRef`, `TitleBlock`, `GeneralTolerance`) and for rule output (`Finding`); `Units` and the 14-value `Characteristic` enum, plus `FORM_CONTROLS`. `parse_drawing(data)` validates a raw extraction dict: unknown keys are ignored, missing ids become `D1…`/`F1…`, and any item it cannot read is dropped into `Drawing.parse_issues` | **BUILT** |
 | `draftcheck/rules.py` | Deterministic rule functions; each carries a `source` field citing the reference | PLANNED |
 | `draftcheck/agent.py` | Correction loop: propose, re-check, stop at 3 rounds | PLANNED |
 | `draftcheck/redline.py` | Overlays markup on the original PDF; library to be chosen in Layer 2 | PLANNED |
 | `draftcheck/api.py` | FastAPI app: upload, confirm, results endpoints | PLANNED |
 | `frontend/` | Upload page, extraction review/edit screen, findings view | PLANNED |
-| `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch | **BUILT** |
+| `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch. The ground truth is written in `schema.py`'s field names — plus `bbox_convention` and `seeded_errors` — so it parses as a `Drawing` and doubles as the target an extraction is scored against | **BUILT** |
 | `scripts/smoke_test.py` | One-shot check that the configured model answers over the network | **BUILT** |
 | `scripts/extract_spike.py` | One extraction pass on a drawing: renders it, calls `chat_json`, and writes `outputs/spike/<name>.raw.txt`, `.json`, and `.overlay.png` (red boxes = model bboxes, green = ground truth from `--gt`). A look-at-it tool; it decides nothing | **BUILT** |
 
@@ -90,11 +90,12 @@ draftCheck/
 │   ├── llm_client.py           # BUILT
 │   ├── llm_parsing.py          # BUILT
 │   ├── prompts.py              # BUILT
-│   └── render.py               # BUILT
+│   ├── render.py               # BUILT
+│   └── schema.py               # BUILT
 ├── samples/
 │   └── generated/              # synthetic drawings, regenerable from scripts/
 │       ├── plate_001.pdf       # the drawing
-│       ├── plate_001.gt.json   # ground truth, bboxes normalized top-left 0..1
+│       ├── plate_001.gt.json   # ground truth in schema.py field names, parses as a Drawing
 │       └── plate_001.png       # rendered preview
 ├── outputs/                    # git-ignored; spike dumps, overlays, redlined PDFs
 ├── scripts/
@@ -103,11 +104,14 @@ draftCheck/
 │   ├── make_sample_drawing.py  # python -m scripts.make_sample_drawing
 │   └── smoke_test.py           # python -m scripts.smoke_test
 ├── tests/
+│   ├── fixtures/               # frozen inputs the tests parse
+│   │   └── plate_001.model.json  # real extraction output from the 2026-10-28 spike run
 │   ├── test_config.py
 │   ├── test_llm_client.py
 │   ├── test_llm_parsing.py
 │   ├── test_render.py
-│   └── test_sample_drawing.py
+│   ├── test_sample_drawing.py
+│   └── test_schema.py
 ├── CLAUDE.md                   # working rules for Claude Code
 ├── LICENSE                     # MIT
 ├── README.md
@@ -135,12 +139,13 @@ draftCheck/
 | 2026-10-28 | Branch protection with required CI and no required review | Solo developer, so CI is the gate instead of a reviewer |
 | 2026-10-28 | `.env` lives at the repo root; config uses `find_dotenv` to locate it from any worktree | One secret file, never committed, works from the main folder and Claude Code worktrees |
 | 2026-10-28 | Extraction spike passed on plate_001: 6/6 dimensions, FCF correct, seeded undefined-datum error preserved | Confirms Muse Spark Open transcribes faithfully; proceed with schema and rule engine |
+| 2026-10-29 | Lenient parsing: bad bboxes become None, unknown units become None, and an item that cannot be read at all is dropped and recorded in `Drawing.parse_issues` instead of failing the parse | Model output is imperfect; the user confirms data in the UI, and rules flag missing values instead of crashing. One unreadable callout must not cost us the rest of the drawing, and `parse_issues` keeps the loss visible rather than silent |
 
 ## 8. Status
 
 | Layer | What it covers | State |
 | --- | --- | --- |
-| 1 | Extraction + JSON schema + rule engine + test generator | IN PROGRESS — BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike. LEFT: `schema.py`, `rules.py` |
+| 1 | Extraction + JSON schema + rule engine + test generator | IN PROGRESS — BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`. LEFT: `rules.py` |
 | 2 | Agent correction loop + redlined PDF | PLANNED |
 | 3 | Web UI + live deploy | PLANNED |
 | 4 | After hackathon: SAM 3.1 precision, revisions, link to Research Paper Recommender | PLANNED (post-hackathon) |

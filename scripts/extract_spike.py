@@ -32,9 +32,9 @@ OUTPUT_DIR = Path("outputs/spike")
 MODEL_COLOR = "red"
 GROUND_TRUTH_COLOR = "green"
 
-# Ground truth files name their annotation lists differently from the model schema.
-GROUND_TRUTH_LISTS = ("datums", "dimensions", "feature_control_frames")
-MODEL_LISTS = ("datums", "dimensions", "fcfs")
+# Ground truth and model output now use the same list names, from draftcheck.schema.
+GROUND_TRUTH_LISTS = ("datums", "dimensions", "fcfs")
+MODEL_LISTS = GROUND_TRUTH_LISTS
 
 
 def _collect_boxes(payload: dict, keys: tuple[str, ...]) -> list[list[float]]:
