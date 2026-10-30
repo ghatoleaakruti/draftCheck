@@ -81,7 +81,22 @@
         <div class="columns">
           <div class="panel page-panel">
             <h2>Page 1</h2>
-            <img id="page-image" alt="The uploaded drawing, page 1, as rendered." />
+
+            <!-- On by default: the boxes are the point of the page, and a reader who
+                 wants the bare drawing can switch them off. -->
+            <label class="overlay-toggle">
+              <input id="show-overlay" type="checkbox" checked />
+              Show what Muse Spark read
+            </label>
+
+            <!-- The stage is the positioning frame for the overlay: the image sets its
+                 size, and #overlay covers exactly that. app.js fills the overlay with
+                 one box per located item, placed in percentages so the boxes follow the
+                 image when the window resizes. -->
+            <div class="page-stage">
+              <img id="page-image" alt="The uploaded drawing, page 1, as rendered." />
+              <div id="overlay" class="overlay"></div>
+            </div>
           </div>
 
           <div class="panel data-panel">

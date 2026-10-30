@@ -321,6 +321,11 @@ def test_static_page_and_its_two_files_are_served(client: TestClient):
     # that cannot take a file at all.
     assert 'id="dropzone"' in page.text
 
+    # The overlay on the page image and its toggle. app.js looks both ids up at load
+    # time: without them the boxes that link the tables to the drawing never appear.
+    assert 'id="overlay"' in page.text
+    assert 'id="show-overlay"' in page.text
+
     script = client.get("/app.js")
     assert script.status_code == 200
     assert "/api/runs" in script.text
