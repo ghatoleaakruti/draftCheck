@@ -4,6 +4,12 @@
     python -m draftcheck.cli check samples/generated/plate_001.pdf \
         --from-json tests/fixtures/plate_001.model.json
     python -m draftcheck.cli check samples/generated/plate_001.pdf --provider meta
+    python -m draftcheck.cli check samples/generated/plate_001.pdf --fix
+
+``--fix`` runs the correction loop after the check: the model proposes edits, Python
+applies the allowed ones and re-runs the rules to see what actually cleared. It calls the
+model even under ``--from-json``, since the saved extraction only covers the check. It does
+not change the exit code — see below.
 
 ``--provider`` picks between the configured providers (``baseten`` or ``meta``); with no
 flag the provider comes from ``LLM_PROVIDER`` in ``.env``.
@@ -11,10 +17,14 @@ flag the provider comes from ``LLM_PROVIDER`` in ``.env``.
 ``--from-json`` loads a saved extraction instead of calling the model, which makes a run
 free, offline, and repeatable. It is how the tests exercise the whole command.
 
-Exit codes:
+Exit codes, always about the drawing as submitted:
     0  ran, and no finding was error severity
     1  ran, and at least one error-severity finding was reported
     2  could not run: unreadable drawing, bad JSON, missing config, or a model failure
+
+Under ``--fix`` the code still describes the original drawing, so a drawing whose errors
+the agent resolved exits 1 anyway. The corrections are proposals nobody has reviewed; a 0
+would tell CI the drawing was fine when it was not.
 """
 
 from __future__ import annotations
@@ -26,6 +36,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from draftcheck.agent import CorrectionReport, FindingStatus, correct
 from draftcheck.config import SUPPORTED_PROVIDERS, ConfigError, get_provider
 from draftcheck.llm_client import LLMClient
 from draftcheck.llm_parsing import JSONParseError
@@ -56,6 +67,18 @@ def _load_extraction_file(path: Path) -> Drawing:
     return parse_drawing(json.loads(path.read_text(encoding="utf-8")))
 
 
+def _aligned(headers: tuple[str, ...], rows: list[tuple[str, ...]]) -> str:
+    """Lay rows out in columns, leaving the last column unpadded so it can run long."""
+    last = len(headers) - 1
+    widths = [max(len(headers[i]), *(len(row[i]) for row in rows)) for i in range(last)]
+
+    def line(cells: tuple[str, ...]) -> str:
+        padded = [cells[i].ljust(widths[i]) for i in range(last)]
+        return "  ".join([*padded, cells[last]]).rstrip()
+
+    return "\n".join([line(headers), *(line(row) for row in rows)])
+
+
 def format_table(findings: list[Finding]) -> str:
     """Lay the findings out as aligned columns, message last so the columns stay straight."""
     if not findings:
@@ -70,16 +93,19 @@ def format_table(findings: list[Finding]) -> str:
         )
         for finding in findings
     ]
-    headers = ("RULE", "SEVERITY", "ITEMS", "MESSAGE")
+    return _aligned(("RULE", "SEVERITY", "ITEMS", "MESSAGE"), rows)
 
-    # The message column is last and never padded, so only the first three need widths.
-    widths = [max(len(headers[i]), *(len(row[i]) for row in rows)) for i in range(3)]
 
-    def line(cells: tuple[str, ...]) -> str:
-        padded = [cells[i].ljust(widths[i]) for i in range(3)]
-        return "  ".join([*padded, cells[3]]).rstrip()
+def format_status_table(statuses: list[FindingStatus]) -> str:
+    """One row per finding the drawing started with, and what became of it."""
+    if not statuses:
+        return "No findings to correct."
 
-    return "\n".join([line(headers), *(line(row) for row in rows)])
+    rows = [
+        (status.status, status.finding.rule_id, status.key, status.finding.message)
+        for status in statuses
+    ]
+    return _aligned(("STATUS", "RULE", "FINDING", "MESSAGE"), rows)
 
 
 def _print_summary(findings: list[Finding], drawing: Drawing) -> None:
@@ -97,6 +123,63 @@ def _print_summary(findings: list[Finding], drawing: Drawing) -> None:
     warnings = len(findings) - errors
     print()
     print(f"{errors} error(s), {warnings} warning(s).")
+
+
+def _one_line(value: object, limit: int = 110) -> str:
+    """Put a proposed edit on one line, short enough to read in a terminal."""
+    text = json.dumps(value, ensure_ascii=False, default=str)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _print_corrections(report: CorrectionReport) -> None:
+    """Print each round's proposals and outcome, then the per-finding verdict."""
+    print()
+    print(f"=== Correction loop — {len(report.rounds)} round(s) ===")
+
+    for record in report.rounds:
+        print()
+        print(
+            f"Round {record.number}: proposed {len(record.proposed)}, "
+            f"applied {len(record.applied)}, rejected {len(record.rejected)}"
+        )
+        if record.error:
+            print(f"  failed    {record.error}")
+        for edit in record.applied:
+            print(f"  applied   {edit.describe()}")
+            if edit.rationale:
+                print(f"            why: {edit.rationale}")
+            if edit.finding_ids:
+                print(f"            claims to address: {', '.join(edit.finding_ids)}")
+        for item in record.rejected:
+            print(f"  rejected  {_one_line(item.edit)}")
+            print(f"            {item.reason}")
+        print(
+            f"  findings  {len(record.findings_before)} before "
+            f"-> {len(record.findings_after)} after"
+        )
+        if record.resolved:
+            print(f"  cleared   {', '.join(record.resolved)}")
+        if record.introduced:
+            print(f"  NEW       {', '.join(record.introduced)}")
+
+    print()
+    print(format_status_table(report.statuses))
+    print()
+    print(
+        f"{report.resolved_count} resolved, {report.unresolved_count} unresolved "
+        "(decided by re-running the rules, not by the model)."
+    )
+
+
+def _run_corrections(
+    drawing: Drawing, drawing_path: Path, dpi: int, provider_name: str | None
+) -> CorrectionReport:
+    """Build a client, render the page again for the model, and run the loop."""
+    client = LLMClient(provider=get_provider(provider_name))
+    page = load_pages(drawing_path, dpi=dpi)[0]
+    print()
+    print(f"Fixing with {client.provider.name} / {client.provider.model}...")
+    return correct(drawing, page.png_bytes, client)
 
 
 def _run_model(drawing_path: Path, dpi: int, provider_name: str | None) -> ExtractionResult:
@@ -154,9 +237,31 @@ def run_check(args: argparse.Namespace) -> int:
         print(f"Latency:  {extraction.latency_s:.2f}s  (attempts: {extraction.attempts})")
 
     _print_summary(findings, drawing)
+
+    if args.fix:
+        try:
+            report = _run_corrections(drawing, drawing_path, args.dpi, args.provider)
+        except ConfigError as exc:
+            print(f"Configuration error: {exc}", file=sys.stderr)
+            return EXIT_FAILED
+        except RenderError as exc:
+            print(f"Could not read the drawing: {exc}", file=sys.stderr)
+            return EXIT_FAILED
+
+        _print_corrections(report)
+        _write_json(out_dir / "corrections.json", report.to_dict())
+        written.append("corrections.json")
+
     print(f"Wrote {', '.join(written)} to {out_dir}/")
 
-    return EXIT_FINDINGS if any(f.severity == "error" for f in findings) else EXIT_OK
+    # The exit code always describes the drawing as submitted, never the corrected one.
+    # The loop's edits are proposals that nobody has reviewed yet, and a run that exits 0
+    # because the agent fixed its own findings would tell CI the drawing was fine.
+    errors = sum(1 for finding in findings if finding.severity == "error")
+    if args.fix:
+        print(f"Agent proposals are unreviewed; original drawing has {errors} error(s).")
+
+    return EXIT_FINDINGS if errors else EXIT_OK
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -182,6 +287,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=SUPPORTED_PROVIDERS,
         default=None,
         help="Which provider to call. Default: the LLM_PROVIDER value in .env.",
+    )
+    check_parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="After checking, run the correction loop (calls the model, up to 3 rounds).",
     )
     check_parser.add_argument("--dpi", type=int, default=200, help="PDF rasterization DPI.")
     check_parser.set_defaults(handler=run_check)
