@@ -74,8 +74,8 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/agent.py` | `correct(drawing, image_png, client, max_rounds=3)` → `CorrectionReport`. One round = ask, apply, re-run `rules.run_rules`, diff the findings. Records `proposed`, `applied`, `rejected`, findings before and after, `resolved`, and `introduced` per round, and a resolved/unresolved verdict per original finding — all computed from the re-run, never from the model's claim. Stops when no error-severity finding is left or after `max_rounds` — see §4.5 | **BUILT** |
 | `draftcheck/redline.py` | `render_redline(page_png, findings, report=None, model_name=None, when=None)` → two pillow pages, and `save_redline(pages, path_pdf, path_png)` → a 2-page PDF plus page 1 as a PNG. Pillow only, drawn on the rendered page image. Markers are numbered in `run_rules` order, so a number means the same finding on page 1, on page 2, and in `findings.json`. `findings_text(findings, report)` returns page 2's wording as styled lines, so the text can be tested without reading pixels — see §4.7 | **BUILT** |
 | `draftcheck/api.py` | FastAPI app over the same four modules the CLI drives: upload + extract, check the confirmed data, run the correction loop, serve the page image and the redline. One run is one folder under `outputs/web/<uuid4>/`, so each request reads what the previous one wrote — see §4.8. Decides nothing itself | **BUILT** |
-| `draftcheck/static/` | Served at `/`. A placeholder page today; the real upload and review screen is the next step | **BUILT** (placeholder) |
-| `frontend/` | Upload page, extraction review/edit screen, findings view | PLANNED |
+| `draftcheck/static/` | The browser page, served at `/`: `index.html`, `style.css`, `app.js`. Plain HTML, CSS, and JavaScript — no framework, no build step, nothing loaded from a CDN. Today it uploads a drawing with a chosen provider (`POST /api/runs`) and shows what came back: the rendered page beside read-only tables of units, datums, dimensions, and frames, plus model, latency, and any `parse_issues`. Tables are built with `textContent`, so model output is never treated as markup | **BUILT** (upload + view) |
+| `frontend/` | Editing the extraction in the browser, then driving `/check` and `/fix` from the page and showing the findings and the redline | PLANNED |
 | `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch. The ground truth is written in `schema.py`'s field names — plus `bbox_convention` and `seeded_errors` — so it parses as a `Drawing` and doubles as the target an extraction is scored against | **BUILT** |
 | `scripts/smoke_test.py` | One-shot check that the configured model answers over the network; `--provider baseten\|meta` picks which one | **BUILT** |
 | `scripts/extract_spike.py` | One extraction pass on a drawing: renders it, calls `chat_json`, and writes `outputs/spike/<name>.raw.txt`, `.json`, and `.overlay.png` (red boxes = model bboxes, green = ground truth from `--gt`). A look-at-it tool; it decides nothing | **BUILT** |
@@ -508,8 +508,10 @@ draftCheck/
 │   ├── redline.py              # BUILT  two-page redline, pillow only
 │   ├── rules.py                # BUILT
 │   ├── schema.py               # BUILT
-│   └── static/                 # BUILT  placeholder page served at /
-│       └── index.html
+│   └── static/                 # BUILT  upload + view page served at /
+│       ├── index.html
+│       ├── style.css
+│       └── app.js
 ├── samples/
 │   └── generated/              # synthetic drawings, regenerable from scripts/
 │       ├── plate_001.pdf       # the drawing
@@ -588,5 +590,5 @@ draftCheck/
 | --- | --- | --- |
 | 1 | Extraction + JSON schema + rule engine + test generator | BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`, `rules.py` with 6 rules, and `pipeline.py` + `cli.py` joining them into one `check` command that runs a drawing end to end. More rules can be added to the registry as the sample set grows |
 | 2 | Agent correction loop + redlined PDF | BUILT: `edits.py` (the four allowed operations and their guards), `agent.py` (the three-round loop), and `redline.py` (the two-page redline), wired into `check --fix --redline` and verified end to end on plate_001 |
-| 3 | Web UI + live deploy | PARTLY BUILT: `api.py` serves the whole flow over HTTP — upload + extract, check the confirmed data, run the loop, fetch the redline — verified end to end against the live model on plate_001. The browser page and the deploy are next |
+| 3 | Web UI + live deploy | PARTLY BUILT: `api.py` serves the whole flow over HTTP — upload + extract, check the confirmed data, run the loop, fetch the redline — verified end to end against the live model on plate_001. The browser page uploads a drawing and shows what the model read; editing that data in the page, running the check and the fix from it, and the deploy are next |
 | 4 | After hackathon: SAM 3.1 precision, revisions, link to Research Paper Recommender | PLANNED (post-hackathon) |

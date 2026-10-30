@@ -1,0 +1,308 @@
+/* DraftCheck — upload and view.
+
+   Neutral greys with one blue accent, so the only strong colours on screen belong to
+   the drawing and (later) the redline. Numbers are monospaced throughout: on a drawing
+   a digit's position matters, and a proportional font hides a stray decimal point. */
+
+:root {
+  --ink: #1b1f23;
+  --ink-soft: #57606a;
+  --line: #d4d8dd;
+  --line-soft: #e9ecef;
+  --paper: #ffffff;
+  --shell: #f4f5f7;
+  --accent: #1f5fa9;
+  --warn-bg: #fff8e5;
+  --warn-line: #e0b84c;
+  --error-bg: #fdeceb;
+  --error-line: #c0392b;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* `hidden` must win over any `display` set below.
+   The browser's own `[hidden] { display: none }` lives in the user-agent stylesheet, so
+   a plain `display: flex` on a class here outranks it and the element stays on screen —
+   which is how the spinner survived being hidden. */
+[hidden] {
+  display: none !important;
+}
+
+body {
+  margin: 0;
+  padding: 0 24px 48px;
+  background: var(--shell);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+main,
+.masthead {
+  max-width: 1280px;
+  margin: 0 auto;
+}
+
+.masthead {
+  padding: 28px 0 20px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 24px;
+}
+
+.masthead h1 {
+  margin: 0;
+  font-size: 26px;
+  letter-spacing: 0.02em;
+}
+
+.tagline {
+  margin: 6px 0 0;
+  color: var(--ink-soft);
+  max-width: 70ch;
+}
+
+.panel {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 18px 20px;
+}
+
+/* ---- Upload ---- */
+
+.upload {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 24px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field label {
+  font-weight: 600;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+}
+
+.hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+input[type="file"],
+select {
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--paper);
+  color: var(--ink);
+  min-width: 260px;
+}
+
+button {
+  font: inherit;
+  font-weight: 600;
+  padding: 9px 20px;
+  margin-top: 22px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: #19497f;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+/* ---- Waiting, warnings, errors ---- */
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 20px 0 0;
+  color: var(--ink-soft);
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex: none;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Honour a reduced-motion preference: pulse rather than spin. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+    border-top-color: var(--accent);
+  }
+}
+
+.box {
+  margin: 20px 0 0;
+  padding: 12px 16px;
+  border: 1px solid;
+  border-left-width: 4px;
+  border-radius: 4px;
+}
+
+.box p,
+.box ul {
+  margin: 6px 0 0;
+}
+
+.box-error {
+  background: var(--error-bg);
+  border-color: var(--error-line);
+}
+
+.box-warn {
+  background: var(--warn-bg);
+  border-color: var(--warn-line);
+}
+
+#error-text {
+  font-family: var(--mono);
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---- Result ---- */
+
+.result {
+  margin-top: 24px;
+}
+
+.runmeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.runmeta code {
+  font-family: var(--mono);
+  color: var(--ink);
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+/* One column on a narrow window, so the tables never squeeze to unreadable. */
+@media (max-width: 960px) {
+  .columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.page-panel {
+  position: sticky;
+  top: 16px;
+}
+
+#page-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  background: var(--paper);
+}
+
+h2 {
+  margin: 0 0 14px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+}
+
+h3 {
+  margin: 22px 0 8px;
+  font-size: 14px;
+}
+
+h3:first-of-type {
+  margin-top: 0;
+}
+
+.count {
+  font-weight: 400;
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+/* ---- Tables ---- */
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+table.data th,
+table.data td {
+  border: 1px solid var(--line-soft);
+  padding: 5px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+table.data thead th,
+table.data tbody th {
+  background: var(--shell);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+table.data tbody tr:hover td {
+  background: #fafbfc;
+}
+
+.mono,
+table.data td.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.empty {
+  color: var(--ink-soft);
+  font-style: italic;
+}

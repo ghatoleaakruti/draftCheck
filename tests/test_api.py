@@ -304,7 +304,28 @@ def test_check_reports_parse_issues_without_failing(client: TestClient):
     assert "GDT-001" in rule_ids(response.json()["findings"])
 
 
-def test_static_index_is_served(client: TestClient):
-    response = client.get("/")
-    assert response.status_code == 200
-    assert "DraftCheck" in response.text
+def test_static_page_and_its_two_files_are_served(client: TestClient):
+    """The page is at /, and the stylesheet and script it links to are reachable.
+
+    The page is three separate files, so a working index.html is not enough: a typo in
+    either href leaves a blank, unstyled page in the browser and a passing test here.
+    """
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "DraftCheck" in page.text
+    assert 'src="/app.js"' in page.text
+    assert 'href="/style.css"' in page.text
+
+    script = client.get("/app.js")
+    assert script.status_code == 200
+    assert "/api/runs" in script.text
+
+    stylesheet = client.get("/style.css")
+    assert stylesheet.status_code == 200
+    assert "DraftCheck" in stylesheet.text
+
+    # The page hides the spinner, the error box, and the results by setting `hidden`.
+    # Several of them are `display: flex`, which outranks the browser's own rule for
+    # `[hidden]` — so without this one declaration the spinner never goes away.
+    assert "[hidden]" in stylesheet.text
+    assert "display: none !important" in stylesheet.text
