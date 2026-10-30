@@ -427,6 +427,16 @@ h3:first-of-type {
 
 /* ---- Tables ---- */
 
+/* Each table sits in its own scroller. A column is never squeezed below what its cell
+   needs — an editable cell's width comes from the value in it (`fitControl` in app.js) —
+   so on a narrow panel the table is wider than the panel rather than the digits being cut
+   off, and the overflow is scrolled here instead of being lost. */
+.table-scroll {
+  overflow-x: auto;
+  /* Room for the scrollbar, so an overlaid one does not sit on the last row. */
+  padding-bottom: 2px;
+}
+
 table.data {
   width: 100%;
   border-collapse: collapse;
@@ -552,8 +562,11 @@ table.data td.mono {
   box-shadow: 0 0 0 2px #1f5fa926;
 }
 
+/* A cap on how far a number box grows in a wide column, not a floor: `fitControl` sets
+   each input's `min-width` from its own value, and a minimum always beats a maximum, so a
+   long value still gets the room to show itself. */
 .cell-number {
-  max-width: 9ch;
+  max-width: 12ch;
 }
 
 .cell-label {
@@ -732,4 +745,289 @@ table.data tbody tr.is-picked td.is-edited {
 .finding-message {
   margin: 4px 0 0;
   font-size: 13px;
+}
+
+/* ---- Proposing fixes ---- */
+
+/* The one action under the findings, with the reason it is unavailable beside it. */
+.fix-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.fix-bar .hint {
+  flex: 1 1 240px;
+}
+
+/* ---- Agent rounds ---- */
+
+.agent {
+  margin-top: 20px;
+}
+
+.agent h3 {
+  margin: 22px 0 8px;
+  font-size: 14px;
+}
+
+.rounds {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.round {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--paper);
+}
+
+/* The round number on the left, the rule engine's before/after count on the right: the
+   two things to compare when skimming several rounds. */
+.round-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.round-number {
+  font-weight: 600;
+}
+
+.round-counts {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.round-empty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.round-error {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--error-line);
+}
+
+.edits {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Applied in green, rejected in grey: the accent carries the verdict, so a round can be
+   read without reading any of the sentences. */
+.edit {
+  padding: 8px 12px;
+  border-left: 3px solid var(--line);
+  border-radius: 3px;
+  background: var(--shell);
+}
+
+.edit.is-applied {
+  border-left-color: var(--edited);
+  background: var(--edited-bg);
+}
+
+.edit-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0;
+}
+
+.edit-tag {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-soft);
+}
+
+.is-applied .edit-tag {
+  color: var(--edited);
+}
+
+.edit-text {
+  font-size: 13px;
+}
+
+.edit-why,
+.edit-reason {
+  margin: 4px 0 0 calc(11px + 6ch);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.changed {
+  margin-top: 10px;
+}
+
+.changed-label {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+
+.changed-list {
+  margin: 2px 0 0;
+  padding-left: 20px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+/* A round that created a finding is the one thing here worth interrupting a skim for. */
+.changed.is-introduced .changed-label,
+.changed.is-introduced .changed-list {
+  color: var(--error-line);
+}
+
+.verdicts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.verdict-tag {
+  flex: none;
+  min-width: 13ch;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.verdict.is-resolved .verdict-tag {
+  color: var(--edited);
+}
+
+.verdict.is-unresolved .verdict-tag {
+  color: var(--error-line);
+}
+
+.verdict-message {
+  flex: 1 1 320px;
+}
+
+/* Said once, under the list: the verdicts above are the rule engine's, not the model's. */
+.verdict-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.redline img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--paper);
+}
+
+.redline-actions {
+  margin: 12px 0 0;
+}
+
+/* The download is an <a>, so it needs the button's own padding and colours spelled out. */
+a.btn {
+  display: inline-block;
+  font-weight: 600;
+  text-decoration: none;
+  color: var(--paper);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+}
+
+a.btn:hover {
+  filter: brightness(1.08);
+}
+
+.redline-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+/* ---- Printing ---- */
+
+/* On paper there is no scrolling to do, so a table that overflows its scroller would
+   simply lose whatever is past the edge. The columns stack to the full page width, each
+   scroller shows everything it holds, and nothing is cut in half by a page break. */
+@media print {
+  body {
+    padding: 0;
+    background: var(--paper);
+  }
+
+  .columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .page-panel {
+    position: static;
+  }
+
+  .table-scroll {
+    overflow: visible;
+  }
+
+  /* Tighter on paper. The editable cells are sized in `ch`, so a smaller type size
+     shrinks them with the rest of the table and a sheet that scrolls on a narrow screen
+     still fits the page width instead of running off it. */
+  table.data {
+    font-size: 11px;
+  }
+
+  table.data th,
+  table.data td {
+    padding: 3px 5px;
+  }
+
+  /* The cell borders carry the table on paper, where hover and focus cannot. */
+  .cell-input {
+    border-color: var(--line-soft);
+  }
+
+  table.data tr,
+  .finding,
+  .round,
+  .edit {
+    break-inside: avoid;
+  }
+
+  .panel {
+    break-inside: auto;
+  }
 }

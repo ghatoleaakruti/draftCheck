@@ -19,7 +19,7 @@ from draftcheck.redline import (
     BALLOON_WIDTH_RATIO,
     BOX_PAD_RATIO,
     FOOTER,
-    _Names,
+    EditNames,
     ascii_safe,
     findings_text,
     plain_edit,
@@ -360,9 +360,9 @@ def test_a_finding_the_rules_could_not_place_still_says_so(plate_drawing: Drawin
     assert lines.count("location not marked") == len(unlocated)
 
 
-def names_for(drawing: Drawing) -> _Names:
+def names_for(drawing: Drawing) -> EditNames:
     """A name resolver over one drawing, without running the loop to get a report."""
-    return _Names(
+    return EditNames(
         CorrectionReport(
             original_drawing=drawing,
             final_drawing=drawing,

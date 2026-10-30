@@ -56,6 +56,19 @@ const checkErrorText = document.getElementById("check-error-text");
 const checkIssuesBox = document.getElementById("check-parse-issues");
 const checkIssuesList = document.getElementById("check-parse-issues-list");
 
+const proposeButton = document.getElementById("propose-fix");
+const fixHint = document.getElementById("fix-hint");
+const fixStatus = document.getElementById("fix-status");
+
+const agentPanel = document.getElementById("agent-panel");
+const agentStatus = document.getElementById("agent-status");
+const agentErrorBox = document.getElementById("agent-error");
+const agentErrorText = document.getElementById("agent-error-text");
+const agentRounds = document.getElementById("agent-rounds");
+const agentVerdicts = document.getElementById("agent-verdicts");
+const redlineImage = document.getElementById("redline-image");
+const redlinePdf = document.getElementById("redline-pdf");
+
 /* ---- The drop zone ------------------------------------------------------- */
 
 const DROP_PROMPT = "Drop a drawing here, or click to choose a file";
@@ -337,6 +350,12 @@ const state = {
   working: null,
   /** True once a check has returned, so a later edit can mark its findings out of date. */
   checked: false,
+  /** True once the tables have moved on from the last check. */
+  stale: false,
+  /** Error-severity findings in the last check. The agent is only offered when there are some. */
+  errorCount: 0,
+  /** When the correction loop last returned, or null. The agent results go stale too. */
+  fixedAt: null,
 };
 
 /** A deep copy, so editing one copy of the drawing can never reach the other. */
@@ -383,10 +402,14 @@ function newDatumId() {
  */
 const invalidInputs = new Set();
 
+/** True while the correction loop is running; both buttons are dead for its duration. */
+let fixing = false;
+
 function updateCheckButton() {
   const blocked = invalidInputs.size > 0;
-  checkButton.disabled = blocked || busy;
+  checkButton.disabled = blocked || busy || fixing;
   invalidNote.hidden = !blocked;
+  updateFixButton();
 }
 
 /** Mark an input good or bad, and say why in its tooltip when it is bad. */
@@ -459,6 +482,31 @@ function parseDatumRefs(raw) {
  * against `original`. Anything that does not validate is not written through.
  */
 
+/*
+ * Keeping a cell wide enough for what is in it.
+ *
+ * The controls are `width: 100%` of their column, and a table squeezes its columns to fit
+ * the panel — so on a narrow window "100" came out as "10" and "0.2" as "0". A cell cannot
+ * be narrower than the control's `min-width`, so setting that per control from the value
+ * it holds makes the column grow instead of the digits disappearing, and the table carries
+ * the overflow to `.table-scroll` when the panel runs out of room.
+ */
+
+/** The cell's padding and border, plus the spinner a number input draws over its value. */
+const INPUT_PAD_CH = 3.5;
+
+/** No control is narrower than this, so an empty box is still worth clicking. */
+const MIN_INPUT_CH = 5;
+
+/** Set a text or number control's minimum width from the value it is holding. */
+function fitControl(control) {
+  if (control.tagName !== "INPUT" || control.type === "checkbox") {
+    return;
+  }
+  const characters = Math.max(control.value.length, 0) + INPUT_PAD_CH;
+  control.style.minWidth = `${Math.max(MIN_INPUT_CH, characters)}ch`;
+}
+
 /** Add or remove a cell's accent, with the model's own value in the tooltip. */
 function markEdited(cell, edited, originalText) {
   cell.classList.toggle("is-edited", edited);
@@ -489,6 +537,9 @@ function editCell(control, { read, apply, was, shown, same, mono = true, cell })
 
   /** Validate, write through, and repaint the mark. `first` is the paint on build. */
   function commit(first) {
+    // Before anything else, and whatever the value turns out to be: a cell holding
+    // something unusable is exactly one the user needs to be able to read.
+    fitControl(control);
     const result = read();
     setValid(control, result.ok, result.message || "This value cannot be used.");
     if (!result.ok) {
@@ -870,13 +921,20 @@ function setCheckStatus(stale) {
  */
 function afterEdit() {
   if (state.checked) {
+    state.stale = true;
     setCheckStatus(true);
   }
+  // The agent worked from the data the check ran on, so an edit dates its rounds and its
+  // redline exactly as it dates the findings.
+  setAgentStatus(true);
+  updateFixButton();
 }
 
 function clearFindings() {
   state.checked = false;
   state.checkedAt = null;
+  state.stale = false;
+  state.errorCount = 0;
   findingsPanel.hidden = true;
   findingsPanel.classList.remove("is-fresh");
   checkStatus.hidden = true;
@@ -884,6 +942,7 @@ function clearFindings() {
   findingsNone.hidden = true;
   checkIssuesBox.hidden = true;
   checkErrorBox.hidden = true;
+  clearAgent();
 }
 
 /**
@@ -981,9 +1040,242 @@ function renderFindings(result) {
 
   state.checked = true;
   state.checkedAt = new Date();
+  state.stale = false;
+  state.errorCount = result.error_count || 0;
   setCheckStatus(false);
   findingsPanel.hidden = false;
   flashPanel();
+  updateFixButton();
+}
+
+/* ---- Proposing fixes ----------------------------------------------------- */
+
+/*
+ * The agent is offered only when there is something for it to work on and the findings
+ * it would work from are current: a fix proposed against data the user has since edited
+ * would be answering a question nobody asked any more. The button says nothing about why
+ * it is dead, so `#fix-hint` says it instead.
+ */
+
+/** Why the agent cannot run right now, or "" when it can. */
+function fixBlockedBecause() {
+  if (!state.checked) {
+    return "Check the drawing first — the agent works from the findings.";
+  }
+  if (state.stale) {
+    return "The tables have changed since the last check. Check the drawing again first.";
+  }
+  if (state.errorCount === 0) {
+    return "Nothing to propose: the last check found no errors.";
+  }
+  return "";
+}
+
+function updateFixButton() {
+  const reason = fixBlockedBecause();
+  proposeButton.disabled = reason !== "" || busy || fixing || invalidInputs.size > 0;
+  fixHint.textContent = reason;
+  fixHint.hidden = reason === "";
+}
+
+/** The agent's line: when it ran, and whether the tables have moved on since. */
+function setAgentStatus(stale) {
+  if (!state.fixedAt) {
+    agentStatus.hidden = true;
+    return;
+  }
+  const at = `Fixes proposed at ${clockTime(state.fixedAt)}`;
+  agentStatus.textContent = stale ? `${at} — edited since; check and fix again` : at;
+  agentStatus.classList.toggle("is-stale", stale);
+  agentStatus.hidden = false;
+}
+
+function clearAgent() {
+  state.fixedAt = null;
+  agentPanel.hidden = true;
+  agentStatus.hidden = true;
+  agentErrorBox.hidden = true;
+  agentRounds.replaceChildren();
+  agentVerdicts.replaceChildren();
+  redlineImage.removeAttribute("src");
+}
+
+/** A paragraph with a class. The page builds a lot of these. */
+function paragraph(className, value) {
+  const line = document.createElement("p");
+  line.className = className;
+  line.textContent = value;
+  return line;
+}
+
+/**
+ * One proposed edit: what it would do, whether it stuck, and the reasoning either side.
+ *
+ * `applied` is the rule engine's word, not the model's — a rejected edit is one
+ * `edits.apply_edits` refused, and `reason` is the refusal it wrote.
+ */
+function editItem(edit, applied) {
+  const item = document.createElement("li");
+  item.className = applied ? "edit is-applied" : "edit is-rejected";
+
+  const head = document.createElement("p");
+  head.className = "edit-head";
+
+  const tag = document.createElement("span");
+  tag.className = "edit-tag";
+  tag.textContent = applied ? "applied" : "rejected";
+  head.appendChild(tag);
+
+  const sentence = document.createElement("span");
+  sentence.className = "edit-text";
+  sentence.textContent = edit.edit;
+  head.appendChild(sentence);
+
+  item.appendChild(head);
+  if (edit.rationale) {
+    item.appendChild(paragraph("edit-why", `Why: ${edit.rationale}`));
+  }
+  if (!applied && edit.reason) {
+    item.appendChild(paragraph("edit-reason", `Rejected: ${edit.reason}`));
+  }
+  return item;
+}
+
+/** "Cleared" or "Introduced", with one line per finding, or nothing when the list is empty. */
+function changedFindings(label, findings, className) {
+  if (!findings || findings.length === 0) {
+    return null;
+  }
+  const block = document.createElement("div");
+  block.className = `changed ${className}`;
+  block.appendChild(paragraph("changed-label", label));
+
+  const list = document.createElement("ul");
+  list.className = "changed-list";
+  for (const finding of findings) {
+    const line = document.createElement("li");
+    line.textContent = finding.message || finding.key;
+    list.appendChild(line);
+  }
+  block.appendChild(list);
+  return block;
+}
+
+/** One round: the edits it proposed, and what the rules said about the result. */
+function roundCard(round) {
+  const item = document.createElement("li");
+  item.className = "round";
+
+  const head = document.createElement("p");
+  head.className = "round-head";
+
+  const number = document.createElement("span");
+  number.className = "round-number";
+  number.textContent = `Round ${round.round}`;
+  head.appendChild(number);
+
+  const counts = document.createElement("span");
+  counts.className = "round-counts";
+  counts.textContent = `Findings: ${round.findings_before} before → ${round.findings_after} after`;
+  head.appendChild(counts);
+
+  item.appendChild(head);
+
+  if (round.error) {
+    item.appendChild(paragraph("round-error", `This round could not run: ${round.error}`));
+  }
+
+  const applied = round.applied || [];
+  const rejected = round.rejected || [];
+  if (applied.length === 0 && rejected.length === 0) {
+    item.appendChild(paragraph("round-empty", "The model proposed no edits in this round."));
+  } else {
+    const edits = document.createElement("ul");
+    edits.className = "edits";
+    for (const edit of applied) {
+      edits.appendChild(editItem(edit, true));
+    }
+    for (const edit of rejected) {
+      edits.appendChild(editItem(edit, false));
+    }
+    item.appendChild(edits);
+  }
+
+  const cleared = changedFindings("Cleared:", round.resolved, "is-cleared");
+  const introduced = changedFindings("Introduced:", round.introduced, "is-introduced");
+  if (cleared) {
+    item.appendChild(cleared);
+  }
+  if (introduced) {
+    item.appendChild(introduced);
+  }
+  if (!cleared && !introduced && !round.error) {
+    item.appendChild(paragraph("round-empty", "No finding changed in this round."));
+  }
+
+  return item;
+}
+
+/** One original finding and what became of it. The verdict came from re-running the rules. */
+function verdictItem(entry) {
+  const item = document.createElement("li");
+  const resolved = entry.status === "resolved";
+  item.className = resolved ? "verdict is-resolved" : "verdict is-unresolved";
+
+  const tag = document.createElement("span");
+  tag.className = "verdict-tag";
+  tag.textContent = resolved ? "verified resolved" : "unresolved";
+
+  const key = document.createElement("code");
+  key.className = "rule-id";
+  key.textContent = entry.finding;
+
+  const message = document.createElement("span");
+  message.className = "verdict-message";
+  message.textContent = entry.message;
+
+  item.append(tag, key, message);
+  return item;
+}
+
+/**
+ * Show one correction run: the rounds, the verdicts, and the redline it produced.
+ *
+ * The redline URLs are fixed per run and the files are rewritten on every fix, so both
+ * carry a timestamp — without it the browser would show the previous run's redline from
+ * its cache and nothing on screen would say so.
+ */
+function renderAgent(result) {
+  const rounds = result.rounds || [];
+  const statuses = result.status || [];
+
+  const newRounds = document.createDocumentFragment();
+  for (const round of rounds) {
+    newRounds.appendChild(roundCard(round));
+  }
+  if (rounds.length === 0) {
+    const item = document.createElement("li");
+    item.className = "round";
+    item.appendChild(paragraph("round-empty", "The agent was not asked for any edits."));
+    newRounds.appendChild(item);
+  }
+
+  const newVerdicts = document.createDocumentFragment();
+  for (const entry of statuses) {
+    newVerdicts.appendChild(verdictItem(entry));
+  }
+
+  agentRounds.replaceChildren(newRounds);
+  agentVerdicts.replaceChildren(newVerdicts);
+  agentErrorBox.hidden = true;
+
+  const stamp = Date.now();
+  redlineImage.src = `${result.redline_png_url}?t=${stamp}`;
+  redlinePdf.href = `${result.redline_pdf_url}?t=${stamp}`;
+
+  state.fixedAt = new Date();
+  setAgentStatus(false);
+  agentPanel.hidden = false;
 }
 
 /* ---- Rendering one run --------------------------------------------------- */
@@ -1145,6 +1437,60 @@ async function runCheck() {
 }
 
 checkButton.addEventListener("click", runCheck);
+
+/**
+ * Ask the agent for corrections, and show the rounds and the redline it produced.
+ *
+ * The loop is three model calls at worst and takes 20–60 seconds, so unlike Check this one
+ * always ends up saying it is working. It still goes through the same 300 ms timer: the
+ * request could fail at the server before the model is ever called, and a spinner that
+ * appears for a tenth of a second on the way to an error message is noise.
+ *
+ * Nothing is posted. The server works from `confirmed.json` — the drawing the last check
+ * saved — which is why the button is dead whenever the tables have moved on from it.
+ */
+async function runFix() {
+  if (!state.runId || fixBlockedBecause() !== "") {
+    return;
+  }
+  fixing = true;
+  updateCheckButton();
+
+  let labelChanged = false;
+  const labelTimer = setTimeout(() => {
+    labelChanged = true;
+    proposeButton.textContent = "Proposing…";
+    fixStatus.hidden = false;
+  }, SLOW_CHECK_MS);
+
+  /** Keep whatever the panel is showing, and put the reason above it. */
+  function failed(message) {
+    agentErrorText.textContent = message;
+    agentErrorBox.hidden = false;
+    agentPanel.hidden = false;
+  }
+
+  try {
+    const response = await fetch(`/api/runs/${state.runId}/fix`, { method: "POST" });
+    if (!response.ok) {
+      failed(await errorMessage(response));
+      return;
+    }
+    renderAgent(await response.json());
+  } catch (problem) {
+    failed(`Could not reach the server: ${problem.message}`);
+  } finally {
+    clearTimeout(labelTimer);
+    if (labelChanged) {
+      proposeButton.textContent = "Propose fixes";
+      fixStatus.hidden = true;
+    }
+    fixing = false;
+    updateCheckButton();
+  }
+}
+
+proposeButton.addEventListener("click", runFix);
 
 resetButton.addEventListener("click", () => {
   if (!state.original) {

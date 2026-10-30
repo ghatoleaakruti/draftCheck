@@ -317,13 +317,17 @@ def _plain_value(value: Any) -> str:
     return _number(value)
 
 
-class _Names:
+class EditNames:
     """Says which item an edit is about, in the words printed on the drawing.
 
     Items are named from the drawing as it was *submitted*, so "the 20 dimension" means
     the one the reader is looking at rather than the one an earlier edit turned it into.
     Anything the loop added along the way is looked up in the corrected drawing instead,
     since it does not exist in the original at all.
+
+    Public because the API says the same sentences on the page as the redline prints on
+    paper: ``api._summarize`` builds one of these per report and hands it to
+    :func:`plain_edit`, so the wording lives here and nowhere else.
     """
 
     def __init__(self, report: CorrectionReport):
@@ -378,7 +382,7 @@ class _Names:
         return "the drawing"
 
 
-def _plain_set_field(edit: SetField, names: _Names) -> str:
+def _plain_set_field(edit: SetField, names: EditNames) -> str:
     """Plain English for a ``set_field``, which covers most of what the agent does."""
     subject = names.item(edit.target, edit.id)
     if edit.target == "drawing":
@@ -415,7 +419,7 @@ def _plain_add_dimension(edit: AddDimension) -> str:
     return sentence
 
 
-def plain_edit(edit: Edit, names: _Names) -> str:
+def plain_edit(edit: Edit, names: EditNames) -> str:
     """Say what one applied edit did, without ids or operation names.
 
     The redline is read by an engineer deciding whether the correction is right, not by
@@ -502,7 +506,7 @@ def findings_text(
     """
     statuses = {status.key: status.status for status in report.statuses} if report else {}
     grouped, unattributed = _edits_by_finding(report) if report else ({}, [])
-    names = _Names(report) if report else None
+    names = EditNames(report) if report else None
 
     lines: list[Line] = [Line("DraftCheck findings", HEADING)]
     if not findings:

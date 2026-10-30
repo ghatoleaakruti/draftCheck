@@ -44,14 +44,15 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
-from draftcheck.agent import CorrectionReport, correct
+from draftcheck.agent import CorrectionReport, RoundRecord, correct
 from draftcheck.config import SUPPORTED_PROVIDERS, ConfigError, get_provider
+from draftcheck.edits import RejectedEdit, parse_edit
 from draftcheck.llm_client import LLMClient
 from draftcheck.llm_parsing import JSONParseError
 from draftcheck.pipeline import SupportsChatJSON, check, extract
-from draftcheck.redline import render_redline, save_redline
+from draftcheck.redline import EditNames, plain_edit, render_redline, save_redline
 from draftcheck.render import RenderError, load_pages
-from draftcheck.schema import parse_drawing
+from draftcheck.schema import Finding, finding_key, parse_drawing
 
 #: Where run folders are created. A dependency, so tests point it at a tmp folder.
 RUNS_ROOT = Path("outputs/web")
@@ -327,11 +328,66 @@ def check_run(
     }
 
 
+def _rejected_summary(item: RejectedEdit, names: EditNames) -> dict:
+    """A refused proposal as the page shows it, in the same words as an applied one.
+
+    A proposal can be refused before it is understood (``{"op": "delete_fcf"}``) or after
+    (an edit that names an id the drawing does not have), so the sentence is only available
+    when ``parse_edit`` can make an ``Edit`` out of it. When it cannot, the page says what
+    the model called the operation rather than inventing a description of it.
+    """
+    raw = item.edit
+    edit, _ = parse_edit(raw)
+    if edit is not None:
+        sentence, rationale = plain_edit(edit, names), edit.rationale
+    elif isinstance(raw, dict) and isinstance(raw.get("op"), str) and raw["op"].strip():
+        sentence, rationale = f"an edit the model called {raw['op'].strip()!r}", ""
+    else:
+        sentence, rationale = "an edit that was not shaped like an edit", ""
+    return {"edit": sentence, "rationale": rationale, "reason": item.reason}
+
+
+def _named_findings(findings: list[Finding], keys: list[str]) -> list[dict]:
+    """Finding keys as key *and* message, so the page need not hold a copy of the rules."""
+    messages = {finding_key(finding): finding.message for finding in findings}
+    return [{"key": key, "message": messages.get(key, key)} for key in keys]
+
+
+def _round_summary(record: RoundRecord, names: EditNames) -> dict:
+    """One round as the page shows it: what was proposed, what stuck, and what changed.
+
+    The edits are in plain English — the same sentences :mod:`draftcheck.redline` prints on
+    page 2, built by the same function, so the screen and the PDF can never word a
+    correction differently. ``corrections.json`` keeps the id-carrying form, which is what
+    is wanted when you are reading the file rather than the drawing.
+    """
+    return {
+        "round": record.number,
+        "applied": [
+            {
+                "edit": plain_edit(edit, names),
+                "rationale": edit.rationale,
+                "finding_ids": edit.finding_ids,
+            }
+            for edit in record.applied
+        ],
+        "rejected": [_rejected_summary(item, names) for item in record.rejected],
+        "findings_before": len(record.findings_before),
+        "findings_after": len(record.findings_after),
+        # Resolved findings are gone by the end of the round, so their wording comes from
+        # before it; introduced ones did not exist until after it.
+        "resolved": _named_findings(record.findings_before, record.resolved),
+        "introduced": _named_findings(record.findings_after, record.introduced),
+        "error": record.error,
+    }
+
+
 def _summarize(report: CorrectionReport) -> dict:
     """The correction report as the UI needs it: rounds, edits, and the verdicts."""
     payload = report.to_dict()
+    names = EditNames(report)
     return {
-        "rounds": payload["rounds"],
+        "rounds": [_round_summary(record, names) for record in report.rounds],
         "status": payload["status"],
         "final_findings": payload["final_findings"],
         "final_drawing": payload["final_drawing"],

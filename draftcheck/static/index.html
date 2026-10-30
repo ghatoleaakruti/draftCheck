@@ -123,64 +123,72 @@
             </div>
 
             <h3>Units and general tolerance</h3>
-            <table class="data">
-              <tbody>
-                <tr>
-                  <th scope="row">Units</th>
-                  <td id="v-units" class="mono"></td>
-                </tr>
-                <tr>
-                  <th scope="row">General tolerance ±</th>
-                  <td id="v-gentol" class="mono"></td>
-                </tr>
-                <tr>
-                  <th scope="row">As printed</th>
-                  <td id="v-gentol-raw" class="mono">—</td>
-                </tr>
-              </tbody>
-            </table>
+            <div class="table-scroll">
+              <table class="data">
+                <tbody>
+                  <tr>
+                    <th scope="row">Units</th>
+                    <td id="v-units" class="mono"></td>
+                  </tr>
+                  <tr>
+                    <th scope="row">General tolerance ±</th>
+                    <td id="v-gentol" class="mono"></td>
+                  </tr>
+                  <tr>
+                    <th scope="row">As printed</th>
+                    <td id="v-gentol-raw" class="mono">—</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
 
             <h3>Datums <span id="count-datums" class="count"></span></h3>
-            <table class="data">
-              <thead>
-                <tr>
-                  <th scope="col">Label</th>
-                  <th scope="col"><span class="visually-hidden">Remove</span></th>
-                </tr>
-              </thead>
-              <tbody id="rows-datums"></tbody>
-            </table>
+            <div class="table-scroll">
+              <table class="data">
+                <thead>
+                  <tr>
+                    <th scope="col">Label</th>
+                    <th scope="col"><span class="visually-hidden">Remove</span></th>
+                  </tr>
+                </thead>
+                <tbody id="rows-datums"></tbody>
+              </table>
+            </div>
             <button id="add-datum" class="btn btn-quiet btn-small" type="button">
               Add datum
             </button>
 
             <h3>Dimensions <span id="count-dimensions" class="count"></span></h3>
-            <table class="data">
-              <thead>
-                <tr>
-                  <th scope="col">Text as printed</th>
-                  <th scope="col">Value</th>
-                  <th scope="col">Tol +</th>
-                  <th scope="col">Tol −</th>
-                  <th scope="col">Basic</th>
-                  <th scope="col">From → to</th>
-                </tr>
-              </thead>
-              <tbody id="rows-dimensions"></tbody>
-            </table>
+            <div class="table-scroll">
+              <table class="data">
+                <thead>
+                  <tr>
+                    <th scope="col">Text as printed</th>
+                    <th scope="col">Value</th>
+                    <th scope="col">Tol +</th>
+                    <th scope="col">Tol −</th>
+                    <th scope="col">Basic</th>
+                    <th scope="col">From → to</th>
+                  </tr>
+                </thead>
+                <tbody id="rows-dimensions"></tbody>
+              </table>
+            </div>
 
             <h3>Feature control frames <span id="count-fcfs" class="count"></span></h3>
-            <table class="data">
-              <thead>
-                <tr>
-                  <th scope="col">Characteristic</th>
-                  <th scope="col">Tolerance</th>
-                  <th scope="col">Modifier</th>
-                  <th scope="col">Datum refs</th>
-                </tr>
-              </thead>
-              <tbody id="rows-fcfs"></tbody>
-            </table>
+            <div class="table-scroll">
+              <table class="data">
+                <thead>
+                  <tr>
+                    <th scope="col">Characteristic</th>
+                    <th scope="col">Tolerance</th>
+                    <th scope="col">Modifier</th>
+                    <th scope="col">Datum refs</th>
+                  </tr>
+                </thead>
+                <tbody id="rows-fcfs"></tbody>
+              </table>
+            </div>
           </div>
         </div>
 
@@ -205,6 +213,56 @@
 
           <p id="findings-none" class="findings-none" hidden>No issues found.</p>
           <ul id="findings-list" class="findings-list"></ul>
+
+          <!-- Asking the agent for corrections. The button is enabled only when the
+               findings above are current and at least one of them is an error; app.js
+               writes #fix-hint with the reason whenever it is not. -->
+          <div class="fix-bar">
+            <button id="propose-fix" class="btn" type="button" disabled>Propose fixes</button>
+            <p id="fix-hint" class="hint" hidden></p>
+          </div>
+
+          <p id="fix-status" class="status" hidden>
+            <span class="spinner" aria-hidden="true"></span>
+            <span>
+              Muse Spark is proposing fixes… (each round is checked by the rule engine)
+            </span>
+          </p>
+        </section>
+
+        <!-- What the correction loop did, round by round, and the redline it produced.
+             Hidden until the first fix. -->
+        <section id="agent-panel" class="panel agent" hidden>
+          <h2>Agent rounds</h2>
+
+          <!-- When the fixes were proposed, and whether they still describe the tables.
+               The same one-line treatment the check status gets. -->
+          <p id="agent-status" class="check-status" hidden></p>
+
+          <div id="agent-error" class="box box-error" hidden role="alert">
+            <strong>Could not propose fixes.</strong>
+            <p id="agent-error-text"></p>
+          </div>
+
+          <ol id="agent-rounds" class="rounds"></ol>
+
+          <h3>What became of each finding</h3>
+          <ul id="agent-verdicts" class="verdicts"></ul>
+          <p class="verdict-note">Decided by re-running the rules, not by the model.</p>
+
+          <h3>Redline</h3>
+          <div class="redline">
+            <img id="redline-image" alt="The drawing with every finding marked in red." />
+            <p class="redline-actions">
+              <a id="redline-pdf" class="btn" href="#" download="redline.pdf">
+                Download redline PDF
+              </a>
+            </p>
+            <p class="redline-note">
+              Proposed corrections are verified by DraftCheck's rule engine and require
+              engineer review.
+            </p>
+          </div>
         </section>
       </section>
     </main>
