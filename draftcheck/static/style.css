@@ -16,6 +16,13 @@
   --warn-line: #e0b84c;
   --error-bg: #fdeceb;
   --error-line: #c0392b;
+  /* The overlay on the page image: faint until you point at it. The picked colour is
+     deliberately not the accent blue, so "hovering" and "chosen" never look alike. */
+  --box-faint: #9bb6d6;
+  --box-hot: #1f5fa9;
+  --box-hot-fill: #1f5fa91f;
+  --box-pick: #b26a00;
+  --box-pick-fill: #b26a0029;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
 }
@@ -299,12 +306,95 @@ button:disabled {
   top: 16px;
 }
 
+.overlay-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.overlay-toggle input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 #page-image {
   display: block;
   width: 100%;
   height: auto;
   border: 1px solid var(--line);
   background: var(--paper);
+}
+
+/* ---- The overlay on the page image ---- */
+
+/* The image sets the stage's size; the overlay covers exactly that, so a box placed in
+   percentages lands on the same spot on the drawing whatever the window is doing. */
+.page-stage {
+  position: relative;
+  line-height: 0; /* no stray descender gap under the image */
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  /* The container must not swallow clicks meant for the image; each box takes its own
+     back. */
+  pointer-events: none;
+}
+
+.obox {
+  position: absolute;
+  border: 1px solid var(--box-faint);
+  border-radius: 2px;
+  background: transparent;
+  pointer-events: auto;
+  cursor: pointer;
+  /* A box can be a couple of pixels tall on a wide drawing; this keeps it grabbable. */
+  min-width: 6px;
+  min-height: 6px;
+}
+
+/* Hovered on either side: the box and its row go strong together. */
+.obox.is-hot {
+  border-color: var(--box-hot);
+  border-width: 2px;
+  background: var(--box-hot-fill);
+}
+
+/* Clicked: stays until the next click lands somewhere else. */
+.obox.is-picked {
+  border-color: var(--box-pick);
+  border-width: 2px;
+  background: var(--box-pick-fill);
+  box-shadow: 0 0 0 1px var(--paper);
+}
+
+/* The same two states on the table side. The row wins over the plain hover rule above
+   it because it is more specific. */
+table.data tbody tr.is-hot td {
+  background: var(--box-hot-fill);
+}
+
+table.data tbody tr.is-picked td {
+  background: var(--box-pick-fill);
+}
+
+/* A row whose item came back without a location: nothing to point at on the drawing. */
+tr[data-item-id] {
+  cursor: pointer;
+}
+
+.noloc {
+  margin-left: 6px;
+  font-family: var(--sans);
+  font-size: 11px;
+  font-style: italic;
+  color: var(--ink-soft);
+  white-space: nowrap;
 }
 
 h2 {

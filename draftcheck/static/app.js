@@ -31,6 +31,9 @@ const resultSection = document.getElementById("result");
 const parseIssuesBox = document.getElementById("parse-issues");
 const parseIssuesList = document.getElementById("parse-issues-list");
 const pageImage = document.getElementById("page-image");
+const overlay = document.getElementById("overlay");
+const overlayToggle = document.getElementById("show-overlay");
+const dataPanel = document.querySelector(".data-panel");
 
 /* ---- The drop zone ------------------------------------------------------- */
 
@@ -162,14 +165,150 @@ function datumRefs(refs) {
     .join(" | ");
 }
 
+/* ---- Linking the tables to the drawing ----------------------------------- */
+
+/*
+ * Every datum, dimension, and frame has an id (DT1, D1, F1…) and, when the model said
+ * where it is, a bbox: [x0, y0, x1, y1] in 0..1 from the top-left of the page. The id is
+ * the thread — one box on the image and one row in a table share it, so pointing at
+ * either can light up both.
+ */
+
+/** item id -> { box, row }. An item with no bbox never gets in here. Rebuilt per run. */
+const linked = new Map();
+
+/** The id of the last clicked box or row; it stays lit until another click. */
+let pickedId = null;
+
+/** Put a class on both halves of a pair, or do nothing for an id we cannot locate. */
+function paint(id, className, on) {
+  const pair = linked.get(id);
+  if (!pair) {
+    return;
+  }
+  pair.box.classList.toggle(className, on);
+  if (pair.row) {
+    pair.row.classList.toggle(className, on);
+  }
+}
+
+/**
+ * Choose one item: light it on both sides and bring `scrollInto` into view.
+ *
+ * `block: "nearest"` scrolls the least that will do the job — the page image is sticky,
+ * so a bigger jump would shove the drawing around for no reason.
+ */
+function pick(id, scrollInto) {
+  if (pickedId !== null) {
+    paint(pickedId, "is-picked", false);
+  }
+  pickedId = id;
+  paint(id, "is-picked", true);
+  if (scrollInto) {
+    scrollInto.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+}
+
+/** Draw one box per located item and remember it. Returns nothing; `linked` is the result. */
+function buildOverlay(items) {
+  linked.clear();
+  pickedId = null;
+  overlay.replaceChildren();
+
+  for (const item of items) {
+    const bbox = item.bbox;
+    if (!item.id || !Array.isArray(bbox) || bbox.length !== 4) {
+      continue;
+    }
+    const [x0, y0, x1, y1] = bbox;
+
+    const box = document.createElement("div");
+    box.className = "obox";
+    box.dataset.itemId = item.id;
+    // Percentages, not pixels: the image is `width: 100%`, so its size changes with the
+    // window and a pixel offset would drift off the drawing.
+    box.style.left = `${x0 * 100}%`;
+    box.style.top = `${y0 * 100}%`;
+    box.style.width = `${(x1 - x0) * 100}%`;
+    box.style.height = `${(y1 - y0) * 100}%`;
+    box.title = item.title;
+
+    overlay.appendChild(box);
+    linked.set(item.id, { box, row: null });
+  }
+}
+
+/**
+ * Tie a freshly built row to its box, or mark it as unplaceable.
+ *
+ * A row only becomes interactive when there is something to point at: `data-item-id` is
+ * what the hover and click handlers look for, so a row without it quietly does nothing.
+ */
+function linkRow(id, row, firstCell) {
+  const pair = id ? linked.get(id) : undefined;
+  if (!pair) {
+    const note = document.createElement("span");
+    note.className = "noloc";
+    note.textContent = "no location";
+    firstCell.appendChild(note);
+    return;
+  }
+  pair.row = row;
+  row.dataset.itemId = id;
+}
+
+/* Hovering either side lights both. Delegated, so the handlers survive every rebuild of
+   the tables and the overlay. */
+function hoverHandlers(container) {
+  container.addEventListener("mouseover", (event) => {
+    const target = event.target.closest("[data-item-id]");
+    if (target) {
+      paint(target.dataset.itemId, "is-hot", true);
+    }
+  });
+  container.addEventListener("mouseout", (event) => {
+    const target = event.target.closest("[data-item-id]");
+    if (target) {
+      paint(target.dataset.itemId, "is-hot", false);
+    }
+  });
+}
+
+hoverHandlers(overlay);
+hoverHandlers(dataPanel);
+
+// Clicking a box goes to the row; clicking a row goes to the box.
+overlay.addEventListener("click", (event) => {
+  const box = event.target.closest(".obox");
+  if (box) {
+    const pair = linked.get(box.dataset.itemId);
+    pick(box.dataset.itemId, pair && pair.row);
+  }
+});
+
+dataPanel.addEventListener("click", (event) => {
+  const row = event.target.closest("tr[data-item-id]");
+  if (row) {
+    const pair = linked.get(row.dataset.itemId);
+    pick(row.dataset.itemId, pair && pair.box);
+  }
+});
+
+// The toggle only hides the drawing's boxes. The table rows stay as they are, so a
+// reader who switches the boxes off keeps everything the model read.
+overlayToggle.addEventListener("change", () => {
+  overlay.hidden = !overlayToggle.checked;
+});
+
 /* ---- Table building ------------------------------------------------------ */
 
 /**
  * Replace a tbody's rows.
  *
- * `rows` is a list of cell lists; each cell is [value, monospaced]. An empty list
- * leaves one spanning row saying so, rather than a table with a header and nothing
- * under it — "the model found none" and "the page has not loaded" should not look alike.
+ * `rows` is a list of `{ id, cells }`; each cell is [value, monospaced], and `id` is the
+ * item's id, used to tie the row to its box on the drawing. An empty list leaves one
+ * spanning row saying so, rather than a table with a header and nothing under it — "the
+ * model found none" and "the page has not loaded" should not look alike.
  */
 function fillTable(tbodyId, rows, columns, emptyMessage) {
   const tbody = document.getElementById(tbodyId);
@@ -186,8 +325,9 @@ function fillTable(tbodyId, rows, columns, emptyMessage) {
     return;
   }
 
-  for (const cells of rows) {
+  for (const { id, cells } of rows) {
     const row = document.createElement("tr");
+    let firstCell = null;
     for (const [value, monospaced] of cells) {
       const cell = document.createElement("td");
       if (monospaced) {
@@ -195,7 +335,9 @@ function fillTable(tbodyId, rows, columns, emptyMessage) {
       }
       cell.textContent = value;
       row.appendChild(cell);
+      firstCell = firstCell || cell;
     }
+    linkRow(id, row, firstCell);
     tbody.appendChild(row);
   }
 }
@@ -245,34 +387,60 @@ function render(run) {
   setCount("count-dimensions", dimensions);
   setCount("count-fcfs", fcfs);
 
+  // The boxes go up first: filling a table then asks `linked` whether its row has one.
+  buildOverlay([
+    ...datums.map((datum) => ({
+      id: datum.id,
+      bbox: datum.bbox,
+      title: `Datum ${text(datum.label)}`,
+    })),
+    ...dimensions.map((dimension) => ({
+      id: dimension.id,
+      bbox: dimension.bbox,
+      title: `Dimension ${text(dimension.text_raw)}`,
+    })),
+    ...fcfs.map((fcf) => ({
+      id: fcf.id,
+      bbox: fcf.bbox,
+      title: `Frame ${text(fcf.characteristic)}`,
+    })),
+  ]);
+  overlay.hidden = !overlayToggle.checked;
+
   fillTable(
     "rows-datums",
-    datums.map((datum) => [[text(datum.label), true]]),
+    datums.map((datum) => ({ id: datum.id, cells: [[text(datum.label), true]] })),
     1,
     "No datum features were read."
   );
 
   fillTable(
     "rows-dimensions",
-    dimensions.map((dimension) => [
-      [text(dimension.text_raw), true],
-      [valueWithUnit(dimension, drawing.units), true],
-      [dimension.is_basic ? EM_DASH : tolerance(dimension.tol_plus, dimension.tol_minus), true],
-      [dimension.is_basic ? "yes" : "no", false],
-      [fromTo(dimension), true],
-    ]),
+    dimensions.map((dimension) => ({
+      id: dimension.id,
+      cells: [
+        [text(dimension.text_raw), true],
+        [valueWithUnit(dimension, drawing.units), true],
+        [dimension.is_basic ? EM_DASH : tolerance(dimension.tol_plus, dimension.tol_minus), true],
+        [dimension.is_basic ? "yes" : "no", false],
+        [fromTo(dimension), true],
+      ],
+    })),
     5,
     "No dimensions were read."
   );
 
   fillTable(
     "rows-fcfs",
-    fcfs.map((fcf) => [
-      [text(fcf.characteristic), false],
-      [fcf.diameter_zone ? `ø${num(fcf.tolerance)}` : num(fcf.tolerance), true],
-      [text(fcf.material_modifier), true],
-      [datumRefs(fcf.datum_refs), true],
-    ]),
+    fcfs.map((fcf) => ({
+      id: fcf.id,
+      cells: [
+        [text(fcf.characteristic), false],
+        [fcf.diameter_zone ? `ø${num(fcf.tolerance)}` : num(fcf.tolerance), true],
+        [text(fcf.material_modifier), true],
+        [datumRefs(fcf.datum_refs), true],
+      ],
+    })),
     4,
     "No feature control frames were read."
   );
