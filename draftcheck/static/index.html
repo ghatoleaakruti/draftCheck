@@ -102,16 +102,36 @@
           <div class="panel data-panel">
             <h2>What Muse Spark read</h2>
 
+            <!-- The editable cells live in the tables below. This bar is the two things
+                 you can do to the whole extraction: put it back the way the model read
+                 it, or send it to the rules. Check is disabled while any cell is
+                 invalid, and #invalid-note says why. -->
+            <div class="edit-bar">
+              <p class="edit-hint">
+                Correct anything the model misread, then check the drawing. Edited cells
+                are marked; hover one to see the model's original value.
+              </p>
+              <div class="edit-actions">
+                <button id="reset" class="btn btn-quiet" type="button">
+                  Reset to what the model read
+                </button>
+                <button id="check" class="btn" type="button">Check drawing</button>
+              </div>
+              <p id="invalid-note" class="invalid-note" hidden>
+                Some cells still need fixing — they are outlined in red.
+              </p>
+            </div>
+
             <h3>Units and general tolerance</h3>
             <table class="data">
               <tbody>
                 <tr>
                   <th scope="row">Units</th>
-                  <td id="v-units" class="mono">—</td>
+                  <td id="v-units" class="mono"></td>
                 </tr>
                 <tr>
                   <th scope="row">General tolerance ±</th>
-                  <td id="v-gentol" class="mono">—</td>
+                  <td id="v-gentol" class="mono"></td>
                 </tr>
                 <tr>
                   <th scope="row">As printed</th>
@@ -125,10 +145,14 @@
               <thead>
                 <tr>
                   <th scope="col">Label</th>
+                  <th scope="col"><span class="visually-hidden">Remove</span></th>
                 </tr>
               </thead>
               <tbody id="rows-datums"></tbody>
             </table>
+            <button id="add-datum" class="btn btn-quiet btn-small" type="button">
+              Add datum
+            </button>
 
             <h3>Dimensions <span id="count-dimensions" class="count"></span></h3>
             <table class="data">
@@ -136,7 +160,8 @@
                 <tr>
                   <th scope="col">Text as printed</th>
                   <th scope="col">Value</th>
-                  <th scope="col">Tolerance</th>
+                  <th scope="col">Tol +</th>
+                  <th scope="col">Tol −</th>
                   <th scope="col">Basic</th>
                   <th scope="col">From → to</th>
                 </tr>
@@ -158,6 +183,29 @@
             </table>
           </div>
         </div>
+
+        <!-- What the rules said about the data above. Hidden until the first check. -->
+        <section id="findings-panel" class="panel findings" hidden>
+          <h2>What the rules found</h2>
+
+          <!-- When the check ran, and whether it still describes what is in the tables.
+               One line in both states, so a check that lands does not shove the findings
+               down the page. app.js writes the text. -->
+          <p id="check-status" class="check-status" hidden></p>
+
+          <div id="check-error" class="box box-error" hidden role="alert">
+            <strong>Could not check the drawing.</strong>
+            <p id="check-error-text"></p>
+          </div>
+
+          <div id="check-parse-issues" class="box box-warn" hidden>
+            <strong>Some items could not be read and were left out of the check:</strong>
+            <ul id="check-parse-issues-list"></ul>
+          </div>
+
+          <p id="findings-none" class="findings-none" hidden>No issues found.</p>
+          <ul id="findings-list" class="findings-list"></ul>
+        </section>
       </section>
     </main>
 
