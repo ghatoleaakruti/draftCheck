@@ -59,9 +59,23 @@ body {
 }
 
 main,
-.masthead {
+.masthead,
+.site-footer {
   max-width: 1280px;
   margin: 0 auto;
+}
+
+/* The one standing note about the demo: quiet, always there, never in the way. */
+.site-footer {
+  padding: 24px 0 32px;
+  border-top: 1px solid var(--line);
+  margin-top: 32px;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.site-footer p {
+  margin: 0;
 }
 
 .masthead {

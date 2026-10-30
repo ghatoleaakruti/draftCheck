@@ -10,12 +10,22 @@ rules themselves, the loop, and the redline have their own tests.
 """
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from draftcheck.api import DEMO_ENV_VAR, app, get_client_factory, get_runs_root
+from draftcheck.api import (
+    DEMO_ENV_VAR,
+    app,
+    get_cleaner,
+    get_client_factory,
+    get_limiter,
+    get_runs_root,
+)
+from draftcheck.limits import LIMIT_MESSAGE, Cleaner, Limits, UsageLimiter
 from draftcheck.llm_client import JSONChatResult, Usage
 from draftcheck.prompts import EXTRACTION_SYSTEM
 
@@ -62,12 +72,28 @@ def fake() -> FakeClient:
     return FakeClient(extraction_data())
 
 
+#: Limits for the ordinary tests: generous enough that no test hits one by accident, so a
+#: 429 anywhere below is a real failure rather than a test that uploaded one time too many.
+ROOMY = Limits(uploads_per_ip_per_hour=1000, fixes_per_ip_per_hour=1000, model_calls_per_day=1000)
+
+
+def make_client(tmp_path: Path, fake: FakeClient, limiter: UsageLimiter, cleaner: Cleaner):
+    """A TestClient with every outside edge replaced: files, model, counters, and clock.
+
+    The counters are per test, because they are process-wide in production — one shared
+    limiter would make a test's result depend on how many tests ran before it.
+    """
+    app.dependency_overrides[get_runs_root] = lambda: tmp_path
+    app.dependency_overrides[get_client_factory] = lambda: (lambda provider=None: fake)
+    app.dependency_overrides[get_limiter] = lambda: limiter
+    app.dependency_overrides[get_cleaner] = lambda: cleaner
+    return TestClient(app)
+
+
 @pytest.fixture
 def client(tmp_path: Path, fake: FakeClient):
     """A TestClient whose runs land in tmp_path and whose model is the fake."""
-    app.dependency_overrides[get_runs_root] = lambda: tmp_path
-    app.dependency_overrides[get_client_factory] = lambda: (lambda provider=None: fake)
-    with TestClient(app) as test_client:
+    with make_client(tmp_path, fake, UsageLimiter(ROOMY), Cleaner(ROOMY)) as test_client:
         yield test_client
     app.dependency_overrides.clear()
 
@@ -617,3 +643,125 @@ def test_static_page_and_its_two_files_are_served(client: TestClient):
     # `[hidden]` — so without this one declaration the spinner never goes away.
     assert "[hidden]" in stylesheet.text
     assert "display: none !important" in stylesheet.text
+
+
+# ---- Demo limits -------------------------------------------------------------
+#
+# The numbers live in `draftcheck.limits` and are tested there against a clock this test
+# can move. What is tested here is the HTTP behaviour: which request gets a 429, what it
+# says, and which address it was counted against.
+
+
+def limited(tmp_path: Path, fake: FakeClient, limits: Limits):
+    """A TestClient with real (small) limits, so a few requests reach them."""
+    return make_client(tmp_path, fake, UsageLimiter(limits), Cleaner(limits))
+
+
+def upload_response(client: TestClient, **headers):
+    """Post the drawing and return the raw response, accepted or not."""
+    with DRAWING.open("rb") as handle:
+        return client.post(
+            "/api/runs",
+            files={"file": (DRAWING.name, handle, "application/pdf")},
+            headers=headers or None,
+        )
+
+
+def test_a_sixth_upload_in_an_hour_is_refused(tmp_path: Path, fake: FakeClient):
+    """Five uploads an hour per address; the sixth is a 429 with the demo's message."""
+    with limited(tmp_path, fake, Limits()) as client:
+        for _ in range(5):
+            assert upload_response(client).status_code == 201
+
+        refused = upload_response(client)
+        assert refused.status_code == 429
+        assert refused.json()["detail"] == LIMIT_MESSAGE
+        # The sixth upload cost nothing: no folder, and the model was never asked.
+        assert len(list(tmp_path.iterdir())) == 5
+        assert fake.calls == ["extract"] * 5
+    app.dependency_overrides.clear()
+
+
+def test_a_refused_upload_does_not_spend_a_slot(tmp_path: Path, fake: FakeClient):
+    """A wrong file type is rejected before the claim, so it is not one of the five."""
+    limits = Limits(uploads_per_ip_per_hour=1)
+    with limited(tmp_path, fake, limits) as client:
+        bad = client.post("/api/runs", files={"file": ("notes.txt", b"hello", "text/plain")})
+        assert bad.status_code == 415
+        assert upload_response(client).status_code == 201
+    app.dependency_overrides.clear()
+
+
+def test_the_fix_route_has_its_own_hourly_allowance(tmp_path: Path, fake: FakeClient):
+    limits = Limits(uploads_per_ip_per_hour=50, fixes_per_ip_per_hour=1, model_calls_per_day=50)
+    with limited(tmp_path, fake, limits) as client:
+        first = upload_response(client).json()["run_id"]
+        second = upload_response(client).json()["run_id"]
+        for run_id in (first, second):
+            confirmed = client.post(f"/api/runs/{run_id}/check", json=extraction_data())
+            assert confirmed.status_code == 200
+
+        assert client.post(f"/api/runs/{first}/fix").status_code == 200
+        refused = client.post(f"/api/runs/{second}/fix")
+        assert refused.status_code == 429
+        assert refused.json()["detail"] == LIMIT_MESSAGE
+    app.dependency_overrides.clear()
+
+
+def test_the_day_cap_stops_everyone(tmp_path: Path, fake: FakeClient):
+    """Two different addresses, a budget of one model call: the second is refused."""
+    limits = Limits(uploads_per_ip_per_hour=50, model_calls_per_day=1, trust_proxy=True)
+    with limited(tmp_path, fake, limits) as client:
+        assert upload_response(client, **{"X-Forwarded-For": "1.1.1.1"}).status_code == 201
+        refused = upload_response(client, **{"X-Forwarded-For": "2.2.2.2"})
+        assert refused.status_code == 429
+        assert refused.json()["detail"] == LIMIT_MESSAGE
+    app.dependency_overrides.clear()
+
+
+def test_forwarded_for_counts_only_when_the_proxy_is_trusted(tmp_path: Path, fake: FakeClient):
+    """With TRUST_PROXY on, two headers are two visitors; with it off, they are one."""
+    trusting = Limits(uploads_per_ip_per_hour=1, model_calls_per_day=50, trust_proxy=True)
+    with limited(tmp_path, fake, trusting) as client:
+        assert upload_response(client, **{"X-Forwarded-For": "1.1.1.1"}).status_code == 201
+        assert upload_response(client, **{"X-Forwarded-For": "2.2.2.2"}).status_code == 201
+        assert upload_response(client, **{"X-Forwarded-For": "1.1.1.1"}).status_code == 429
+    app.dependency_overrides.clear()
+
+    plain = Limits(uploads_per_ip_per_hour=1, model_calls_per_day=50, trust_proxy=False)
+    with limited(tmp_path, fake, plain) as client:
+        assert upload_response(client, **{"X-Forwarded-For": "1.1.1.1"}).status_code == 201
+        # Same connection, a new header, and no reason to believe it: still one visitor.
+        assert upload_response(client, **{"X-Forwarded-For": "2.2.2.2"}).status_code == 429
+    app.dependency_overrides.clear()
+
+
+def test_healthz_answers_without_a_model(client: TestClient, fake: FakeClient):
+    response = client.get("/healthz")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert fake.calls == []
+
+
+def test_startup_sweeps_run_folders_older_than_a_day(tmp_path: Path, fake: FakeClient):
+    """Entering the app's lifespan clears the backlog and leaves today's runs alone."""
+    old = tmp_path / "11111111-1111-4111-8111-111111111111"
+    recent = tmp_path / "22222222-2222-4222-8222-222222222222"
+    for folder in (old, recent):
+        folder.mkdir()
+        (folder / "page.png").write_bytes(b"\x89PNG")
+    stale = time.time() - 30 * 3600
+    os.utime(old, (stale, stale))
+
+    with limited(tmp_path, fake, Limits()):
+        pass
+    app.dependency_overrides.clear()
+
+    assert not old.exists()
+    assert (recent / "page.png").is_file()
+
+
+def test_the_page_says_usage_is_limited(client: TestClient):
+    """Told up front, in the page itself rather than only in a 429."""
+    page = client.get("/")
+    assert "Demo usage is limited to keep it free for everyone." in page.text
