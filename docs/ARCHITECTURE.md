@@ -74,8 +74,8 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/agent.py` | `correct(drawing, image_png, client, max_rounds=3)` → `CorrectionReport`. One round = ask, apply, re-run `rules.run_rules`, diff the findings. Records `proposed`, `applied`, `rejected`, findings before and after, `resolved`, and `introduced` per round, and a resolved/unresolved verdict per original finding — all computed from the re-run, never from the model's claim. Stops when no error-severity finding is left or after `max_rounds` — see §4.5 | **BUILT** |
 | `draftcheck/redline.py` | `render_redline(page_png, findings, report=None, model_name=None, when=None)` → two pillow pages, and `save_redline(pages, path_pdf, path_png)` → a 2-page PDF plus page 1 as a PNG. Pillow only, drawn on the rendered page image. Markers are numbered in `run_rules` order, so a number means the same finding on page 1, on page 2, and in `findings.json`. `findings_text(findings, report)` returns page 2's wording as styled lines, so the text can be tested without reading pixels — see §4.7 | **BUILT** |
 | `draftcheck/api.py` | FastAPI app over the same four modules the CLI drives: upload + extract, check the confirmed data, run the correction loop, serve the page image and the redline. One run is one folder under `outputs/web/<uuid4>/`, so each request reads what the previous one wrote — see §4.8. Decides nothing itself | **BUILT** |
-| `draftcheck/static/` | The browser page, served at `/`: `index.html`, `style.css`, `app.js`. Plain HTML, CSS, and JavaScript — no framework, no build step, nothing loaded from a CDN. Today the upload area is a drag-and-drop zone (click, Enter, or Space opens the file dialog; a dropped file starts reading at once) that rejects a wrong type or a file over 10 MB in the page before any request, beside the provider selector. It uploads the drawing (`POST /api/runs`) and shows what came back: the rendered page beside read-only tables of units, datums, dimensions, and frames, plus model, latency, and any `parse_issues`. The tables and the drawing are linked by item id: every item with a `bbox` gets a faint box drawn over the page image (positioned in percentages, so it stays aligned at any size), hovering a row or a box lights both, and clicking either scrolls the other into view and keeps it lit until the next click. A "Show what Muse Spark read" toggle, on by default, hides the boxes; a row whose item came back without a `bbox` is marked "no location" and is not interactive. Tables are built with `textContent`, so model output is never treated as markup | **BUILT** (upload + view + linked highlighting) |
-| `frontend/` | Editing the extraction in the browser, then driving `/check` and `/fix` from the page and showing the findings and the redline | PLANNED |
+| `draftcheck/static/` | The browser page, served at `/`: `index.html`, `style.css`, `app.js`. Plain HTML, CSS, and JavaScript — no framework, no build step, nothing loaded from a CDN. The upload area is a drag-and-drop zone (click, Enter, or Space opens the file dialog; a dropped file starts reading at once) that rejects a wrong type or a file over 10 MB in the page before any request, beside the provider selector. It uploads the drawing (`POST /api/runs`) and shows what came back: the rendered page beside tables of units, datums, dimensions, and frames, plus model, latency, and any `parse_issues`. **The tables are editable** — see §4.9 — and a Check drawing button posts the edited drawing to `POST /api/runs/{id}/check` and lists the findings underneath. The tables and the drawing are linked by item id: every item with a `bbox` gets a faint box drawn over the page image (positioned in percentages, so it stays aligned at any size), hovering a row or a box lights both, and clicking either scrolls the other into view and keeps it lit until the next click; clicking a finding lights every item in its `item_ids`. A "Show what Muse Spark read" toggle, on by default, hides the boxes; a row whose item came back without a `bbox` is marked "no location". Cells are written with `textContent` or as an input's `value`, so model output is never treated as markup | **BUILT** (upload + view + edit + check) |
+| `frontend/` | Driving `/fix` from the page and showing the correction report and the redline | PLANNED |
 | `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch. The ground truth is written in `schema.py`'s field names — plus `bbox_convention` and `seeded_errors` — so it parses as a `Drawing` and doubles as the target an extraction is scored against | **BUILT** |
 | `scripts/smoke_test.py` | One-shot check that the configured model answers over the network; `--provider baseten\|meta` picks which one | **BUILT** |
 | `scripts/extract_spike.py` | One extraction pass on a drawing: renders it, calls `chat_json`, and writes `outputs/spike/<name>.raw.txt`, `.json`, and `.overlay.png` (red boxes = model bboxes, green = ground truth from `--gt`). A look-at-it tool; it decides nothing | **BUILT** |
@@ -484,6 +484,73 @@ $ curl -s -o redline.pdf -w '%{http_code} %{content_type} %{size_download}' .../
 Same drawing, same model, and the same correction the CLI gets — over HTTP, with the data
 passing through a client in between.
 
+### 4.9 Editing the extraction in the page — BUILT
+
+A model reading a drawing gets things wrong, and the rules are only worth running on data
+a person has agreed with. So the review tables are an editor, and what they produce is the
+body of `POST /api/runs/{id}/check`.
+
+**Two copies.** `app.js` keeps `original` — what the model read, never touched — and
+`working`, a deep copy the inputs write into. `working` *is* the request body, so every
+field nobody edited is passed through exactly as extracted; `original` is what the edited
+marks compare against and what Reset restores.
+
+**What is editable, and with what control.** A choice gets a control that can only express
+the choices, so a typo cannot reach the server as a value:
+
+| Field | Control |
+| --- | --- |
+| `units` | select: mm, in, none |
+| `general_tolerance.linear_plus_minus` | number, optional, ≥ 0 |
+| datum `label` | text, a single letter; Add datum and a Remove per row |
+| dimension `value` | number, required (may be negative) |
+| dimension `tol_plus`, `tol_minus` | number, optional, ≥ 0 |
+| dimension `is_basic` | checkbox |
+| FCF `tolerance` | number, required, ≥ 0 |
+| FCF `material_modifier` | select: none, MMC, LMC |
+| FCF `datum_refs` | text, `A&#124;B(MMC)&#124;C`, parsed into the list of refs |
+
+Text as printed, from → to, and the characteristic stay read-only: they are the model's
+transcription of what is on the sheet, which is evidence rather than data to adjust.
+
+**Marking.** A cell holding something other than what the model read gets a green left
+accent and a tooltip naming the original value — so a reviewer can see at a glance which
+numbers are theirs. "Reset to what the model read" puts every cell back.
+
+**Validation happens in the page.** An unusable value (a tolerance that will not parse, a
+datum called "AB") outlines its input, puts the reason in its tooltip, and keeps Check
+disabled until it is fixed; the value is not written into `working`, so nothing half-typed
+is ever posted. A datum added with the button opens with no label, which is exactly such a
+cell.
+
+**Ids.** Added datums get their id from the page (`DT3`, the first free one), not from the
+server's positional numbering, which could hand a new datum an id another one already has.
+The id is what ties the row, the box on the drawing, and any finding about it together.
+
+**Findings.** Check posts `working`, then lists what came back: rule id, severity (error in
+red, warning in amber), message, and any `parse_issues` the server reported while reading
+the body. Clicking a finding lights every item in its `item_ids`, on the drawing and in the
+tables, through the same highlighting a row click uses.
+
+**The panel never empties.** While the request is out, only the button changes; the previous
+findings stay up, because they are still the last thing known to be true. The button is
+disabled on the click, which is what stops a double submit, but the "Checking…" label waits
+on a 300 ms timer (`SLOW_CHECK_MS`) and is cleared if the answer beats it — a local check
+returns in about 100 ms, and a word that appears and vanishes inside a fifth of a second
+reads as a glitch rather than as progress. The reply is swapped in with a single `replaceChildren` per list, so there is no
+frame in which the panel holds nothing, and a failed check keeps the old findings and puts
+the reason above them.
+
+One line under the panel title carries both the freshness and the staleness: "Checked at
+14:32:07", turning amber and adding "edited since; check again" when the tables have moved
+on — findings are only true of the data they were computed from. It is one line in both
+states deliberately. The first version used a bordered warning box for the stale state,
+which meant a check that landed deleted a 114-pixel block and dragged the findings up the
+page after it; that jump, plus the list un-fading from 0.55 opacity, was the "flicker" the
+panel used to show. The panel also tints for half a second on each update (skipped under
+`prefers-reduced-motion`), so a new answer that happens to read identically is still
+visibly new.
+
 ## 5. Repo layout (what exists today)
 
 ```
@@ -508,7 +575,7 @@ draftCheck/
 │   ├── redline.py              # BUILT  two-page redline, pillow only
 │   ├── rules.py                # BUILT
 │   ├── schema.py               # BUILT
-│   └── static/                 # BUILT  upload + view page served at /, boxes linked to the tables
+│   └── static/                 # BUILT  upload, edit, and check page served at /, boxes linked to the tables
 │       ├── index.html
 │       ├── style.css
 │       └── app.js
@@ -590,5 +657,5 @@ draftCheck/
 | --- | --- | --- |
 | 1 | Extraction + JSON schema + rule engine + test generator | BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`, `rules.py` with 6 rules, and `pipeline.py` + `cli.py` joining them into one `check` command that runs a drawing end to end. More rules can be added to the registry as the sample set grows |
 | 2 | Agent correction loop + redlined PDF | BUILT: `edits.py` (the four allowed operations and their guards), `agent.py` (the three-round loop), and `redline.py` (the two-page redline), wired into `check --fix --redline` and verified end to end on plate_001 |
-| 3 | Web UI + live deploy | PARTLY BUILT: `api.py` serves the whole flow over HTTP — upload + extract, check the confirmed data, run the loop, fetch the redline — verified end to end against the live model on plate_001. The browser page uploads a drawing and shows what the model read; editing that data in the page, running the check and the fix from it, and the deploy are next |
+| 3 | Web UI + live deploy | PARTLY BUILT: `api.py` serves the whole flow over HTTP — upload + extract, check the confirmed data, run the loop, fetch the redline — verified end to end against the live model on plate_001. The browser page uploads a drawing, shows what the model read, lets the reviewer correct it, and runs the check from it (§4.9); running the fix from the page and the deploy are next |
 | 4 | After hackathon: SAM 3.1 precision, revisions, link to Research Paper Recommender | PLANNED (post-hackathon) |

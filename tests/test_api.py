@@ -188,6 +188,43 @@ def test_edited_data_changes_the_findings(client: TestClient):
     assert after.json()["error_count"] == 0
 
 
+def test_review_screen_payload_clears_gdt_001(client: TestClient):
+    """The body the review screen builds is accepted whole, and the edits are what run.
+
+    Shaped exactly as ``app.js`` posts it: the extraction with the user's edits written
+    into it and every other field passed through, an added datum carrying an id the page
+    chose rather than one the server will have to invent, and the frame's datum
+    references rebuilt from the "A|B|C" cell. Defining C clears the undefined-datum
+    error, and the untouched fields come back unchanged.
+    """
+    created = upload(client)
+    run_id = created["run_id"]
+    drawing = created["drawing"]
+
+    as_read = client.post(f"/api/runs/{run_id}/check", json=drawing)
+    assert "GDT-001" in rule_ids(as_read.json()["findings"])
+
+    # Datum ids DT1 and DT2 were assigned at extraction, so the page picks DT3.
+    drawing["datums"].append({"id": "DT3", "label": "C", "location": None, "bbox": None})
+    # An edited number and an edited frame, to prove the rest of the body is read too.
+    drawing["dimensions"][0]["tol_plus"] = 0.2
+    drawing["fcfs"][0]["datum_refs"] = [
+        {"label": "A", "modifier": None},
+        {"label": "B", "modifier": None},
+        {"label": "C", "modifier": None},
+    ]
+
+    response = client.post(f"/api/runs/{run_id}/check", json=drawing)
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert "GDT-001" not in rule_ids(body["findings"])
+    assert body["parse_issues"] == []
+    # The findings name items by id, which is what the page highlights on.
+    for finding in body["findings"]:
+        assert finding["item_ids"]
+
+
 def test_check_rewrites_confirmed_json(client: TestClient, tmp_path):
     """A second confirmation replaces the first, so /fix always uses the latest data."""
     created = upload(client)

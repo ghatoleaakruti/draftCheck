@@ -23,6 +23,10 @@
   --box-hot-fill: #1f5fa91f;
   --box-pick: #b26a00;
   --box-pick-fill: #b26a0029;
+  /* A cell the user changed: a third colour again, so "edited" is never mistaken for
+     "hovered" or "chosen". */
+  --edited: #4a7f3f;
+  --edited-bg: #4a7f3f14;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
 }
@@ -457,4 +461,275 @@ table.data td.mono {
 .empty {
   color: var(--ink-soft);
   font-style: italic;
+}
+
+/* ---- Editing the tables ---- */
+
+/* The bar above the tables: what you can do to the whole extraction. */
+.edit-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.edit-hint {
+  flex: 1 1 240px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.edit-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* The page's one existing button sits under a label and carries a margin for it. These
+   do not, so they set their own. */
+.btn {
+  margin-top: 0;
+  padding: 7px 14px;
+  font-size: 13px;
+}
+
+.btn-quiet {
+  background: var(--paper);
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+.btn-quiet:hover:not(:disabled) {
+  background: var(--shell);
+  border-color: var(--accent);
+}
+
+.btn-small {
+  margin-top: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+/* A disabled Check means a cell needs fixing, not that the app is working. */
+.btn:disabled {
+  cursor: not-allowed;
+}
+
+.invalid-note {
+  flex: 1 0 100%;
+  margin: 0;
+  font-size: 12px;
+  color: var(--error-line);
+}
+
+/* The controls inside the cells. Borderless until pointed at, so a table of inputs
+   still reads as a table rather than as a wall of boxes. */
+.cell-input {
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  width: 100%;
+  min-width: 0;
+  padding: 2px 4px;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+}
+
+.cell-input:hover {
+  border-color: var(--line);
+}
+
+.cell-input:focus {
+  outline: none;
+  background: var(--paper);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px #1f5fa926;
+}
+
+.cell-number {
+  max-width: 9ch;
+}
+
+.cell-label {
+  max-width: 4ch;
+  text-transform: uppercase;
+}
+
+.cell-select {
+  min-width: 0;
+  width: auto;
+}
+
+.cell-check {
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+/* A value that cannot be sent: outlined here, named in the input's tooltip, and keeping
+   the Check button disabled until it is fixed. */
+.cell-input.is-invalid,
+.cell-input.is-invalid:hover {
+  border-color: var(--error-line);
+  background: var(--error-bg);
+}
+
+/* A cell holding something other than what the model read. The accent is on the left
+   edge so a column of edits is visible without reading any of them. */
+table.data td.is-edited,
+table.data tbody td.is-edited {
+  border-left: 3px solid var(--edited);
+  background: var(--edited-bg);
+}
+
+/* Pointing at a row or choosing it still wins over the edited tint, which would
+   otherwise take the row's colour back at the one moment it is being looked at. */
+table.data tbody tr.is-hot td.is-edited {
+  background: var(--box-hot-fill);
+}
+
+table.data tbody tr.is-picked td.is-edited {
+  background: var(--box-pick-fill);
+}
+
+.btn-row {
+  font: inherit;
+  font-size: 12px;
+  margin: 0;
+  padding: 3px 8px;
+  color: var(--ink-soft);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-row:hover {
+  color: var(--error-line);
+  border-color: var(--error-line);
+  background: var(--error-bg);
+}
+
+/* ---- Findings ---- */
+
+.findings {
+  margin-top: 20px;
+}
+
+/* When the check ran. One line, in one place, whether or not it is still current — so
+   a check that lands replaces text rather than removing a block and dragging the
+   findings up the page after it. */
+.check-status {
+  margin: -6px 0 14px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--ink-soft);
+}
+
+/* Edited since: the findings below are about data that is no longer in the tables. */
+.check-status.is-stale {
+  color: #8a6400;
+  font-weight: 600;
+}
+
+/* A new answer can look identical to the old one, so say that something happened. The
+   tint is on the panel and lasts half a second; nothing moves. */
+@keyframes findings-updated {
+  from {
+    background: #eaf1fa;
+  }
+  to {
+    background: var(--paper);
+  }
+}
+
+.findings.is-fresh {
+  animation: findings-updated 0.5s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .findings.is-fresh {
+    animation: none;
+  }
+}
+
+.findings-none {
+  margin: 0;
+  color: var(--ink-soft);
+}
+
+.findings-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.finding {
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: 4px;
+  background: var(--paper);
+  cursor: pointer;
+}
+
+.finding:hover {
+  background: var(--shell);
+}
+
+.finding:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.finding.sev-error {
+  border-color: var(--error-line);
+  background: var(--error-bg);
+}
+
+.finding.sev-warning {
+  border-color: var(--warn-line);
+  background: var(--warn-bg);
+}
+
+.finding-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+}
+
+.sev-tag {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.sev-error .sev-tag {
+  color: var(--error-line);
+}
+
+.sev-warning .sev-tag {
+  color: #8a6400; /* The warning line colour is too pale to read as text. */
+}
+
+.rule-id {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.finding-message {
+  margin: 4px 0 0;
+  font-size: 13px;
 }
