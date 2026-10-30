@@ -109,6 +109,37 @@ def test_unsupported_suffix_raises(tmp_path: Path) -> None:
         load_pages(bad)
 
 
+def test_corrupt_pdf_raises_render_error(tmp_path: Path) -> None:
+    """A file named .pdf that is not one. pypdfium2's own error must not escape.
+
+    Every caller catches ``RenderError`` and nothing else, so an error class leaking from
+    a dependency is an exit code or a status code that never happens.
+    """
+    bad = tmp_path / "corrupt.pdf"
+    bad.write_bytes(b"certainly not a pdf")
+    with pytest.raises(RenderError, match="Not a readable PDF"):
+        load_pages(bad)
+
+
+def test_corrupt_image_raises_render_error(tmp_path: Path) -> None:
+    """The same for pillow, which raises ``UnidentifiedImageError``."""
+    bad = tmp_path / "corrupt.png"
+    bad.write_bytes(b"certainly not a png")
+    with pytest.raises(RenderError, match="Not a readable image"):
+        load_pages(bad)
+
+
+def test_truncated_image_raises_render_error(tmp_path: Path) -> None:
+    """A half-written file opens and then fails during load, which is a different path."""
+    whole = io.BytesIO()
+    Image.new("RGB", (80, 60), "white").save(whole, format="PNG")
+    truncated = tmp_path / "half.png"
+    truncated.write_bytes(whole.getvalue()[: len(whole.getvalue()) // 2])
+
+    with pytest.raises(RenderError):
+        load_pages(truncated)
+
+
 @pytest.mark.parametrize(("dpi", "max_side"), [(0, 2400), (-1, 2400), (200, 0), (200, -5)])
 def test_bad_arguments_raise(sample_pdf: Path, dpi: int, max_side: int) -> None:
     with pytest.raises(RenderError):

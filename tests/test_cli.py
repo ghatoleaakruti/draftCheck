@@ -102,6 +102,39 @@ def test_a_missing_drawing_exits_2(tmp_path, capsys):
     assert "Could not read the drawing" in capsys.readouterr().err
 
 
+def test_a_corrupt_drawing_exits_2(tmp_path, capsys):
+    """A file named .pdf that is not one is a failed run, not a traceback.
+
+    pypdfium2 raises its own error for this; `render.load_pages` translates it, which is
+    what lets the CLI report it like any other unreadable drawing and exit 2.
+    """
+    corrupt = tmp_path / "corrupt.pdf"
+    corrupt.write_bytes(b"certainly not a pdf")
+
+    code = main(
+        ["check", str(corrupt), "--from-json", str(FIXTURE_JSON), "--out", str(tmp_path)]
+    )
+
+    assert code == EXIT_FAILED
+    captured = capsys.readouterr()
+    assert "Could not read the drawing" in captured.err
+    assert "Not a readable PDF" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_a_corrupt_image_exits_2(tmp_path, capsys):
+    """The same for an image: pillow's own error is translated too."""
+    corrupt = tmp_path / "corrupt.png"
+    corrupt.write_bytes(b"certainly not a png")
+
+    code = main(
+        ["check", str(corrupt), "--from-json", str(FIXTURE_JSON), "--out", str(tmp_path)]
+    )
+
+    assert code == EXIT_FAILED
+    assert "Not a readable image" in capsys.readouterr().err
+
+
 def test_a_missing_extraction_file_exits_2(tmp_path, capsys):
     code = main(
         [

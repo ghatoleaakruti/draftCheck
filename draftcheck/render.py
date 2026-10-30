@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pypdfium2 as pdfium
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 PDF_SUFFIXES = {".pdf"}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
@@ -61,7 +61,11 @@ def load_pages(path: str | Path, dpi: int = 200, max_side: int = 2400) -> list[P
         max_side: Longest allowed pixel side; larger pages are scaled down.
 
     Raises:
-        RenderError: If the file is missing, empty, or an unsupported type.
+        RenderError: If the file is missing, empty, an unsupported type, or cannot be
+            read as the kind of file its extension claims. A file named ``.pdf`` that is
+            not one is the caller's problem, not a crash: pypdfium2 and pillow each raise
+            their own error for it, and both are translated here so that every caller —
+            the CLI's exit code, the API's status code — has one exception to catch.
     """
     path = Path(path)
     if dpi <= 0:
@@ -73,16 +77,26 @@ def load_pages(path: str | Path, dpi: int = 200, max_side: int = 2400) -> list[P
 
     suffix = path.suffix.lower()
     if suffix in IMAGE_SUFFIXES:
-        with Image.open(path) as image:
-            image.load()
-            return [_to_page_image(image, max_side)]
+        try:
+            with Image.open(path) as image:
+                image.load()
+                return [_to_page_image(image, max_side)]
+        except UnidentifiedImageError as exc:
+            raise RenderError(f"Not a readable image: {path}") from exc
+        except OSError as exc:
+            # A truncated or half-written file opens and then fails during load.
+            raise RenderError(f"Could not read the image {path}: {exc}") from exc
 
     if suffix not in PDF_SUFFIXES:
         supported = ", ".join(sorted(PDF_SUFFIXES | IMAGE_SUFFIXES))
         raise RenderError(f"Unsupported file type {suffix!r} for {path}. Supported: {supported}")
 
     pages: list[PageImage] = []
-    pdf = pdfium.PdfDocument(path)
+    try:
+        pdf = pdfium.PdfDocument(path)
+    except pdfium.PdfiumError as exc:
+        raise RenderError(f"Not a readable PDF: {path} ({exc})") from exc
+
     try:
         if len(pdf) == 0:
             raise RenderError(f"PDF has no pages: {path}")
@@ -90,6 +104,9 @@ def load_pages(path: str | Path, dpi: int = 200, max_side: int = 2400) -> list[P
         for page in pdf:
             bitmap = page.render(scale=scale)
             pages.append(_to_page_image(bitmap.to_pil(), max_side))
+    except pdfium.PdfiumError as exc:
+        # A document that loads can still have a page that will not draw.
+        raise RenderError(f"Could not render {path}: {exc}") from exc
     finally:
         pdf.close()
 
