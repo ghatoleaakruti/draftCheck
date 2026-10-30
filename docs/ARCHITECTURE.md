@@ -24,7 +24,8 @@ always produces the same verdicts. No rule outcome is ever read out of a model r
 
 ## 3. Pipeline — PARTLY BUILT
 
-Render, Extract, and Check work today; the stages between and after them are still planned.
+Render, Extract, Check, and Correct work today. The user-confirmation step and the redlined
+PDF output are still planned.
 
 ```mermaid
 flowchart TD
@@ -48,9 +49,11 @@ Stage notes:
 | Confirm | User reviews and edits the extracted values before any checking | PLANNED |
 | Check | Python rules produce pass/fail per rule, with no model involvement, via `rules.run_rules`, wrapped as `pipeline.check` | **BUILT** |
 
-Render → Extract → Check runs end to end today from one command, `python -m draftcheck.cli check` — see §4.3.
-| Correct | Agent proposes a fix, rules re-run to verify it; **max 3 rounds**, then stop | PLANNED |
+| Correct | Agent proposes edits from a fixed menu, Python applies the safe ones and re-runs the rules to verify; **max 3 rounds**, then stop. `agent.correct`, see §4.5 | **BUILT** |
 | Output | Annotated PDF with redline markup and a findings list | PLANNED |
+
+Render → Extract → Check → Correct runs end to end today from one command,
+`python -m draftcheck.cli check --fix` — see §4.3.
 
 The 3-round cap is a hard stop: if a proposed correction still fails, the finding is
 reported unresolved rather than retried indefinitely.
@@ -63,12 +66,13 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/config.py` | Locates `.env` with `find_dotenv` and builds a frozen `Provider` (name, base_url, model, api_key) for one of the providers in `PROVIDER_ENV_VARS` — see §4.4; raises `ConfigError` naming any missing variable, and masks the key in `repr` | **BUILT** |
 | `draftcheck/llm_client.py` | `LLMClient.chat(system, user)` over the configured provider's OpenAI-compatible endpoint at `temperature=0`; `chat_json(system, user, images)` additionally sends PNG pages as `image_url` data URIs, parses the reply with `extract_json`, and retries once on `JSONParseError`. Both return latency, token usage, and model id | **BUILT** |
 | `draftcheck/render.py` | `load_pages(path, dpi, max_side)` rasterizes a PDF with pypdfium2 or loads a PNG/JPG with pillow; returns `PageImage` (PNG bytes, width, height) per page, scaled down to `max_side` | **BUILT** |
-| `draftcheck/prompts.py` | `EXTRACTION_SYSTEM` and `EXTRACTION_USER`: the model is a transcription engine that reports what is printed and never invents or repairs a callout; the user prompt fixes the JSON key set and the field rules, including each dimension's `from_ref`/`to_ref` endpoints (§4.2). Correction wording still to come | **BUILT** |
-| `draftcheck/schema.py` | pydantic v2 models for the extracted drawing (`Drawing`, `Dimension`, `FCF`, `DatumFeature`, `DatumRef`, `TitleBlock`, `GeneralTolerance`) and for rule output (`Finding`); `Units` and the 14-value `Characteristic` enum, plus `FORM_CONTROLS`. `parse_drawing(data)` validates a raw extraction dict: unknown keys are ignored, missing ids become `DT1…`/`D1…`/`F1…` (datums, dimensions, frames), and any item it cannot read is dropped into `Drawing.parse_issues` | **BUILT** |
+| `draftcheck/prompts.py` | `EXTRACTION_SYSTEM` and `EXTRACTION_USER`: the model is a transcription engine that reports what is printed and never invents or repairs a callout; the user prompt fixes the JSON key set and the field rules, including each dimension's `from_ref`/`to_ref` endpoints (§4.2). `CORRECTION_SYSTEM` and `correction_user(drawing_json, findings, history)`: the model is a drawing checker proposing the smallest edits that preserve design intent, one rationale sentence each, citing the finding ids it addresses. The operation catalogue in the user prompt is generated from `edits.ALLOWED_OPS` and `edits.DIMENSION_FIELDS`, so it cannot drift from what the code accepts | **BUILT** |
+| `draftcheck/schema.py` | pydantic v2 models for the extracted drawing (`Drawing`, `Dimension`, `FCF`, `DatumFeature`, `DatumRef`, `TitleBlock`, `GeneralTolerance`) and for rule output (`Finding`); `Units` and the 14-value `Characteristic` enum, plus `FORM_CONTROLS`. `parse_drawing(data)` validates a raw extraction dict: unknown keys are ignored, missing ids become `DT1…`/`D1…`/`F1…` (datums, dimensions, frames), and any item it cannot read is dropped into `Drawing.parse_issues`. `finding_key(finding)` names one finding as `<rule id>@<item ids>`, which is how rounds are compared and how the model cites a finding. `DatumFeature.location` is an optional plain-words description of where a symbol belongs: extraction leaves it empty, since a transcribed symbol already has a `bbox`, and the correction loop fills it in when it proposes a datum that is not on the sheet yet | **BUILT** |
 | `draftcheck/rules.py` | `Rule` dataclass (id, title, category, severity, `source`, `check`), the `RULES` registry, and `run_rules(drawing)`. Six rules today — see §4.1. Output is sorted by rule id then item ids, so the same drawing always gives the same list | **BUILT** |
 | `draftcheck/pipeline.py` | The two stages of one run, with no printing and no argument parsing, so the CLI and later the API can both drive them. `extract(path, client, dpi)` renders **page 1 only**, calls `chat_json` with the extraction prompts, and validates the reply with `parse_drawing`; it returns an `ExtractionResult` (the `Drawing` plus raw reply text, latency, model id, token usage, attempts). `check(drawing)` wraps `run_rules` | **BUILT** |
 | `draftcheck/cli.py` | The `check` subcommand — see §4.3. Writes the run's files, prints the findings table and any `parse_issues`, and sets the exit code | **BUILT** |
-| `draftcheck/agent.py` | Correction loop: propose, re-check, stop at 3 rounds | PLANNED |
+| `draftcheck/edits.py` | The four operations the agent may propose — `set_field`, `add_datum`, `remove_datum_ref`, `add_dimension` — as pydantic models, plus `apply_edits(drawing, edits)` returning `(new_drawing, applied, rejected)`. Applies one edit at a time to a copy, re-validating the whole drawing after each, and refuses anything that deletes a feature, touches a protected field, names an unknown id, uses an unknown operation, or silently fails to take. Never raises on bad model output — see §4.6 | **BUILT** |
+| `draftcheck/agent.py` | `correct(drawing, image_png, client, max_rounds=3)` → `CorrectionReport`. One round = ask, apply, re-run `rules.run_rules`, diff the findings. Records `proposed`, `applied`, `rejected`, findings before and after, `resolved`, and `introduced` per round, and a resolved/unresolved verdict per original finding — all computed from the re-run, never from the model's claim. Stops when no error-severity finding is left or after `max_rounds` — see §4.5 | **BUILT** |
 | `draftcheck/redline.py` | Overlays markup on the original PDF; library to be chosen in Layer 2 | PLANNED |
 | `draftcheck/api.py` | FastAPI app: upload, confirm, results endpoints | PLANNED |
 | `frontend/` | Upload page, extraction review/edit screen, findings view | PLANNED |
@@ -134,7 +138,21 @@ including both overall sizes and both hole locations.
 
 ```
 python -m draftcheck.cli check <drawing> [--from-json path] [--provider baseten|meta]
-                                         [--out dir] [--dpi n]
+                                         [--fix] [--out dir] [--dpi n]
+```
+
+`--fix` runs the correction loop after the check (§4.5) and prints, per round, what was
+proposed, what was applied with its rationale, what was rejected and why, and which
+findings cleared or appeared — then a status table of the findings the drawing started
+with. It calls the model even under `--from-json`, because the saved extraction only
+covers the check.
+
+`--fix` does **not** change the exit code, which always describes the drawing as
+submitted. A drawing whose errors the loop resolved still exits `1`, and the run says so
+on its last line:
+
+```
+Agent proposals are unreviewed; original drawing has 1 error(s).
 ```
 
 `--provider` chooses the model to call (§4.4); with no flag it follows `LLM_PROVIDER` in
@@ -152,6 +170,7 @@ Each run writes to `--out`, defaulting to `outputs/runs/<drawing-name>/`:
 | `extraction.json` | The validated `Drawing`, including `parse_issues` |
 | `findings.json` | The findings list, in `run_rules` order |
 | `raw.txt` | The model's reply exactly as received. **Only written when the model ran** |
+| `corrections.json` | Every round (proposed, applied, rejected with reasons, findings before and after, resolved, introduced), the per-finding status, the final findings, and the corrected drawing. **Only written with `--fix`** |
 
 Exit codes are meant for CI: `0` clean, `1` at least one error-severity finding, `2` the
 run could not happen at all (unreadable drawing, bad JSON, missing config, model failure).
@@ -217,6 +236,114 @@ dimension *text* tightly, while Baseten often boxes the whole dimension line plu
 for redline placement, not for any rule today. One drawing is not an evaluation — this is a
 baseline to widen as the sample set grows.
 
+### 4.5 The correction loop — BUILT
+
+`agent.correct(drawing, image_png, client, max_rounds=3)` returns a `CorrectionReport`.
+
+One round:
+
+1. Send the model the page image, the current drawing JSON (ids included), the current
+   findings with their `finding_key` names, and the history of earlier rounds.
+2. Take back `{"edits": [...]}` and hand it to `edits.apply_edits`, which applies what it
+   allows to a copy and refuses the rest with a reason (§4.6).
+3. Run `rules.run_rules` on the result.
+4. Diff the finding keys before against after. What disappeared is `resolved`; what
+   appeared is `introduced`.
+
+The loop stops when no **error**-severity finding is left, or after `max_rounds`. Warnings
+do not keep it running: MFG-001's edge-distance threshold is shop practice we chose
+ourselves, and spending rounds on it would push the model into changing a part's geometry
+to satisfy a number that is not a standard.
+
+The report carries the final drawing, the final findings, one `RoundRecord` per round, and
+a `resolved`/`unresolved` verdict for every finding the drawing started with.
+
+**The model's account of its own work is never read.** Each edit carries `rationale` and
+`finding_ids`; both go into the report for a person to read, and neither is used to mark
+anything resolved. A finding is resolved when the re-run stops reporting it. A test asserts
+exactly this: an edit that applies cleanly and claims the finding still leaves it
+unresolved, because the rules still report it.
+
+A round that fails outright — provider error, unusable reply — is recorded on the round
+with its `error` and stops the loop, keeping whatever earlier rounds achieved.
+
+#### A real run on plate_001 — 2026-10-29
+
+```
+$ python -m draftcheck.cli check samples/generated/plate_001.pdf --fix
+...
+RULE     SEVERITY  ITEMS  MESSAGE
+GDT-001  error     fcf_1  Feature control frame fcf_1 references datum C, but no datum
+                          feature symbol on the drawing defines C. ...
+
+1 error(s), 0 warning(s).
+
+Fixing with baseten / meta-models/muse-spark-open-1026...
+
+=== Correction loop — 1 round(s) ===
+
+Round 1: proposed 1, applied 1, rejected 0
+  applied   remove_datum_ref  datum C from frame fcf_1
+            why: The hole pattern is fully located in both directions by basic dimensions
+                 20 and 80 from datum B and 30 from datum A, so the position tolerance is
+                 completely defined and measurable with only the two existing orthogonal
+                 datums.
+            claims to address: GDT-001@fcf_1
+  findings  1 before -> 0 after
+  cleared   GDT-001@fcf_1
+
+STATUS    RULE     FINDING        MESSAGE
+resolved  GDT-001  GDT-001@fcf_1  Feature control frame fcf_1 references datum C, ...
+
+1 resolved, 0 unresolved (decided by re-running the rules, not by the model).
+Wrote extraction.json, findings.json, raw.txt, corrections.json to outputs/runs/plate_001/
+Agent proposals are unreviewed; original drawing has 1 error(s).
+$ echo $?
+1
+```
+
+The model chose the right fix for the right reason — the two datums present do locate the
+hole pattern, so the third reference is surplus rather than something to invent a feature
+for — and `remove_datum_ref` is on the menu precisely so it can say that without deleting
+the frame.
+
+### 4.6 What the agent is allowed to edit — BUILT
+
+The easiest way to clear a finding is to delete whatever caused it. Remove `fcf_1` and
+"references undefined datum C" disappears, with the drawing strictly worse. So the model
+does not edit the drawing; it proposes edits, and `edits.py` decides what happens.
+
+| Operation | What it does |
+| --- | --- |
+| `set_field` | Change one whitelisted field of one dimension, frame, or datum by id, or the drawing's `units` / `general_tolerance` |
+| `add_datum` | Add a datum feature symbol, with a label and a short location description in words (`bbox` optional) |
+| `remove_datum_ref` | Take one datum letter out of one frame. The frame and the datum both survive |
+| `add_dimension` | Add a dimension, given as the fields of a `Dimension` |
+
+There is no delete operation. The guards, in the order they fire:
+
+- **Unknown operation** — refused. If the name contains a deletion word (`remove`,
+  `delete`, `drop`, …) the refusal says the rule out loud, so the next round's history
+  tells the model why rather than just that.
+- **Unknown or missing id**, and a malformed proposal — refused with the field at fault.
+- **Protected fields** — `id` and `bbox` identify and locate an item, and `datum_refs` is a
+  list that one assignment could empty, so it changes only through `remove_datum_ref`.
+  `set_field` works off a whitelist per target, so nothing becomes editable by accident
+  when the schema grows.
+- **Invalid values** — the whole drawing is re-validated through `schema.parse_drawing`
+  after every single edit. Anything that produces an item the schema cannot read is rolled
+  back, and the edits around it still get their turn.
+- **Silent no-ops** — parsing is deliberately lenient (§7), so a negative `tol_plus`
+  becomes `None` rather than raising. That is right for extraction and wrong here: the edit
+  would be reported as applied while changing nothing. Any request for a real value that
+  comes back `None` is refused.
+- **Anything that loses a feature** — a backstop that runs after every operation, whatever
+  it claimed to do: an id present before the edit and missing after it is a rollback.
+
+`apply_edits` never raises. A malformed proposal is information about the model, and it
+goes back into the next round's prompt as a reason, which is what stops the same refused
+edit being proposed three times running.
+
 ## 5. Repo layout (what exists today)
 
 ```
@@ -228,8 +355,10 @@ draftCheck/
 │   └── ARCHITECTURE.md         # this file
 ├── draftcheck/
 │   ├── __init__.py
-│   ├── cli.py                  # BUILT  python -m draftcheck.cli check <drawing>
+│   ├── agent.py                # BUILT  correction loop, max 3 rounds
+│   ├── cli.py                  # BUILT  python -m draftcheck.cli check <drawing> [--fix]
 │   ├── config.py               # BUILT
+│   ├── edits.py                # BUILT  the four allowed edit operations + their guards
 │   ├── llm_client.py           # BUILT
 │   ├── llm_parsing.py          # BUILT
 │   ├── pipeline.py             # BUILT
@@ -251,8 +380,10 @@ draftCheck/
 ├── tests/
 │   ├── fixtures/               # frozen inputs the tests parse
 │   │   └── plate_001.model.json  # real extraction output from the 2026-10-29 spike run
+│   ├── test_agent.py
 │   ├── test_cli.py
 │   ├── test_config.py
+│   ├── test_edits.py
 │   ├── test_llm_client.py
 │   ├── test_llm_parsing.py
 │   ├── test_pipeline.py
@@ -295,6 +426,11 @@ draftCheck/
 | 2026-10-29 | `extract` sends page 1 only | Every sample is a single sheet, and sending every page of a long PDF would spend tokens nobody asked for. Multi-page sheets are a later decision, not an accidental default |
 | 2026-10-29 | `check` exits 1 on error-severity findings, 2 on a failed run, and still renders the drawing under `--from-json` | A reviewer needs "the drawing is wrong" and "the tool broke" to be different outcomes, which a single non-zero code cannot express. Rendering even when the extraction is loaded from disk stops a typo'd drawing path from quietly passing |
 | 2026-10-29 | Muse Spark Open on Baseten stays the default; Muse Spark (muse-spark-1.2, standard tier) via Meta Model API as comparison model | Open-weight bonus eligibility; comparison strengthens evaluation; standard tier keeps prompts out of training |
+| 2026-10-29 | The agent never edits the drawing directly. It proposes operations from a fixed menu of four, `edits.apply_edits` applies them to a copy one at a time and re-validates after each, and there is no operation that deletes a dimension, frame, or datum feature | The cheapest way to clear a finding is to delete the callout that caused it, which leaves the drawing strictly worse and the finding count at zero. A menu with no delete on it makes that unreachable rather than merely discouraged, and the backstop check — nothing present before an edit may be missing after it — covers the cases we have not thought of. `remove_datum_ref` is the one removal allowed, because taking a surplus datum letter out of a frame is a real correction and removes no feature |
+| 2026-10-29 | `apply_edits` refuses an edit whose value the schema silently discards, and never raises on bad model output | Parsing is lenient on purpose, so a negative tolerance becomes `None` instead of failing. Under extraction the user fixes it afterwards; under correction the edit would be reported as applied while changing nothing, and the finding would stay with no sign of why. And a malformed proposal is data about the model, not a crash: refusing it with a reason puts that reason in the next round's prompt, which is what stops the same edit being proposed three times |
+| 2026-10-29 | Resolved/unresolved is decided only by re-running the rules; the model's `rationale` and `finding_ids` are reported but never acted on | This is the core principle applied to the loop. A model asked whether its own fix worked will say yes. Re-running the deterministic rules is the only claim worth anything, and it also catches the case the model cannot report — a fix that clears one finding and causes another, which the round's `introduced` list names |
+| 2026-10-29 | `--fix` does not change the exit code: it is computed from the findings on the **original** drawing, so a drawing the loop fully corrected still exits `1`, and the run's last line reads `Agent proposals are unreviewed; original drawing has N error(s).` | The loop's edits are proposals, not accepted changes — nobody has reviewed them, and a correction can be applied cleanly, clear its finding, and still be the wrong call on the real part. Exiting `0` would tell CI the drawing was fine when what actually happened is that the agent fixed its own findings and marked its own homework. Making the exit code describe the drawing as submitted keeps "this drawing is wrong" separate from "here is what the agent would do about it", and the printed line stops `1` from looking like the loop failed |
+| 2026-10-29 | The loop runs while error-severity findings remain, and ignores warnings | MFG-001's edge-distance threshold is shop practice with a constant we chose, not a standard. Letting a warning drive rounds would push the model into changing a part's geometry to satisfy our own default |
 | 2026-10-29 | Lenient parsing: bad bboxes become None, unknown units become None, and an item that cannot be read at all is dropped and recorded in `Drawing.parse_issues` instead of failing the parse | Model output is imperfect; the user confirms data in the UI, and rules flag missing values instead of crashing. One unreadable callout must not cost us the rest of the drawing, and `parse_issues` keeps the loss visible rather than silent |
 
 ## 8. Status
@@ -302,6 +438,6 @@ draftCheck/
 | Layer | What it covers | State |
 | --- | --- | --- |
 | 1 | Extraction + JSON schema + rule engine + test generator | BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`, `rules.py` with 6 rules, and `pipeline.py` + `cli.py` joining them into one `check` command that runs a drawing end to end. More rules can be added to the registry as the sample set grows |
-| 2 | Agent correction loop + redlined PDF | PLANNED |
+| 2 | Agent correction loop + redlined PDF | PARTLY BUILT: `edits.py` (the four allowed operations and their guards) and `agent.py` (the three-round loop) are done and wired into `check --fix`, verified end to end on plate_001. The redlined PDF is still PLANNED |
 | 3 | Web UI + live deploy | PLANNED |
 | 4 | After hackathon: SAM 3.1 precision, revisions, link to Research Paper Recommender | PLANNED (post-hackathon) |

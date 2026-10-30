@@ -1,9 +1,14 @@
-"""Tests for the check subcommand. Every test uses --from-json, so no model is called."""
+"""Tests for the check subcommand.
+
+Every test uses --from-json so extraction never calls a model, and the --fix tests swap
+the CLI's client for a scripted one, so nothing here touches the network either.
+"""
 
 import json
 from pathlib import Path
 
 from draftcheck.cli import EXIT_FAILED, EXIT_FINDINGS, EXIT_OK, format_table, main
+from draftcheck.llm_client import JSONChatResult, Usage
 from draftcheck.schema import Finding
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -150,3 +155,121 @@ def test_format_table_aligns_columns_and_puts_the_message_last():
 
 def test_format_table_on_no_findings():
     assert format_table([]) == "No findings."
+
+
+class FixClient:
+    """Stands in for LLMClient under --fix: one scripted correction, no network."""
+
+    class _Provider:
+        name = "scripted"
+        model = "scripted-model"
+
+    provider = _Provider()
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def chat_json(self, system, user, images):
+        edits = [
+            {
+                "op": "remove_datum_ref",
+                "fcf_id": "fcf_1",
+                "label": "C",
+                "rationale": "Nothing on the sheet defines C, and two datums locate the plate.",
+                "finding_ids": ["GDT-001@fcf_1"],
+            },
+            {"op": "remove_fcf", "id": "fcf_1"},
+        ]
+        return JSONChatResult(
+            data={"edits": edits},
+            text=json.dumps({"edits": edits}),
+            latency_s=0.1,
+            usage=Usage(prompt_tokens=1, completion_tokens=2, total_tokens=3),
+            model="scripted-model",
+            attempts=1,
+        )
+
+
+def use_fake_client(monkeypatch):
+    """Point the CLI at FixClient and at config it does not need to read from .env."""
+    import draftcheck.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "LLMClient", FixClient)
+    monkeypatch.setattr(cli_module, "get_provider", lambda name=None: None)
+
+
+def test_fix_runs_the_loop_and_prints_each_round(tmp_path, capsys, monkeypatch):
+    use_fake_client(monkeypatch)
+
+    run_cli(tmp_path, "--fix")
+
+    out = capsys.readouterr().out
+    assert "Correction loop" in out
+    assert "Round 1: proposed 2, applied 1, rejected 1" in out
+    assert "remove_datum_ref  datum C from frame fcf_1" in out
+    assert "never deleted" in out, "the refused deletion and its reason should be printed"
+    assert "resolved" in out
+
+
+def test_fix_still_exits_1_because_the_corrections_are_unreviewed(tmp_path, capsys, monkeypatch):
+    use_fake_client(monkeypatch)
+
+    code = run_cli(tmp_path, "--fix")
+
+    out = capsys.readouterr().out
+    # The loop cleared the only error, and the run still fails: the fix is a proposal.
+    assert "1 resolved, 0 unresolved" in out
+    assert code == EXIT_FINDINGS
+    assert "Agent proposals are unreviewed; original drawing has 1 error(s)." in out
+
+
+def test_a_clean_drawing_under_fix_exits_0(tmp_path, capsys, monkeypatch):
+    use_fake_client(monkeypatch)
+    clean = json.loads(FIXTURE_JSON.read_text())
+    clean["fcfs"] = []
+    clean_path = tmp_path / "clean.json"
+    clean_path.write_text(json.dumps(clean))
+
+    code = main(
+        [
+            "check",
+            str(SAMPLE_PDF),
+            "--from-json",
+            str(clean_path),
+            "--out",
+            str(tmp_path),
+            "--fix",
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert code == EXIT_OK
+    assert "Agent proposals are unreviewed; original drawing has 0 error(s)." in out
+
+
+def test_fix_writes_corrections_json(tmp_path, monkeypatch):
+    use_fake_client(monkeypatch)
+
+    run_cli(tmp_path, "--fix")
+
+    corrections = json.loads((tmp_path / "corrections.json").read_text())
+
+    assert corrections["status"] == [
+        {
+            "finding": "GDT-001@fcf_1",
+            "status": "resolved",
+            "severity": "error",
+            "message": corrections["status"][0]["message"],
+        }
+    ]
+    assert corrections["final_findings"] == []
+    assert len(corrections["final_drawing"]["fcfs"]) == 1, "the frame survived the loop"
+
+
+def test_without_fix_the_model_is_never_called_for_corrections(tmp_path, capsys, monkeypatch):
+    use_fake_client(monkeypatch)
+
+    run_cli(tmp_path)
+
+    assert "Correction loop" not in capsys.readouterr().out
+    assert not (tmp_path / "corrections.json").exists()

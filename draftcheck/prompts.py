@@ -1,9 +1,19 @@
-"""Prompt text for the extraction pass.
+"""Prompt text for the two passes that involve a model: extraction and correction.
 
-These prompts only ask the model to transcribe what is printed on the drawing.
-No rule in here decides whether a drawing is correct; checking happens later in
-deterministic Python.
+The extraction prompts ask only for a transcription of what is printed. The correction
+prompts ask for proposed edits. Neither asks the model whether a rule passes — the
+findings it is shown were computed in Python, and whether a proposed edit clears one is
+computed in Python afterwards. The model's job is to read the drawing and suggest a fix;
+it never gets a vote on the verdict.
 """
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from draftcheck.edits import ALLOWED_OPS, DIMENSION_FIELDS
+from draftcheck.schema import Finding, finding_key
 
 EXTRACTION_SYSTEM = """\
 You are a transcription engine for mechanical engineering drawings. Your only job is \
@@ -116,4 +126,136 @@ corner, tightly around the printed text or symbol.
 
 If a section has nothing on the drawing, use an empty list or null. Output only the \
 JSON object.\
+"""
+
+
+CORRECTION_SYSTEM = """\
+You are a senior mechanical drawing checker. You are given a drawing, the structured data \
+extracted from it, and a list of findings that a deterministic rule engine has already \
+produced. Your job is to propose the smallest set of edits that makes the drawing correct.
+
+How to think:
+- Work out what the designer meant, then make the drawing say it. A finding is a symptom; \
+fix the cause.
+- Prefer the smallest change that preserves design intent. Changing one field beats adding \
+a feature; adding one feature beats restructuring the drawing.
+- Never remove a dimension, a feature control frame, or a datum feature to make a finding \
+go away. Deleting the callout that carries the error is not a correction, and the system \
+will refuse it. If a frame references a datum that does not exist, either define that datum \
+or stop the frame from referencing it — do not delete the frame.
+- If a finding cannot be fixed with the operations below, propose nothing for it and say \
+so in the rationale of another edit, or return an empty edit list. Do not invent an \
+operation, and do not force an unrelated edit to look productive.
+- Only change what you can justify from the drawing. If the drawing does not tell you \
+where a missing datum belongs, say where you believe it belongs and why, in the rationale.
+
+Every edit must carry:
+- "rationale": one sentence of engineering reasoning. Not what you changed — why the \
+drawing is better for it.
+- "finding_ids": the ids of the findings this edit addresses, exactly as given to you.
+
+You are not the judge of whether your fix worked. After you answer, the rules are re-run \
+against the edited drawing and the result is compared with the result before. Claiming a \
+finding is resolved does not resolve it.
+
+Output exactly one JSON object with a single key "edits", whose value is a list. No prose, \
+no explanation outside the JSON, no markdown code fences.\
+"""
+
+
+_OPERATIONS = """\
+set_field — change one field of one item, or one of the drawing's two top-level values.
+  {"op": "set_field", "target": "dimension" | "fcf" | "datum", "id": "<item id>",
+   "field": "<field name>", "value": <new value>,
+   "rationale": "...", "finding_ids": ["..."]}
+  {"op": "set_field", "target": "drawing", "field": "units" | "general_tolerance",
+   "value": <new value>, "rationale": "...", "finding_ids": ["..."]}
+  Editable fields — dimension: text_raw, value, unit, feature_type, quantity, is_basic,
+  is_reference, tol_plus, tol_minus, from_ref, to_ref. fcf: text_raw, characteristic,
+  tolerance, diameter_zone, material_modifier. datum: label, location. drawing: units,
+  general_tolerance (a number, or an object with linear_plus_minus and text_raw).
+  An item's id and bbox can never be changed, and datum_refs can only be changed with
+  remove_datum_ref.
+
+add_datum — add a datum feature symbol the drawing is missing.
+  {"op": "add_datum", "label": "C", "location": "<where the symbol goes, in words>",
+   "bbox": [x0, y0, x1, y1] or omitted,
+   "rationale": "...", "finding_ids": ["..."]}
+  The label is one or two letters. The location is for the person reviewing the redline,
+  so write it as you would tell a colleague: "the bottom edge of the plate", not "near B".
+
+remove_datum_ref — take one datum reference out of one feature control frame. The frame
+  and the datum both survive; only the reference is removed.
+  {"op": "remove_datum_ref", "fcf_id": "<frame id>", "label": "C",
+   "rationale": "...", "finding_ids": ["..."]}
+
+add_dimension — add a dimension to the drawing.
+  {"op": "add_dimension",
+   "dimension": {"value": <number>, "text_raw": "...", ...},
+   "rationale": "...", "finding_ids": ["..."]}
+  The dimension object takes the same fields extraction produces; at minimum a numeric
+  value. Set is_basic true for a dimension that establishes a true position.
+  Fields: """ + ", ".join(DIMENSION_FIELDS) + "\n"
+
+
+def _findings_block(findings: list[Finding]) -> str:
+    """List the findings with the ids the model must cite, worst first as the rules sorted them."""
+    if not findings:
+        return "No findings. Return an empty edit list."
+    lines = []
+    for finding in findings:
+        items = ", ".join(finding.item_ids) or "the drawing as a whole"
+        lines.append(
+            f"- {finding_key(finding)}  [{finding.severity}]  on {items}\n"
+            f"  {finding.message}\n"
+            f"  reference: {finding.source}"
+        )
+    return "\n".join(lines)
+
+
+def _history_block(history: list[dict[str, Any]]) -> str:
+    """Replay the earlier rounds, so the model does not retry what has already failed."""
+    if not history:
+        return "This is the first round. Nothing has been tried yet."
+    return json.dumps(history, indent=2, ensure_ascii=False, default=str)
+
+
+def correction_user(
+    drawing_json: str, findings: list[Finding], history: list[dict[str, Any]]
+) -> str:
+    """Build the correction request for one round.
+
+    Args:
+        drawing_json: The current drawing, as JSON, including every item's id.
+        findings: What the rules say about that drawing right now.
+        history: One entry per earlier round — what was applied, what was rejected and
+            why, which findings cleared, and which ones the round introduced. Earlier
+            rounds are the only way the model learns that an edit was refused, so this is
+            what stops it proposing the same refused edit three times in a row.
+    """
+    return f"""\
+Here is the drawing, the data extracted from it, and what the rule engine found.
+
+=== CURRENT DRAWING DATA ===
+{drawing_json}
+
+=== FINDINGS TO ADDRESS ===
+{_findings_block(findings)}
+
+=== WHAT HAS ALREADY BEEN TRIED ===
+{_history_block(history)}
+
+=== OPERATIONS YOU MAY USE ===
+Only these {len(ALLOWED_OPS)} operations exist. Anything else is refused unapplied.
+
+{_OPERATIONS}
+=== YOUR ANSWER ===
+Propose the smallest set of edits that corrects the findings above. Read the image to
+decide what the drawing means; use the ids from the data above to say what to change.
+
+If a previous round's edit was rejected, do not propose it again — read the reason and
+either fix the proposal or take a different approach. If a previous round introduced a new
+finding, fix that too.
+
+Output one JSON object: {{"edits": [...]}}. Nothing else.\
 """

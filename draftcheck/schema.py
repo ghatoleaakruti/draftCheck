@@ -136,6 +136,11 @@ class DatumFeature(Base):
 
     id: str | None = None
     label: Label
+    #: Where the symbol belongs, in words, e.g. "the left edge of the plate". Extraction
+    #: leaves this empty — a transcribed symbol already has a ``bbox``. The correction
+    #: loop fills it in when it proposes a datum that is not on the sheet yet, so the
+    #: redline stage has something to place and a person has something to check.
+    location: str | None = None
     bbox: BBox = None
     confidence: float | None = None
 
@@ -318,6 +323,17 @@ class Finding(Base):
     source: str
     item_ids: list[str] = Field(default_factory=list)
     bbox: BBox = None
+
+
+def finding_key(finding: Finding) -> str:
+    """A stable name for one finding, e.g. ``"GDT-001@fcf_1"``.
+
+    Findings have no id of their own — they are recomputed from scratch on every run. The
+    rule id plus the items it points at is what stays the same across runs, so it is what
+    lets the correction loop tell "this finding is still here" from "a different finding
+    with the same rule id appeared". It is also how the model cites a finding it is fixing.
+    """
+    return f"{finding.rule_id}@{','.join(finding.item_ids) or 'drawing'}"
 
 
 def parse_drawing(data: dict) -> Drawing:
