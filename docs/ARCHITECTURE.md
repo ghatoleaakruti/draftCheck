@@ -427,7 +427,7 @@ looking.
 | `POST` | `/api/runs` | Multipart upload of a PDF/PNG/JPG, plus an optional `provider` field. Creates the run folder, saves the file, renders page 1, and extracts. Returns `run_id`, the drawing, `parse_issues`, `model`, `latency_s` | `415` unsupported type, `413` over 10 MB, `400` unreadable or empty, `422` unknown provider, `502` the model failed or returned something unusable, `500` missing configuration |
 | `GET` | `/api/runs/{run_id}/page.png` | The rendered page, for the review screen to draw on | `404` |
 | `POST` | `/api/runs/{run_id}/check` | Body is the confirmed (possibly edited) drawing JSON. Validates it with `parse_drawing`, saves `confirmed.json`, runs the rules. Returns the findings, `parse_issues`, and the error/warning counts | `404` unknown run, `422` not a drawing object |
-| `POST` | `/api/runs/{run_id}/fix` | Runs the correction loop on `confirmed.json` with the page image, writes `corrections.json` and the redline. Returns rounds (proposed/applied/rejected), the per-finding status, the final findings, and the corrected drawing | `404` unknown run, `409` `/check` has not run |
+| `POST` | `/api/runs/{run_id}/fix` | Runs the correction loop on `confirmed.json` with the page image, writes `corrections.json` and the redline. Returns the rounds in plain English (see below), the per-finding status, the final findings, and the corrected drawing | `404` unknown run, `409` `/check` has not run |
 | `GET` | `/api/runs/{run_id}/redline.pdf` | The two-page redline | `404` |
 | `GET` | `/api/runs/{run_id}/redline.png` | Page 1 of the redline | `404` |
 | `GET` | `/` | Static files from `draftcheck/static/`, mounted last so every `/api` route wins | — |
@@ -452,6 +452,21 @@ Four things are deliberate:
 
 `/check` can be called again with different data — the second confirmation replaces the
 first, so `/fix` always works from what the user last confirmed.
+
+**`/fix` answers in words, not in ids.** Each round comes back as the edits it proposed,
+worded by `redline.plain_edit` — "Remove datum C from the position frame", the same
+sentence page 2 of the redline prints, built by the same function so the screen and the
+PDF can never word a correction differently. That is why `redline.EditNames` is public:
+the API builds one per report and hands it over, instead of the page growing a second
+vocabulary that drifts. An applied edit carries the model's `rationale`; a rejected one
+carries Python's `reason` for refusing it, and is worded only as far as `parse_edit` can
+read it — `{"op": "delete_fcf"}` is never understood, so it is reported as *an edit the
+model called 'delete_fcf'* rather than described. Each round also carries
+`findings_before`/`findings_after` as counts and the findings it `resolved` or
+`introduced` as `{key, message}`, so the page needs no copy of the rules to say what
+changed. `corrections.json` on disk is untouched by all this and keeps the id-carrying
+form: the two have different readers, and `fcf_1` is exactly what you want when you are
+reading the run folder rather than the drawing.
 
 #### A real run on plate_001 — 2026-10-30
 
@@ -551,6 +566,49 @@ panel used to show. The panel also tints for half a second on each update (skipp
 `prefers-reduced-motion`), so a new answer that happens to read identically is still
 visibly new.
 
+### 4.10 Proposing fixes from the page — BUILT
+
+The last step of the flow in the browser: ask the agent for corrections, watch what the
+rule engine made of them, and take away the redline.
+
+**When the button is live.** "Propose fixes" sits under the findings and is enabled only
+when the findings above are current *and* at least one of them is an error. The three
+reasons it is dead are said next to it rather than left to guess: check first, check again
+because the tables have moved on, or nothing to propose because the check found no errors.
+The staleness gate is the important one — the server fixes `confirmed.json`, the drawing
+the last check saved, so a fix proposed after an edit would be answering a question nobody
+is asking any more.
+
+**Waiting.** The loop is up to three model calls and takes 20–60 seconds, so unlike Check
+it does end up saying it is working: "Muse Spark is proposing fixes… (each round is checked
+by the rule engine)". It still goes through the same 300 ms timer (`SLOW_CHECK_MS`), because
+the request can fail at the server before the model is ever called and a spinner that
+appears for a tenth of a second on the way to an error is noise. The button is disabled on
+the click, which is what stops a double submit; Check is disabled too for the duration.
+
+**What comes back.** One card per round: each proposed edit as a sentence, tagged *applied*
+(green) or *rejected* (grey) with Python's reason underneath, the model's rationale under
+each, then "Findings: N before → M after" and the findings the round cleared — or, in red,
+any it introduced. Under the rounds, one line per original finding reading *verified
+resolved* or *unresolved*, and under those the note: **Decided by re-running the rules, not
+by the model.** That line is in `index.html` rather than built in JavaScript, so it is on
+the page whatever the agent returns.
+
+Then the redline image and a Download redline PDF button, with the same footer the PDF
+itself carries: proposed corrections are verified by DraftCheck's rule engine and require
+engineer review. Both URLs are fixed per run and both files are rewritten on every fix, so
+each carries a timestamp — without it the browser would serve the previous run's redline
+from cache and nothing on screen would say so.
+
+**Going stale.** Editing a table after a fix dates the agent's rounds and its redline
+exactly as it dates the findings: one line under the heading turns amber and reads "Fixes
+proposed at 17:28:37 — edited since; check and fix again". The results stay on screen,
+because they are still the last thing known to be true.
+
+Verified end to end against the live model on plate_001 on 2026-10-30: one round, one
+applied edit (*Remove datum C from the position frame*), GDT-001 verified resolved by the
+re-run, and the two-page redline served into the page.
+
 ## 5. Repo layout (what exists today)
 
 ```
@@ -575,7 +633,7 @@ draftCheck/
 │   ├── redline.py              # BUILT  two-page redline, pillow only
 │   ├── rules.py                # BUILT
 │   ├── schema.py               # BUILT
-│   └── static/                 # BUILT  upload, edit, and check page served at /, boxes linked to the tables
+│   └── static/                 # BUILT  the whole flow at /: upload, edit, check, propose fixes, redline
 │       ├── index.html
 │       ├── style.css
 │       └── app.js
@@ -649,6 +707,8 @@ draftCheck/
 | 2026-10-29 | Redline drawn on a rendered image; a mark encloses the finding's bbox in a rectangle and carries a numbered balloon on a leader just outside it | No new dependencies, and one code path covers PDF and image inputs — drawing onto the PDF's own content stream would need a second library and would only work for PDFs. The mark encloses rather than centres because a centre marker on a multi-cell feature control frame lands on whichever cell happens to be in the middle and so points at the wrong one; a rectangle round the whole frame points at the frame. The balloon sits outside the rectangle so the callout under review stays readable, and moves to another corner when the default would put it off the sheet |
 | 2026-10-29 | Lenient parsing: bad bboxes become None, unknown units become None, and an item that cannot be read at all is dropped and recorded in `Drawing.parse_issues` instead of failing the parse | Model output is imperfect; the user confirms data in the UI, and rules flag missing values instead of crashing. One unreadable callout must not cost us the rest of the drawing, and `parse_issues` keeps the loss visible rather than silent |
 | 2026-10-30 | Run state is stored as files per run under `outputs/web/<uuid>` | Simple, inspectable, no database needed for a hackathon demo; replaceable later. A run's folder is also exactly what the CLI writes, so a web run can be opened, diffed, or replayed with the same tools, and "which step is this run at" is a file that either exists or does not rather than state a process has to keep |
+| 2026-10-30 | The `/fix` reply words every edit with `redline.plain_edit`, and `corrections.json` keeps the id-carrying form | The page and page 2 of the redline are read by the same person deciding whether a correction is right, and they must not word it differently — one function means they cannot. Wording the edits in JavaScript instead would have put a second vocabulary in a second language, drifting from the first the next time an operation is added. The file on disk keeps `fcf_1`, because its reader has the run folder open rather than the drawing |
+| 2026-10-30 | Proposing fixes is gated on the check being current, not merely on a check having happened | The server corrects `confirmed.json`, so after an edit the agent would be fixing data the user has already moved past, and the rounds would describe a drawing nobody is looking at. Disabling the button and saying why is cheaper than explaining the mismatch afterwards |
 | 2026-10-30 | `render.load_pages` translates pypdfium2's and pillow's own errors into `RenderError`, rather than each caller catching the dependency's error class | Every caller — the CLI's exit code, the API's status code — catches `RenderError` and nothing else, so an error leaking from a dependency is an exit code or a status code that never happens: a corrupt upload came out as a traceback and a 500 instead of a 400. Translating once at the boundary means the file-reading contract is stated in one place, and swapping the PDF library later does not touch any caller |
 
 ## 8. Status
@@ -657,5 +717,5 @@ draftCheck/
 | --- | --- | --- |
 | 1 | Extraction + JSON schema + rule engine + test generator | BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`, `rules.py` with 6 rules, and `pipeline.py` + `cli.py` joining them into one `check` command that runs a drawing end to end. More rules can be added to the registry as the sample set grows |
 | 2 | Agent correction loop + redlined PDF | BUILT: `edits.py` (the four allowed operations and their guards), `agent.py` (the three-round loop), and `redline.py` (the two-page redline), wired into `check --fix --redline` and verified end to end on plate_001 |
-| 3 | Web UI + live deploy | PARTLY BUILT: `api.py` serves the whole flow over HTTP — upload + extract, check the confirmed data, run the loop, fetch the redline — verified end to end against the live model on plate_001. The browser page uploads a drawing, shows what the model read, lets the reviewer correct it, and runs the check from it (§4.9); running the fix from the page and the deploy are next |
+| 3 | Web UI + live deploy | PARTLY BUILT: `api.py` serves the whole flow over HTTP — upload + extract, check the confirmed data, run the loop, fetch the redline — verified end to end against the live model on plate_001. The browser page uploads a drawing, shows what the model read, lets the reviewer correct it, runs the check from it (§4.9), and proposes verified fixes with the redline (§4.10). The deploy is next |
 | 4 | After hackathon: SAM 3.1 precision, revisions, link to Research Paper Recommender | PLANNED (post-hackathon) |

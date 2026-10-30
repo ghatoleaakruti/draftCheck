@@ -153,6 +153,118 @@ def test_happy_path_upload_check_fix_redline(client: TestClient, fake: FakeClien
     assert fake.calls == ["extract", "correct"]
 
 
+def test_fix_reports_each_round_in_plain_english(client: TestClient, fake: FakeClient):
+    """The fix reply carries everything the page shows, in words, with no ids to decode.
+
+    The page has no copy of the rules and no way to turn ``remove_datum_ref`` into a
+    sentence, so the server does both: each edit is worded by ``redline.plain_edit`` — the
+    same function that writes page 2 of the redline — and every finding a round touched
+    comes back with its message beside its key.
+
+    One of the two proposed edits is refused: the model is told to delete the frame, which
+    is the one thing ``edits.py`` never allows. A rejected proposal has to reach the page
+    with Python's reason attached, which is the half of the round that shows the rule
+    engine is in charge rather than the model.
+    """
+    created = upload(client)
+    run_id = created["run_id"]
+    client.post(f"/api/runs/{run_id}/check", json=created["drawing"])
+
+    fake.corrections = [
+        {
+            "edits": [
+                {
+                    "op": "delete_fcf",
+                    "fcf_id": "fcf_1",
+                    "rationale": "Removing the frame removes the problem.",
+                },
+                {
+                    "op": "remove_datum_ref",
+                    "fcf_id": "fcf_1",
+                    "label": "C",
+                    "rationale": "A and B already locate the pattern.",
+                    "finding_ids": ["GDT-001@fcf_1"],
+                },
+            ]
+        }
+    ]
+    body = client.post(f"/api/runs/{run_id}/fix").json()
+
+    assert len(body["rounds"]) == 1
+    first = body["rounds"][0]
+    assert first["round"] == 1
+    assert first["error"] is None
+
+    # The applied edit, said the way the redline says it: no op name, no ids.
+    assert first["applied"] == [
+        {
+            "edit": "Remove datum C from the position frame",
+            "rationale": "A and B already locate the pattern.",
+            "finding_ids": ["GDT-001@fcf_1"],
+        }
+    ]
+
+    # The refused one, with the reason Python wrote for refusing it.
+    assert len(first["rejected"]) == 1
+    refused = first["rejected"][0]
+    assert refused["edit"] == "an edit the model called 'delete_fcf'"
+    assert refused["rationale"] == ""
+    assert "not an allowed operation" in refused["reason"]
+
+    # "Findings: 1 before → 0 after", and which one went.
+    assert (first["findings_before"], first["findings_after"]) == (1, 0)
+    assert first["introduced"] == []
+    assert [cleared["key"] for cleared in first["resolved"]] == ["GDT-001@fcf_1"]
+    assert "datum C" in first["resolved"][0]["message"]
+
+    # The verdict per original finding, and where the redline is.
+    assert body["status"] == [
+        {
+            "finding": "GDT-001@fcf_1",
+            "status": "resolved",
+            "severity": "error",
+            "message": body["status"][0]["message"],
+        }
+    ]
+    assert body["applied_count"] == 1
+    assert body["rejected_count"] == 1
+    assert body["redline_png_url"] == f"/api/runs/{run_id}/redline.png"
+    assert body["redline_pdf_url"] == f"/api/runs/{run_id}/redline.pdf"
+
+
+def test_corrections_json_keeps_the_ids_the_page_leaves_out(
+    client: TestClient, fake: FakeClient, tmp_path
+):
+    """The file on disk stays in the id-carrying form, whatever the page is shown.
+
+    The two are for different readers: an engineer looking at the drawing wants "the
+    position frame", and anyone reading the run folder wants ``fcf_1``.
+    """
+    created = upload(client)
+    run_id = created["run_id"]
+    client.post(f"/api/runs/{run_id}/check", json=created["drawing"])
+    fake.corrections = [
+        {
+            "edits": [
+                {
+                    "op": "remove_datum_ref",
+                    "fcf_id": "fcf_1",
+                    "label": "C",
+                    "rationale": "A and B already locate the pattern.",
+                    "finding_ids": ["GDT-001@fcf_1"],
+                }
+            ]
+        }
+    ]
+    body = client.post(f"/api/runs/{run_id}/fix").json()
+
+    saved = json.loads((tmp_path / run_id / "corrections.json").read_text())
+    applied = saved["rounds"][0]["applied"][0]
+    assert applied["description"] == "remove_datum_ref  datum C from frame fcf_1"
+    assert applied["fcf_id"] == "fcf_1"
+    assert body["rounds"][0]["applied"][0]["edit"] == "Remove datum C from the position frame"
+
+
 def test_meta_json_never_holds_a_key(client: TestClient, tmp_path):
     """The run's metadata names the provider and model, and carries no secret."""
     created = upload(client)
@@ -363,6 +475,21 @@ def test_static_page_and_its_two_files_are_served(client: TestClient):
     assert 'id="overlay"' in page.text
     assert 'id="show-overlay"' in page.text
 
+    # The agent half of the page: the button that runs the loop, the section its rounds
+    # are written into, and the redline it ends with. app.js looks all of these up at load
+    # time, so a renamed id leaves a page that can never propose a fix.
+    assert 'id="propose-fix"' in page.text
+    assert 'id="agent-panel"' in page.text
+    assert 'id="agent-rounds"' in page.text
+    assert 'id="redline-image"' in page.text
+    assert 'id="redline-pdf"' in page.text
+
+    # Said on the page itself rather than built in JavaScript, so it is there whatever
+    # the agent returns.
+    assert "verified by DraftCheck's rule engine" in page.text
+    assert "engineer review." in page.text
+    assert "Decided by re-running the rules, not by the model." in page.text
+
     script = client.get("/app.js")
     assert script.status_code == 200
     assert "/api/runs" in script.text
@@ -370,6 +497,17 @@ def test_static_page_and_its_two_files_are_served(client: TestClient):
     stylesheet = client.get("/style.css")
     assert stylesheet.status_code == 200
     assert "DraftCheck" in stylesheet.text
+
+    # Every data table sits in a scroller, and the controls inside it are sized from their
+    # own value by app.js. Without either, a narrow window squeezes the columns until "100"
+    # reads as "10" — which looks like data rather than like a layout problem.
+    assert 'class="table-scroll"' in page.text
+    assert "fitControl" in script.text
+    assert ".table-scroll" in stylesheet.text
+
+    # Paper cannot scroll, so the print rules are what stop a wide table being cut at the
+    # page edge instead of carried to the scrollbar.
+    assert "@media print" in stylesheet.text
 
     # The page hides the spinner, the error box, and the results by setting `hidden`.
     # Several of them are `display: flex`, which outranks the browser's own rule for
