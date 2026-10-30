@@ -316,6 +316,11 @@ def test_static_page_and_its_two_files_are_served(client: TestClient):
     assert 'src="/app.js"' in page.text
     assert 'href="/style.css"' in page.text
 
+    # The upload area is the drop zone. app.js looks this id up at load time and attaches
+    # every way in — drop, click, keyboard — to it, so renaming it would leave a page
+    # that cannot take a file at all.
+    assert 'id="dropzone"' in page.text
+
     script = client.get("/app.js")
     assert script.status_code == 200
     assert "/api/runs" in script.text
