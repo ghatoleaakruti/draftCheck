@@ -4,12 +4,128 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DraftCheck</title>
+    <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
-    <h1>DraftCheck</h1>
-    <p>
-      The API is running. The upload and review page is step 17b; until then the
-      endpoints are documented at <a href="/docs">/docs</a>.
-    </p>
+    <header class="masthead">
+      <h1>DraftCheck</h1>
+      <p class="tagline">
+        AI drawing checker: reads engineering drawings, finds GD&amp;T and dimensioning
+        errors, proposes verified fixes.
+      </p>
+    </header>
+
+    <main>
+      <!-- Upload. Submitted by app.js as a POST to /api/runs; no native form navigation. -->
+      <form id="upload-form" class="panel upload">
+        <div class="field">
+          <label for="file">Drawing</label>
+          <input id="file" name="file" type="file" accept=".pdf,.png,.jpg,.jpeg" required />
+          <p class="hint">PDF, PNG, or JPG. Page 1 is read. 10 MB limit.</p>
+        </div>
+
+        <div class="field">
+          <label for="provider">Model</label>
+          <select id="provider" name="provider">
+            <option value="baseten">Muse Spark Open (Baseten)</option>
+            <option value="meta">Muse Spark (Meta Model API)</option>
+          </select>
+        </div>
+
+        <button id="submit" type="submit">Read drawing</button>
+      </form>
+
+      <!-- One of these three is visible at a time; app.js does the swapping. -->
+      <p id="status" class="status" hidden>
+        <span class="spinner" aria-hidden="true"></span>
+        <span>Muse Spark is reading your drawing… (about 20–30 seconds)</span>
+      </p>
+
+      <div id="error" class="box box-error" hidden role="alert">
+        <strong>Could not read the drawing.</strong>
+        <p id="error-text"></p>
+      </div>
+
+      <section id="result" class="result" hidden>
+        <p class="runmeta">
+          <span>Model <code id="meta-model">—</code></span>
+          <span>Latency <code id="meta-latency">—</code></span>
+          <span>Attempts <code id="meta-attempts">—</code></span>
+        </p>
+
+        <div id="parse-issues" class="box box-warn" hidden>
+          <strong>Some items could not be read and were left out:</strong>
+          <ul id="parse-issues-list"></ul>
+        </div>
+
+        <div class="columns">
+          <div class="panel page-panel">
+            <h2>Page 1</h2>
+            <img id="page-image" alt="The uploaded drawing, page 1, as rendered." />
+          </div>
+
+          <div class="panel data-panel">
+            <h2>What Muse Spark read</h2>
+
+            <h3>Units and general tolerance</h3>
+            <table class="data">
+              <tbody>
+                <tr>
+                  <th scope="row">Units</th>
+                  <td id="v-units" class="mono">—</td>
+                </tr>
+                <tr>
+                  <th scope="row">General tolerance ±</th>
+                  <td id="v-gentol" class="mono">—</td>
+                </tr>
+                <tr>
+                  <th scope="row">As printed</th>
+                  <td id="v-gentol-raw" class="mono">—</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <h3>Datums <span id="count-datums" class="count"></span></h3>
+            <table class="data">
+              <thead>
+                <tr>
+                  <th scope="col">Label</th>
+                </tr>
+              </thead>
+              <tbody id="rows-datums"></tbody>
+            </table>
+
+            <h3>Dimensions <span id="count-dimensions" class="count"></span></h3>
+            <table class="data">
+              <thead>
+                <tr>
+                  <th scope="col">Text as printed</th>
+                  <th scope="col">Value</th>
+                  <th scope="col">Tolerance</th>
+                  <th scope="col">Basic</th>
+                  <th scope="col">From → to</th>
+                </tr>
+              </thead>
+              <tbody id="rows-dimensions"></tbody>
+            </table>
+
+            <h3>Feature control frames <span id="count-fcfs" class="count"></span></h3>
+            <table class="data">
+              <thead>
+                <tr>
+                  <th scope="col">Characteristic</th>
+                  <th scope="col">Tolerance</th>
+                  <th scope="col">Modifier</th>
+                  <th scope="col">Datum refs</th>
+                </tr>
+              </thead>
+              <tbody id="rows-fcfs"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
   </body>
 </html>
