@@ -27,6 +27,11 @@
      "hovered" or "chosen". */
   --edited: #4a7f3f;
   --edited-bg: #4a7f3f14;
+  /* An item the model was not sure it read correctly. Amber, and distinguishable from
+     the picked orange above by being lighter and never filling the box. */
+  --unsure: #d08700;
+  --unsure-ink: #8a5a00;
+  --unsure-bg: #d0870014;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
 }
@@ -362,6 +367,12 @@ button:disabled {
   min-height: 6px;
 }
 
+/* The model was unsure about this one. Amber instead of the faint blue, and only the
+   border, so hovering and picking still read as themselves on top of it. */
+.obox.is-unsure {
+  border-color: var(--unsure);
+}
+
 /* Hovered on either side: the box and its row go strong together. */
 .obox.is-hot {
   border-color: var(--box-hot);
@@ -399,6 +410,59 @@ tr[data-item-id] {
   font-style: italic;
   color: var(--ink-soft);
   white-space: nowrap;
+}
+
+/* ---- Low confidence ---- */
+
+/* The row's tag, built like .noloc so the two small notes in a first cell match. The
+   whole sentence, with the number, is in its tooltip. */
+.unsure {
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--unsure);
+  border-radius: 8px;
+  font-family: var(--sans);
+  font-size: 11px;
+  font-style: normal;
+  color: var(--unsure-ink);
+  background: var(--unsure-bg);
+  white-space: nowrap;
+  cursor: help;
+}
+
+/* A hairline down the left of the row. Subtle on purpose: the tag says what it is, and
+   a tinted row would compete with the hover and picked states. */
+table.data tbody tr.is-unsure td:first-child {
+  box-shadow: inset 2px 0 0 var(--unsure);
+}
+
+/* The count above the tables. Amber when there is something to look at, quiet when the
+   model was sure about everything. */
+.confidence-summary {
+  margin: 0 0 14px;
+  font-size: 13px;
+}
+
+.confidence-summary.is-clear {
+  color: var(--ink-soft);
+}
+
+.confidence-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--unsure-ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.confidence-link::before {
+  content: "●";
+  margin-right: 6px;
+  color: var(--unsure);
+  text-decoration: none;
 }
 
 h2 {

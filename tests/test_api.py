@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from draftcheck.api import app, get_client_factory, get_runs_root
+from draftcheck.api import DEMO_ENV_VAR, app, get_client_factory, get_runs_root
 from draftcheck.llm_client import JSONChatResult, Usage
 from draftcheck.prompts import EXTRACTION_SYSTEM
 
@@ -453,6 +453,102 @@ def test_check_reports_parse_issues_without_failing(client: TestClient):
     assert "GDT-001" in rule_ids(response.json()["findings"])
 
 
+def local_client(tmp_path: Path) -> TestClient:
+    """A client whose requests arrive from loopback, as a browser on this machine does.
+
+    The default ``TestClient`` says its host is ``"testclient"``, which is not loopback —
+    so the demo's second gate is exercised for real here rather than overridden away.
+    """
+    app.dependency_overrides[get_runs_root] = lambda: tmp_path
+    return TestClient(app, client=("127.0.0.1", 50000))
+
+
+@pytest.fixture
+def demo_on(demo_off_by_default: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Turn the demo route on for one test, and only for that test.
+
+    Depends on the autouse fixture by name so the order is stated rather than relied on:
+    the variable is cleared first, then set.
+    """
+    monkeypatch.setenv(DEMO_ENV_VAR, "1")
+
+
+@pytest.fixture(autouse=True)
+def demo_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing in this file sees the variable unless it asked for it.
+
+    Autouse, because the variable is a real one a developer may well have exported in
+    the shell they are running pytest from — and a test that passes because of that
+    would be testing their environment rather than the code.
+    """
+    monkeypatch.delenv(DEMO_ENV_VAR, raising=False)
+
+
+def test_demo_run_is_served_when_enabled_and_local(tmp_path: Path, demo_on: None):
+    """Both gates open: the demo makes a real run with two items under 0.8."""
+    with local_client(tmp_path) as client:
+        response = client.post("/api/demo/low-confidence")
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 201
+    body = response.json()
+    drawing = body["drawing"]
+
+    low = [
+        item
+        for key in ("datums", "dimensions", "fcfs")
+        for item in drawing[key]
+        if item["confidence"] is not None and item["confidence"] < 0.8
+    ]
+    assert len(low) == 2
+    assert {item["confidence"] for item in low} == {0.6}
+
+    # A real run, not a payload: the page it points at is on disk, so Check works on it.
+    assert (tmp_path / body["run_id"] / "page.png").is_file()
+    assert (tmp_path / body["run_id"] / "extraction.json").is_file()
+
+
+def test_demo_run_can_then_be_checked(tmp_path: Path, demo_on: None):
+    """The demo goes through the rest of the flow like any uploaded drawing."""
+    with local_client(tmp_path) as client:
+        created = client.post("/api/demo/low-confidence").json()
+        page = client.get(created["page_url"])
+        checked = client.post(f"/api/runs/{created['run_id']}/check", json=created["drawing"])
+    app.dependency_overrides.clear()
+
+    assert page.status_code == 200
+    assert checked.status_code == 200
+    # The fixture is the spike extraction, which carries one seeded GD&T error.
+    assert "GDT-001" in rule_ids(checked.json()["findings"])
+
+
+def test_demo_run_is_off_unless_the_variable_is_set(tmp_path: Path):
+    """Local but not switched on: the route does not exist. This is the default."""
+    with local_client(tmp_path) as client:
+        response = client.post("/api/demo/low-confidence")
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    # Nothing was created on the way to refusing.
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_demo_run_is_not_served_to_a_caller_elsewhere(client: TestClient, demo_on: None):
+    """Switched on, but off this machine: still 404. One gate open is not enough."""
+    response = client.post("/api/demo/low-confidence")
+    assert response.status_code == 404
+
+
+def test_demo_run_ignores_a_variable_set_to_something_else(tmp_path: Path, monkeypatch):
+    """Only "1" turns it on, so a stray "0" or "false" cannot read as "yes"."""
+    for value in ("0", "false", "true", "yes", ""):
+        monkeypatch.setenv(DEMO_ENV_VAR, value)
+        with local_client(tmp_path) as client:
+            response = client.post("/api/demo/low-confidence")
+        app.dependency_overrides.clear()
+        assert response.status_code == 404, f"{value!r} should not enable the demo"
+
+
 def test_static_page_and_its_two_files_are_served(client: TestClient):
     """The page is at /, and the stylesheet and script it links to are reachable.
 
@@ -504,6 +600,13 @@ def test_static_page_and_its_two_files_are_served(client: TestClient):
     assert 'class="table-scroll"' in page.text
     assert "fitControl" in script.text
     assert ".table-scroll" in stylesheet.text
+
+    # The confidence markings: the line above the tables, the threshold behind it, and
+    # the amber classes both halves of a flagged item wear.
+    assert 'id="confidence-summary"' in page.text
+    assert "CONFIDENCE_THRESHOLD" in script.text
+    assert ".obox.is-unsure" in stylesheet.text
+    assert ".unsure" in stylesheet.text
 
     # Paper cannot scroll, so the print rules are what stop a wide table being cut at the
     # page edge instead of carried to the scrollbar.

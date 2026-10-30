@@ -33,13 +33,14 @@ path cannot be traversed out of.
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
@@ -58,6 +59,10 @@ from draftcheck.schema import Finding, finding_key, parse_drawing
 RUNS_ROOT = Path("outputs/web")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+#: The repo, for the files the demo run is built from. Those live beside the code rather
+#: than inside the package: they are development material, like the demo itself.
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: Upload limits. Ten megabytes is far more than a rendered sheet needs and small enough
 #: that a request can be held in memory while it is checked.
@@ -80,6 +85,19 @@ FINDINGS_JSON = "findings.json"
 CORRECTIONS_JSON = "corrections.json"
 REDLINE_PDF = "redline.pdf"
 REDLINE_PNG = "redline.png"
+
+#: The demo run, for looking at the review screen without spending a model call.
+DEMO_EXTRACTION = REPO_ROOT / "tests" / "fixtures" / "plate_001.model.json"
+DEMO_PAGE = REPO_ROOT / "samples" / "generated" / "plate_001.png"
+
+#: What the demo lowers two items to, far enough under the page's threshold to be obvious.
+DEMO_CONFIDENCE = 0.6
+
+#: Addresses a request can come from and still be this machine's own browser.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+#: Set this to ``"1"`` in the environment to turn the demo route on. Off by default.
+DEMO_ENV_VAR = "DRAFTCHECK_ENABLE_DEMO"
 
 #: A client, given a provider name or ``None`` for the configured default.
 ClientFactory = Callable[[str | None], SupportsChatJSON]
@@ -105,9 +123,29 @@ def get_runs_root() -> Path:
     return RUNS_ROOT
 
 
+def demo_is_allowed(request: Request) -> bool:
+    """True when the demo route may answer: switched on, *and* called from this machine.
+
+    Two independent gates, and both have to hold.
+
+    ``DRAFTCHECK_ENABLE_DEMO=1`` is the deliberate act — the route is off unless somebody
+    turned it on for this process, so nothing has to be removed before a deploy and
+    forgetting is the safe direction.
+
+    Loopback is the backstop, because an environment variable is exactly the thing that
+    gets set once and inherited somewhere nobody meant it to be. It is a property of the
+    connection rather than a setting, so it cannot be misconfigured — only bypassed by a
+    reverse proxy on the same host, which is a thing to know before deploying it that way.
+    """
+    if os.environ.get(DEMO_ENV_VAR, "").strip() != "1":
+        return False
+    return bool(request.client) and request.client.host in LOOPBACK_HOSTS
+
+
 #: Request pieces as ``Annotated`` aliases. FastAPI reads the marker out of the annotation
 #: rather than out of a default value, which keeps the signatures short and readable.
 RunsRoot = Annotated[Path, Depends(get_runs_root)]
+DemoAllowed = Annotated[bool, Depends(demo_is_allowed)]
 Clients = Annotated[ClientFactory, Depends(get_client_factory)]
 DrawingUpload = Annotated[UploadFile, File(description="A .pdf, .png, or .jpg drawing.")]
 ProviderField = Annotated[
@@ -460,6 +498,68 @@ def get_redline_png(run_id: uuid.UUID, root: RunsRoot) -> FileResponse:
     run_dir = _run_dir(root, run_id)
     path = _existing_file(run_dir, REDLINE_PNG, "POST /api/runs/{run_id}/fix")
     return FileResponse(path, media_type="image/png")
+
+
+@app.post("/api/demo/low-confidence", status_code=201)
+def create_demo_run(allowed: DemoAllowed, root: RunsRoot) -> dict:
+    """Create a run from a saved extraction, with two items marked unsure.
+
+    What the review screen does with low confidence is a property of the page, not of the
+    model, and checking it should not cost a model call — or a key, which a reviewer
+    looking at the UI may not have. So this builds a real run folder out of the plate_001
+    fixture and the sample drawing: the page shows it exactly as it shows an upload, and
+    ``/check`` works on it afterwards like any other run.
+
+    **Off by default, and local only.** The route answers nothing unless
+    ``DRAFTCHECK_ENABLE_DEMO=1`` is set *and* the caller is on this machine — see
+    :func:`demo_is_allowed`. A deployed DraftCheck therefore carries no demo data whether
+    or not anybody remembered to think about it.
+    """
+    if not allowed:
+        raise HTTPException(status_code=404, detail="Not Found")
+    if not DEMO_EXTRACTION.is_file() or not DEMO_PAGE.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="The demo files are not here. They ship with the repository, not the package.",
+        )
+
+    drawing_json = _read_json(DEMO_EXTRACTION)
+    # The first dimension and the frame: one marked row in each of two different tables,
+    # which is what makes the markings worth looking at.
+    for key in ("dimensions", "fcfs"):
+        items = drawing_json.get(key) or []
+        if items:
+            items[0]["confidence"] = DEMO_CONFIDENCE
+
+    drawing = parse_drawing(drawing_json)
+
+    run_id = uuid.uuid4()
+    run_dir = root / str(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / PAGE_PNG).write_bytes(DEMO_PAGE.read_bytes())
+
+    payload = drawing.model_dump(mode="json")
+    meta = {
+        "run_id": str(run_id),
+        "source": DEMO_PAGE.name,
+        "provider": None,
+        "model": "demo (no model call)",
+        "latency_s": 0.0,
+        "attempts": 0,
+        "created": datetime.now(UTC).isoformat(),
+    }
+    _write_json(run_dir / EXTRACTION_JSON, payload)
+    _write_json(run_dir / META_JSON, meta)
+
+    return {
+        "run_id": str(run_id),
+        "drawing": payload,
+        "parse_issues": drawing.parse_issues,
+        "model": meta["model"],
+        "latency_s": meta["latency_s"],
+        "attempts": meta["attempts"],
+        "page_url": f"/api/runs/{run_id}/page.png",
+    }
 
 
 # Mounted last, so every /api route above wins over the static file server.
