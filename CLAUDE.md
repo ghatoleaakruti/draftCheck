@@ -19,6 +19,7 @@ redlined drawing. Built solo for the Meta Global AI Developer Hackathon (Oct 26 
 - NEVER put API keys or secrets in code. Read them from `.env` via python-dotenv.
   Never print, log, or display the contents of `.env`.
 - Ask before installing any new library; if approved, add it to requirements.txt.
+- NEVER create, copy, symlink, or modify .env. If something needs it and can't find it, stop and tell me.
 
 ## Engineering principles
 - The LLM reads and reasons; deterministic Python decides pass/fail. Never let the LLM
