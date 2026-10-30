@@ -18,10 +18,30 @@
     <main>
       <!-- Upload. Submitted by app.js as a POST to /api/runs; no native form navigation. -->
       <form id="upload-form" class="panel upload">
-        <div class="field">
-          <label for="file">Drawing</label>
-          <input id="file" name="file" type="file" accept=".pdf,.png,.jpg,.jpeg" required />
-          <p class="hint">PDF, PNG, or JPG. Page 1 is read. 10 MB limit.</p>
+        <!-- The drop zone is the file field. The real <input type="file"> is still here,
+             visually hidden: it does the picking, so the browser's own file dialog and
+             its accessibility come for free. The div carries role/tabindex so the zone
+             itself is reachable and operable from the keyboard. -->
+        <div class="field field-drop">
+          <label id="drop-label" for="file">Drawing</label>
+          <div
+            id="dropzone"
+            class="dropzone"
+            role="button"
+            tabindex="0"
+            aria-labelledby="drop-label"
+            aria-describedby="drop-main drop-hint"
+          >
+            <input
+              id="file"
+              name="file"
+              type="file"
+              accept=".pdf,.png,.jpg,.jpeg"
+              class="visually-hidden"
+            />
+            <p id="drop-main" class="drop-main">Drop a drawing here, or click to choose a file</p>
+            <p id="drop-hint" class="hint">PDF, PNG, or JPG · up to 10 MB</p>
+          </div>
         </div>
 
         <div class="field">

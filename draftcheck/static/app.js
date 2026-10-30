@@ -20,6 +20,9 @@ const fileInput = document.getElementById("file");
 const providerSelect = document.getElementById("provider");
 const submitButton = document.getElementById("submit");
 
+const dropzone = document.getElementById("dropzone");
+const dropMain = document.getElementById("drop-main");
+
 const statusLine = document.getElementById("status");
 const errorBox = document.getElementById("error");
 const errorText = document.getElementById("error-text");
@@ -29,11 +32,55 @@ const parseIssuesBox = document.getElementById("parse-issues");
 const parseIssuesList = document.getElementById("parse-issues-list");
 const pageImage = document.getElementById("page-image");
 
+/* ---- The drop zone ------------------------------------------------------- */
+
+const DROP_PROMPT = "Drop a drawing here, or click to choose a file";
+
+/** What the server will open, checked here so an obvious mistake costs no request. */
+const ALLOWED_SUFFIXES = [".pdf", ".png", ".jpg", ".jpeg"];
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+/** True while a run is in flight; the drop zone ignores clicks and drops then. */
+let busy = false;
+
+/**
+ * Why this file cannot be sent, or `null` when it can.
+ *
+ * Checked on the file name, not on the browser's `type`, which is a guess the client
+ * makes from the extension anyway. The server checks both again — this is only here so
+ * the wrong file gives an answer immediately instead of after a round trip.
+ */
+function rejectionReason(file) {
+  const name = file.name || "";
+  const dot = name.lastIndexOf(".");
+  const suffix = dot === -1 ? "" : name.slice(dot).toLowerCase();
+
+  if (!ALLOWED_SUFFIXES.includes(suffix)) {
+    return `“${name}” is not a drawing DraftCheck can read. Use a PDF, PNG, or JPG file.`;
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    const megabytes = (file.size / (1024 * 1024)).toFixed(1);
+    return `“${name}” is ${megabytes} MB. The limit is 10 MB.`;
+  }
+  return null;
+}
+
 /** Show one of the three states; the others are hidden. */
-function setBusy(busy) {
-  submitButton.disabled = busy;
-  submitButton.textContent = busy ? "Reading…" : "Read drawing";
-  statusLine.hidden = !busy;
+function setBusy(isBusy) {
+  busy = isBusy;
+  submitButton.disabled = isBusy;
+  submitButton.textContent = isBusy ? "Reading…" : "Read drawing";
+  statusLine.hidden = !isBusy;
+
+  dropzone.classList.toggle("is-busy", isBusy);
+  dropzone.classList.remove("is-dragging");
+  dropzone.setAttribute("aria-disabled", String(isBusy));
+  dropzone.tabIndex = isBusy ? -1 : 0;
+}
+
+/** The file name while reading, the invitation the rest of the time. */
+function setDropLabel(fileName) {
+  dropMain.textContent = fileName || DROP_PROMPT;
 }
 
 function showError(message) {
@@ -260,17 +307,15 @@ async function errorMessage(response) {
   return `The server returned ${response.status} ${response.statusText}.`;
 }
 
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-
-  const file = fileInput.files && fileInput.files[0];
-  if (!file) {
-    clearOutput();
-    showError("Choose a PDF, PNG, or JPG drawing first.");
-    return;
-  }
-
+/**
+ * Send one file and show what comes back.
+ *
+ * The one path for both ways in: dropping a file, and the Read drawing button. A file
+ * that fails `rejectionReason` never gets here, so nothing unsendable reaches the wire.
+ */
+async function startRun(file) {
   clearOutput();
+  setDropLabel(file.name);
   setBusy(true);
 
   const body = new FormData();
@@ -290,5 +335,97 @@ form.addEventListener("submit", async (event) => {
     showError(`Could not reach the server: ${problem.message}`);
   } finally {
     setBusy(false);
+    setDropLabel(null);
   }
+}
+
+/** Check a file and either start reading it or say why not. No request for a bad file. */
+function offerFile(file) {
+  const reason = rejectionReason(file);
+  if (reason) {
+    clearOutput();
+    showError(reason);
+    return;
+  }
+  startRun(file);
+}
+
+/* ---- Ways in: drop, click, keyboard, and the button ---------------------- */
+
+dropzone.addEventListener("click", (event) => {
+  // The hidden input lives inside the zone, so its own click would bounce back here and
+  // reopen the dialog forever. Only a click on the zone itself opens it.
+  if (busy || event.target === fileInput) {
+    return;
+  }
+  fileInput.click();
+});
+
+dropzone.addEventListener("keydown", (event) => {
+  if (busy || (event.key !== "Enter" && event.key !== " ")) {
+    return;
+  }
+  event.preventDefault(); // Space would scroll the page.
+  fileInput.click();
+});
+
+// Picking a file from the dialog reads it straight away, exactly as a drop does.
+fileInput.addEventListener("change", () => {
+  const file = fileInput.files && fileInput.files[0];
+  if (file) {
+    offerFile(file);
+  }
+});
+
+/* The browser opens a dropped file in the tab unless both dragover and drop call
+   preventDefault — dragover says "this element accepts the drop", drop keeps the
+   navigation from happening. */
+dropzone.addEventListener("dragover", (event) => {
+  if (busy) {
+    return;
+  }
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+  dropzone.classList.add("is-dragging");
+});
+
+// dragleave fires when crossing onto a child element too; `relatedTarget` outside the
+// zone is what actually means the pointer left it.
+dropzone.addEventListener("dragleave", (event) => {
+  if (!dropzone.contains(event.relatedTarget)) {
+    dropzone.classList.remove("is-dragging");
+  }
+});
+
+dropzone.addEventListener("drop", (event) => {
+  if (busy) {
+    return;
+  }
+  event.preventDefault();
+  dropzone.classList.remove("is-dragging");
+
+  const file = event.dataTransfer.files && event.dataTransfer.files[0];
+  if (!file) {
+    clearOutput();
+    showError("That drop carried no file. Drag a PDF, PNG, or JPG drawing onto the box.");
+    return;
+  }
+
+  // Hand the drop to the file input as well, so the form holds the same file the drop
+  // started and the Read drawing button can run it again. Assigning `files` fires no
+  // change event, so this does not start a second run.
+  fileInput.files = event.dataTransfer.files;
+  offerFile(file);
+});
+
+form.addEventListener("submit", (event) => {
+  event.preventDefault();
+
+  const file = fileInput.files && fileInput.files[0];
+  if (!file) {
+    clearOutput();
+    showError("Drop a PDF, PNG, or JPG drawing on the box, or click it to choose one.");
+    return;
+  }
+  offerFile(file);
 });
