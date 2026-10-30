@@ -47,6 +47,8 @@ const resetButton = document.getElementById("reset");
 const addDatumButton = document.getElementById("add-datum");
 const invalidNote = document.getElementById("invalid-note");
 
+const confidenceSummary = document.getElementById("confidence-summary");
+
 const findingsPanel = document.getElementById("findings-panel");
 const findingsList = document.getElementById("findings-list");
 const findingsNone = document.getElementById("findings-none");
@@ -270,6 +272,9 @@ function buildOverlay(items) {
     box.style.width = `${(x1 - x0) * 100}%`;
     box.style.height = `${(y1 - y0) * 100}%`;
     box.title = item.title;
+    // Amber instead of the faint blue, so the items worth a second look are findable on
+    // the drawing without reading the tables at all.
+    box.classList.toggle("is-unsure", Boolean(item.unsure));
 
     overlay.appendChild(box);
     linked.set(item.id, { box, row: null });
@@ -629,15 +634,98 @@ function numberCell(item, field, was, { required, min, cell }) {
   });
 }
 
+/* ---- Low confidence ------------------------------------------------------ */
+
+/*
+ * The model returns a confidence with every datum, dimension, and frame. Below the
+ * threshold the item is marked on both sides — an amber tag on its row, an amber outline
+ * on its box — and counted in one line above the tables, so a reviewer with no time to
+ * read every row still knows which ones the model was least sure of.
+ *
+ * It changes nothing about the check. Confidence is the model's own opinion of its
+ * reading; the rules run on the values, not on how sure the model was about them.
+ */
+
+/** Below this, an item is marked for a second look. The only place this number lives. */
+const CONFIDENCE_THRESHOLD = 0.8;
+
+/**
+ * True when the model said it was unsure about this item.
+ *
+ * A missing or unusable confidence is *unknown*, not *low*: the model said nothing about
+ * how sure it was, and marking that as doubt would invent a verdict it never gave.
+ */
+function isUnsure(item) {
+  const value = item && item.confidence;
+  return typeof value === "number" && isFinite(value) && value < CONFIDENCE_THRESHOLD;
+}
+
+/** The ids flagged in the current tables, in the order the tables show them. */
+let unsureIds = [];
+
+/** The amber tag for a row, or null when the model was sure enough about the item. */
+function unsureMarker(item) {
+  if (!isUnsure(item)) {
+    return null;
+  }
+  const mark = document.createElement("span");
+  mark.className = "unsure";
+  mark.textContent = "unsure";
+  // Two decimals always, so the number is in the same place in every tooltip.
+  mark.title =
+    `Muse Spark is unsure about this one (confidence ${item.confidence.toFixed(2)}). ` +
+    `Please check it.`;
+  // The tooltip is the whole message, and a title alone is not reliably announced.
+  mark.setAttribute("aria-label", mark.title);
+  return mark;
+}
+
+/** Scroll to the first flagged row and light it, the way clicking the row would. */
+function goToFirstUnsure() {
+  const id = unsureIds[0];
+  const pair = id ? linked.get(id) : undefined;
+  if (!pair || !pair.row) {
+    return;
+  }
+  pick([id], pair.row);
+}
+
+/**
+ * The line above the tables: how many items to look at, or that there are none.
+ *
+ * The count is a button only when there is somewhere to go. "Confident about every item"
+ * is a statement, and a statement that looks clickable and does nothing is worse than
+ * plain text.
+ */
+function renderConfidenceSummary() {
+  if (unsureIds.length === 0) {
+    confidenceSummary.className = "confidence-summary is-clear";
+    confidenceSummary.replaceChildren("Muse Spark is confident about every item");
+    return;
+  }
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "confidence-link";
+  button.textContent =
+    `Muse Spark flagged ${unsureIds.length} item${unsureIds.length === 1 ? "" : "s"} ` +
+    `to double-check`;
+  button.addEventListener("click", goToFirstUnsure);
+
+  confidenceSummary.className = "confidence-summary is-flagged";
+  confidenceSummary.replaceChildren(button);
+}
+
 /* ---- Building the tables ------------------------------------------------- */
 
 /**
  * Replace a tbody's rows.
  *
- * `rows` is a list of `{ id, cells }`, where each cell is a `<td>` and `id` ties the row
- * to its box on the drawing. An empty list leaves one spanning row saying so, rather than
- * a table with a header and nothing under it — "the model found none" and "the page has
- * not loaded" should not look alike.
+ * `rows` is a list of `{ id, cells, marker }`, where each cell is a `<td>`, `id` ties the
+ * row to its box on the drawing, and `marker` is the low-confidence tag when there is one.
+ * An empty list leaves one spanning row saying so, rather than a table with a header and
+ * nothing under it — "the model found none" and "the page has not loaded" should not look
+ * alike.
  */
 function fillTable(tbodyId, rows, columns, emptyMessage) {
   const tbody = document.getElementById(tbodyId);
@@ -654,10 +742,19 @@ function fillTable(tbodyId, rows, columns, emptyMessage) {
     return;
   }
 
-  for (const { id, cells } of rows) {
+  for (const { id, cells, marker } of rows) {
     const row = document.createElement("tr");
     for (const cell of cells) {
       row.appendChild(cell);
+    }
+    // The tag rides in the first cell, next to "no location", so a row carries both of
+    // the things that are true about it rather than growing a column for each.
+    if (marker) {
+      row.classList.add("is-unsure");
+      cells[0].appendChild(marker);
+      if (id) {
+        unsureIds.push(id);
+      }
     }
     linkRow(id, row, cells[0]);
     tbody.appendChild(row);
@@ -755,7 +852,7 @@ function renderDatums() {
     });
     removeCell.appendChild(remove);
 
-    return { id: datum.id, cells: [labelCell, removeCell] };
+    return { id: datum.id, cells: [labelCell, removeCell], marker: unsureMarker(datum) };
   });
 
   setCount("count-datums", datums);
@@ -777,6 +874,7 @@ function renderDimensions() {
 
     return {
       id: dimension.id,
+      marker: unsureMarker(dimension),
       cells: [
         textCell(text(dimension.text_raw), true),
         numberCell(dimension, "value", was.value ?? null, { required: true }),
@@ -819,6 +917,7 @@ function renderFcfs() {
 
     return {
       id: fcf.id,
+      marker: unsureMarker(fcf),
       cells: [
         textCell(text(fcf.characteristic), false),
         numberCell(fcf, "tolerance", was.tolerance ?? null, { required: true, min: 0 }),
@@ -860,6 +959,8 @@ function renderTables() {
   // Every control on screen is about to be replaced, so no complaint about one of them
   // outlives this rebuild; the new cells re-register whatever is still wrong.
   invalidInputs.clear();
+  // Refilled by `fillTable` as the three tables are built below, in their order.
+  unsureIds = [];
 
   // The boxes go up first: a row asks `linked` whether its item has one.
   buildOverlay([
@@ -867,16 +968,19 @@ function renderTables() {
       id: datum.id,
       bbox: datum.bbox,
       title: `Datum ${text(datum.label)}`,
+      unsure: isUnsure(datum),
     })),
     ...(state.working.dimensions || []).map((dimension) => ({
       id: dimension.id,
       bbox: dimension.bbox,
       title: `Dimension ${text(dimension.text_raw)}`,
+      unsure: isUnsure(dimension),
     })),
     ...(state.working.fcfs || []).map((fcf) => ({
       id: fcf.id,
       bbox: fcf.bbox,
       title: `Frame ${text(fcf.characteristic)}`,
+      unsure: isUnsure(fcf),
     })),
   ]);
   overlay.hidden = !overlayToggle.checked;
@@ -885,6 +989,7 @@ function renderTables() {
   renderDatums();
   renderDimensions();
   renderFcfs();
+  renderConfidenceSummary();
 }
 
 /* ---- Findings ------------------------------------------------------------ */
@@ -1591,6 +1696,41 @@ dropzone.addEventListener("drop", (event) => {
   fileInput.files = event.dataTransfer.files;
   offerFile(file);
 });
+
+/* ---- The demo run -------------------------------------------------------- */
+
+/*
+ * `?demo=low-confidence` loads a saved extraction with two items marked unsure, so the
+ * markings above can be looked at without spending a model call on it. The server only
+ * answers this for a browser on the same machine, so a deployed DraftCheck has no demo.
+ */
+
+const DEMO_PARAM = "demo";
+const LOW_CONFIDENCE_DEMO = "low-confidence";
+
+/** Ask for the demo run and show it, exactly as an upload's reply is shown. */
+async function loadDemo() {
+  clearOutput();
+  setBusy(true);
+  try {
+    const response = await fetch(`/api/demo/${LOW_CONFIDENCE_DEMO}`, { method: "POST" });
+    if (!response.ok) {
+      showError(await errorMessage(response));
+      return;
+    }
+    render(await response.json());
+  } catch (problem) {
+    showError(`Could not reach the server: ${problem.message}`);
+  } finally {
+    setBusy(false);
+    setDropLabel(null);
+    updateCheckButton();
+  }
+}
+
+if (new URLSearchParams(window.location.search).get(DEMO_PARAM) === LOW_CONFIDENCE_DEMO) {
+  loadDemo();
+}
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();

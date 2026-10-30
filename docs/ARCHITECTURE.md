@@ -430,6 +430,7 @@ looking.
 | `POST` | `/api/runs/{run_id}/fix` | Runs the correction loop on `confirmed.json` with the page image, writes `corrections.json` and the redline. Returns the rounds in plain English (see below), the per-finding status, the final findings, and the corrected drawing | `404` unknown run, `409` `/check` has not run |
 | `GET` | `/api/runs/{run_id}/redline.pdf` | The two-page redline | `404` |
 | `GET` | `/api/runs/{run_id}/redline.png` | Page 1 of the redline | `404` |
+| `POST` | `/api/demo/low-confidence` | Builds a run out of `tests/fixtures/plate_001.model.json` and `samples/generated/plate_001.png`, with the first dimension and the frame lowered to `confidence: 0.6`. No model call. Same reply shape as `POST /api/runs`. **Off unless `DRAFTCHECK_ENABLE_DEMO=1`, and loopback only** | `404` unless both gates are open, or if the two repo files are absent |
 | `GET` | `/` | Static files from `draftcheck/static/`, mounted last so every `/api` route wins | — |
 
 Per run: `source.<ext>`, `page.png`, `extraction.json`, `raw.txt`, `meta.json` from the
@@ -609,6 +610,66 @@ Verified end to end against the live model on plate_001 on 2026-10-30: one round
 applied edit (*Remove datum C from the position frame*), GDT-001 verified resolved by the
 re-run, and the two-page redline served into the page.
 
+### 4.11 Confidence on the review screen — BUILT
+
+Extraction returns a `confidence` in 0..1 with every datum, dimension, and frame
+(`schema.py`). Until now the page ignored it. It is now what tells a reviewer which rows
+to read first.
+
+**The threshold.** `CONFIDENCE_THRESHOLD = 0.8` in `app.js`, in one place, and `isUnsure`
+is the only thing that compares against it. A missing, null, or non-numeric confidence is
+**unknown, not low**: the model said nothing about how sure it was, and marking that as
+doubt would invent a verdict it never gave. Those rows get no marker and are not counted.
+
+**Three markings, all of them quiet.**
+
+- The row carries a small amber `unsure` pill in its first cell, beside the existing
+  `no location` tag, plus a 2 px amber rule down its left edge. The pill's tooltip is the
+  whole sentence with the number in it: *Muse Spark is unsure about this one (confidence
+  0.60). Please check it.* The tooltip is on the pill rather than on the `<td>` because the
+  cell's `title` already belongs to the *Edited. Muse Spark read: …* message, and the two
+  would overwrite each other. It is also the pill's `aria-label`, since a `title` alone is
+  not reliably announced.
+- The item's box on the drawing goes amber instead of faint blue — border colour only, so
+  the hover and picked states still read as themselves on top of it.
+- One line above the tables: **Muse Spark flagged 2 items to double-check**, a button that
+  scrolls to the first flagged row and lights it exactly as clicking that row would. With
+  nothing flagged the same line reads *Muse Spark is confident about every item* as plain
+  grey text — a statement that looks clickable and does nothing is worse than no affordance
+  at all.
+
+The marks are computed in `renderTables`, so Reset, Add datum, and Remove rebuild them with
+everything else. Confidence is not editable, so the count only moves when a flagged datum
+is removed. An added datum has no confidence and is therefore unknown, not flagged.
+
+**It changes nothing about the check.** Confidence is the model's opinion of its own
+reading. The rules run on the values, not on how sure the model was about them, and a
+flagged row passes or fails on exactly the same basis as any other.
+
+**Looking at it without a model call.** `http://localhost:8000/?demo=low-confidence` posts
+to `/api/demo/low-confidence`, which builds a real run folder from the plate_001 fixture
+with two items lowered to 0.6 — so the screen can be looked at, and checked, with no key
+and no latency. Start the server with the variable set:
+
+```
+DRAFTCHECK_ENABLE_DEMO=1 python -m uvicorn draftcheck.api:app --port 8000
+```
+
+**Two gates, both of which have to open** (`demo_is_allowed`), or the route 404s:
+
+1. `DRAFTCHECK_ENABLE_DEMO=1` in the server's environment. Off by default, so forgetting
+   is the safe direction — nothing has to be taken out before a deploy. Only the exact
+   string `1` counts; a stray `0`, `false`, or `true` leaves it off, because a value
+   nobody meant as yes should never read as one.
+2. The caller's address is loopback. This is the backstop for the variable being set
+   somewhere nobody intended — exported in a shell, inherited by a service, copied into a
+   container image. It is a property of the connection rather than a setting, so it cannot
+   be misconfigured, only bypassed by a reverse proxy on the same host. That last case is
+   worth knowing before deploying it that way; the only thing exposed is our own sample
+   plate.
+
+The variable is read from the process environment, not from `.env`.
+
 ## 5. Repo layout (what exists today)
 
 ```
@@ -663,7 +724,8 @@ draftCheck/
 │   ├── test_render.py
 │   ├── test_rules.py
 │   ├── test_sample_drawing.py
-│   └── test_schema.py
+│   ├── test_schema.py
+│   └── test_static.py          # facts about the browser page Python can assert
 ├── CLAUDE.md                   # working rules for Claude Code
 ├── LICENSE                     # MIT
 ├── README.md
@@ -709,6 +771,9 @@ draftCheck/
 | 2026-10-30 | Run state is stored as files per run under `outputs/web/<uuid>` | Simple, inspectable, no database needed for a hackathon demo; replaceable later. A run's folder is also exactly what the CLI writes, so a web run can be opened, diffed, or replayed with the same tools, and "which step is this run at" is a file that either exists or does not rather than state a process has to keep |
 | 2026-10-30 | The `/fix` reply words every edit with `redline.plain_edit`, and `corrections.json` keeps the id-carrying form | The page and page 2 of the redline are read by the same person deciding whether a correction is right, and they must not word it differently — one function means they cannot. Wording the edits in JavaScript instead would have put a second vocabulary in a second language, drifting from the first the next time an operation is added. The file on disk keeps `fcf_1`, because its reader has the run folder open rather than the drawing |
 | 2026-10-30 | Proposing fixes is gated on the check being current, not merely on a check having happened | The server corrects `confirmed.json`, so after an edit the agent would be fixing data the user has already moved past, and the rounds would describe a drawing nobody is looking at. Disabling the button and saying why is cheaper than explaining the mismatch afterwards |
+| 2026-10-30 | A missing confidence on the review screen is *unknown*, not *low*: no marker, not counted in the flagged total | The marker exists to carry something the model said. When the model said nothing, flagging the row would attribute a doubt to it that it never expressed, and a reviewer would spend attention on a row that is no more suspect than any other. Unknown is also the honest state for a datum the user adds by hand |
+| 2026-10-30 | Confidence is shown but never acted on: the rules run on a flagged row exactly as on any other, and a low score neither fails a check nor changes a finding | Same principle as the rest of the project — the LLM reads, deterministic Python decides. Letting the model's own estimate of its reading move a pass/fail would hand the verdict back to it through the side door, and a confident wrong reading is the case that matters most. The score steers a human's attention, which is all it is good for |
+| 2026-10-30 | `?demo=low-confidence` is served by `/api/demo/low-confidence`, off unless `DRAFTCHECK_ENABLE_DEMO=1` **and** the request arrives from loopback | Reviewing the confidence markings should not cost a model call or need a key, but a route that fabricates runs should not exist in a deployment at all. The two gates fail in different directions and so cover each other: the variable is the deliberate act, defaulting to off so forgetting is safe and nothing has to be removed before a deploy; loopback is the backstop for the variable being set somewhere nobody intended, since it is a property of the connection and cannot be misconfigured. Building a real run folder rather than returning a payload means the demo goes through `/check` like any other drawing, so it exercises the page instead of a special case of it |
 | 2026-10-30 | `render.load_pages` translates pypdfium2's and pillow's own errors into `RenderError`, rather than each caller catching the dependency's error class | Every caller — the CLI's exit code, the API's status code — catches `RenderError` and nothing else, so an error leaking from a dependency is an exit code or a status code that never happens: a corrupt upload came out as a traceback and a 500 instead of a 400. Translating once at the boundary means the file-reading contract is stated in one place, and swapping the PDF library later does not touch any caller |
 
 ## 8. Status
@@ -717,5 +782,5 @@ draftCheck/
 | --- | --- | --- |
 | 1 | Extraction + JSON schema + rule engine + test generator | BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`, `rules.py` with 6 rules, and `pipeline.py` + `cli.py` joining them into one `check` command that runs a drawing end to end. More rules can be added to the registry as the sample set grows |
 | 2 | Agent correction loop + redlined PDF | BUILT: `edits.py` (the four allowed operations and their guards), `agent.py` (the three-round loop), and `redline.py` (the two-page redline), wired into `check --fix --redline` and verified end to end on plate_001 |
-| 3 | Web UI + live deploy | PARTLY BUILT: `api.py` serves the whole flow over HTTP — upload + extract, check the confirmed data, run the loop, fetch the redline — verified end to end against the live model on plate_001. The browser page uploads a drawing, shows what the model read, lets the reviewer correct it, runs the check from it (§4.9), and proposes verified fixes with the redline (§4.10). The deploy is next |
+| 3 | Web UI + live deploy | PARTLY BUILT: `api.py` serves the whole flow over HTTP — upload + extract, check the confirmed data, run the loop, fetch the redline — verified end to end against the live model on plate_001. The browser page uploads a drawing, shows what the model read, lets the reviewer correct it, runs the check from it (§4.9), proposes verified fixes with the redline (§4.10), and marks the rows the model was least sure of (§4.11). The deploy is next |
 | 4 | After hackathon: SAM 3.1 precision, revisions, link to Research Paper Recommender | PLANNED (post-hackathon) |
