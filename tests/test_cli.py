@@ -7,6 +7,8 @@ the CLI's client for a scripted one, so nothing here touches the network either.
 import json
 from pathlib import Path
 
+import pypdfium2 as pdfium
+
 from draftcheck.cli import EXIT_FAILED, EXIT_FINDINGS, EXIT_OK, format_table, main
 from draftcheck.llm_client import JSONChatResult, Usage
 from draftcheck.schema import Finding
@@ -273,3 +275,34 @@ def test_without_fix_the_model_is_never_called_for_corrections(tmp_path, capsys,
 
     assert "Correction loop" not in capsys.readouterr().out
     assert not (tmp_path / "corrections.json").exists()
+
+
+def test_redline_writes_a_two_page_pdf_and_a_png_without_fix(tmp_path, capsys):
+    run_cli(tmp_path, "--redline")
+
+    out = capsys.readouterr().out
+    assert "redline.pdf" in out and "redline.png" in out
+
+    pdf = pdfium.PdfDocument(tmp_path / "redline.pdf")
+    try:
+        assert len(pdf) == 2
+    finally:
+        pdf.close()
+    assert (tmp_path / "redline.png").stat().st_size > 0
+
+
+def test_redline_works_together_with_fix(tmp_path, monkeypatch):
+    use_fake_client(monkeypatch)
+
+    code = run_cli(tmp_path, "--fix", "--redline")
+
+    assert code == EXIT_FINDINGS
+    assert (tmp_path / "redline.pdf").exists()
+    assert (tmp_path / "corrections.json").exists()
+
+
+def test_no_redline_flag_means_no_redline_files(tmp_path):
+    run_cli(tmp_path)
+
+    assert not (tmp_path / "redline.pdf").exists()
+    assert not (tmp_path / "redline.png").exists()

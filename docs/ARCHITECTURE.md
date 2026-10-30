@@ -24,8 +24,8 @@ always produces the same verdicts. No rule outcome is ever read out of a model r
 
 ## 3. Pipeline — PARTLY BUILT
 
-Render, Extract, Check, and Correct work today. The user-confirmation step and the redlined
-PDF output are still planned.
+Render, Extract, Check, Correct, and the redlined PDF output work today. The
+user-confirmation step is still planned.
 
 ```mermaid
 flowchart TD
@@ -48,9 +48,8 @@ Stage notes:
 | Extract | Model returns a JSON object; parsed by `llm_parsing.extract_json`, then validated by `schema.parse_drawing`. Wired up as `pipeline.extract` | **BUILT** |
 | Confirm | User reviews and edits the extracted values before any checking | PLANNED |
 | Check | Python rules produce pass/fail per rule, with no model involvement, via `rules.run_rules`, wrapped as `pipeline.check` | **BUILT** |
-
 | Correct | Agent proposes edits from a fixed menu, Python applies the safe ones and re-runs the rules to verify; **max 3 rounds**, then stop. `agent.correct`, see §4.5 | **BUILT** |
-| Output | Annotated PDF with redline markup and a findings list | PLANNED |
+| Output | Two-page redline: the drawing with a numbered marker per located finding, and a findings page behind it. `redline.render_redline` / `redline.save_redline`, see §4.7 | **BUILT** |
 
 Render → Extract → Check → Correct runs end to end today from one command,
 `python -m draftcheck.cli check --fix` — see §4.3.
@@ -73,7 +72,7 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/cli.py` | The `check` subcommand — see §4.3. Writes the run's files, prints the findings table and any `parse_issues`, and sets the exit code | **BUILT** |
 | `draftcheck/edits.py` | The four operations the agent may propose — `set_field`, `add_datum`, `remove_datum_ref`, `add_dimension` — as pydantic models, plus `apply_edits(drawing, edits)` returning `(new_drawing, applied, rejected)`. Applies one edit at a time to a copy, re-validating the whole drawing after each, and refuses anything that deletes a feature, touches a protected field, names an unknown id, uses an unknown operation, or silently fails to take. Never raises on bad model output — see §4.6 | **BUILT** |
 | `draftcheck/agent.py` | `correct(drawing, image_png, client, max_rounds=3)` → `CorrectionReport`. One round = ask, apply, re-run `rules.run_rules`, diff the findings. Records `proposed`, `applied`, `rejected`, findings before and after, `resolved`, and `introduced` per round, and a resolved/unresolved verdict per original finding — all computed from the re-run, never from the model's claim. Stops when no error-severity finding is left or after `max_rounds` — see §4.5 | **BUILT** |
-| `draftcheck/redline.py` | Overlays markup on the original PDF; library to be chosen in Layer 2 | PLANNED |
+| `draftcheck/redline.py` | `render_redline(page_png, findings, report=None, model_name=None, when=None)` → two pillow pages, and `save_redline(pages, path_pdf, path_png)` → a 2-page PDF plus page 1 as a PNG. Pillow only, drawn on the rendered page image. Markers are numbered in `run_rules` order, so a number means the same finding on page 1, on page 2, and in `findings.json`. `findings_text(findings, report)` returns page 2's wording as styled lines, so the text can be tested without reading pixels — see §4.7 | **BUILT** |
 | `draftcheck/api.py` | FastAPI app: upload, confirm, results endpoints | PLANNED |
 | `frontend/` | Upload page, extraction review/edit screen, findings view | PLANNED |
 | `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch. The ground truth is written in `schema.py`'s field names — plus `bbox_convention` and `seeded_errors` — so it parses as a `Drawing` and doubles as the target an extraction is scored against | **BUILT** |
@@ -138,7 +137,7 @@ including both overall sizes and both hole locations.
 
 ```
 python -m draftcheck.cli check <drawing> [--from-json path] [--provider baseten|meta]
-                                         [--fix] [--out dir] [--dpi n]
+                                         [--fix] [--redline] [--out dir] [--dpi n]
 ```
 
 `--fix` runs the correction loop after the check (§4.5) and prints, per round, what was
@@ -154,6 +153,10 @@ on its last line:
 ```
 Agent proposals are unreviewed; original drawing has 1 error(s).
 ```
+
+`--redline` writes `redline.pdf` and `redline.png` to the output folder (§4.7). It works
+with or without `--fix`; with `--fix` the findings page also carries each applied edit, its
+rationale, and the rule engine's verdict on whether the finding cleared.
 
 `--provider` chooses the model to call (§4.4); with no flag it follows `LLM_PROVIDER` in
 `.env`. The run prints the provider and the model id before calling.
@@ -171,6 +174,8 @@ Each run writes to `--out`, defaulting to `outputs/runs/<drawing-name>/`:
 | `findings.json` | The findings list, in `run_rules` order |
 | `raw.txt` | The model's reply exactly as received. **Only written when the model ran** |
 | `corrections.json` | Every round (proposed, applied, rejected with reasons, findings before and after, resolved, introduced), the per-finding status, the final findings, and the corrected drawing. **Only written with `--fix`** |
+| `redline.pdf` | The two-page redline: marked drawing, then the findings page. **Only written with `--redline`** |
+| `redline.png` | Page 1 of the redline on its own, for embedding in a README or a demo. **Only written with `--redline`** |
 
 Exit codes are meant for CI: `0` clean, `1` at least one error-severity finding, `2` the
 run could not happen at all (unreadable drawing, bad JSON, missing config, model failure).
@@ -344,6 +349,65 @@ There is no delete operation. The guards, in the order they fire:
 goes back into the next round's prompt as a reason, which is what stops the same refused
 edit being proposed three times running.
 
+### 4.7 The redlined output — BUILT
+
+`redline.render_redline(page_png, findings, report=None, model_name=None, when=None)`
+returns two pillow images; `redline.save_redline(pages, path_pdf, path_png)` writes them as
+a 2-page PDF (at 200 dpi, so the page comes out its real physical size) and page 1 on its
+own as a PNG.
+
+**Page 1** is the rendered drawing. Every finding that has a bounding box gets the mark a
+checker would draw by hand: a red rectangle around the box, padded by 0.5% of the page
+width and drawn 0.3% wide, with a numbered balloon — a filled red disc 3% of the page
+width across, white number inside — just off the rectangle's top-right corner on a short
+leader. The rectangle encloses rather than covers, so the callout under review stays
+readable. If the balloon would hang off the sheet the other three corners are tried in
+turn, and as a last resort it is clamped into the page, because a finding must never lose
+its number. A stamp in the top-left corner gives the finding count, the model that ran,
+and the date, separated by ` | `.
+
+**Page 2** is a clean white sheet the same size: every finding by number, with its rule id,
+severity, and message. With a `CorrectionReport` it also carries each applied edit, that
+edit's rationale, and `verified resolved` or `unresolved`. The footer reads *Proposed
+corrections are verified by DraftCheck's rule engine and require engineer review.*
+
+Edits are written out in plain English — `Remove datum C from the position frame`, not
+`remove_datum_ref datum C from frame fcf_1` — by `plain_edit(edit, names)`, which names a
+frame by its characteristic and a dimension by what is printed on it. Item ids do not
+appear on the page at all: the reader has the drawing in front of them and is deciding
+whether a correction is right, and `fcf_1` tells them nothing. The ids stay in
+`findings.json` and `corrections.json`, and `Edit.describe()` is left as it is so the
+terminal output and `corrections.json` keep them. Items are named from the drawing as
+**submitted**, so "the 20 dimension" is the one on the sheet rather than what an earlier
+edit turned it into.
+
+Two things are worth being explicit about:
+
+- **Numbering is `run_rules` order.** Marker 3 on page 1, entry 3 on page 2, and the third
+  object in `findings.json` are the same finding. Nothing re-sorts for presentation.
+- **The verdict is still the rule engine's.** An edit's `finding_ids` is the model's own
+  claim, and it is used only to decide which finding an edit is printed under.
+  `verified resolved` comes from `CorrectionReport.statuses`, which `agent.correct`
+  computes by re-running the rules (§4.5). The redline displays a decision; it never makes
+  one.
+
+A finding the rules could not place — DIM-001 is drawing-level, not tied to one callout —
+has nothing to mark, so page 2 says `location not marked` under it. It is counted in the
+stamp like any other.
+
+Text is sized as a fraction of the page width — title 2.5%, body 1.6% — and wrapped to the
+page, so the sheet is readable on screen at full width rather than only when zoomed in.
+
+Pillow's bundled font covers Latin-1 and little else, and a missing glyph draws as a blank
+box that reads as markup rather than as a font problem. `ascii_safe(text)` runs over every
+string the page draws: it substitutes the typographic punctuation we might emit (em dash,
+curly quotes, ellipsis) and keeps `±`, `Ø`, `×`, `°`, which carry engineering meaning and
+which the font has.
+
+`findings_text(findings, report)` returns page 2's content as styled `Line` objects before
+anything is drawn, which is what lets the tests assert on the wording instead of inspecting
+pixels.
+
 ## 5. Repo layout (what exists today)
 
 ```
@@ -364,6 +428,7 @@ draftCheck/
 │   ├── pipeline.py             # BUILT
 │   ├── prompts.py              # BUILT
 │   ├── render.py               # BUILT
+│   ├── redline.py              # BUILT  two-page redline, pillow only
 │   ├── rules.py                # BUILT
 │   └── schema.py               # BUILT
 ├── samples/
@@ -387,6 +452,7 @@ draftCheck/
 │   ├── test_llm_client.py
 │   ├── test_llm_parsing.py
 │   ├── test_pipeline.py
+│   ├── test_redline.py
 │   ├── test_render.py
 │   ├── test_rules.py
 │   ├── test_sample_drawing.py
@@ -431,6 +497,7 @@ draftCheck/
 | 2026-10-29 | Resolved/unresolved is decided only by re-running the rules; the model's `rationale` and `finding_ids` are reported but never acted on | This is the core principle applied to the loop. A model asked whether its own fix worked will say yes. Re-running the deterministic rules is the only claim worth anything, and it also catches the case the model cannot report — a fix that clears one finding and causes another, which the round's `introduced` list names |
 | 2026-10-29 | `--fix` does not change the exit code: it is computed from the findings on the **original** drawing, so a drawing the loop fully corrected still exits `1`, and the run's last line reads `Agent proposals are unreviewed; original drawing has N error(s).` | The loop's edits are proposals, not accepted changes — nobody has reviewed them, and a correction can be applied cleanly, clear its finding, and still be the wrong call on the real part. Exiting `0` would tell CI the drawing was fine when what actually happened is that the agent fixed its own findings and marked its own homework. Making the exit code describe the drawing as submitted keeps "this drawing is wrong" separate from "here is what the agent would do about it", and the printed line stops `1` from looking like the loop failed |
 | 2026-10-29 | The loop runs while error-severity findings remain, and ignores warnings | MFG-001's edge-distance threshold is shop practice with a constant we chose, not a standard. Letting a warning drive rounds would push the model into changing a part's geometry to satisfy our own default |
+| 2026-10-29 | Redline drawn on a rendered image; a mark encloses the finding's bbox in a rectangle and carries a numbered balloon on a leader just outside it | No new dependencies, and one code path covers PDF and image inputs — drawing onto the PDF's own content stream would need a second library and would only work for PDFs. The mark encloses rather than centres because a centre marker on a multi-cell feature control frame lands on whichever cell happens to be in the middle and so points at the wrong one; a rectangle round the whole frame points at the frame. The balloon sits outside the rectangle so the callout under review stays readable, and moves to another corner when the default would put it off the sheet |
 | 2026-10-29 | Lenient parsing: bad bboxes become None, unknown units become None, and an item that cannot be read at all is dropped and recorded in `Drawing.parse_issues` instead of failing the parse | Model output is imperfect; the user confirms data in the UI, and rules flag missing values instead of crashing. One unreadable callout must not cost us the rest of the drawing, and `parse_issues` keeps the loss visible rather than silent |
 
 ## 8. Status
@@ -438,6 +505,6 @@ draftCheck/
 | Layer | What it covers | State |
 | --- | --- | --- |
 | 1 | Extraction + JSON schema + rule engine + test generator | BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`, `rules.py` with 6 rules, and `pipeline.py` + `cli.py` joining them into one `check` command that runs a drawing end to end. More rules can be added to the registry as the sample set grows |
-| 2 | Agent correction loop + redlined PDF | PARTLY BUILT: `edits.py` (the four allowed operations and their guards) and `agent.py` (the three-round loop) are done and wired into `check --fix`, verified end to end on plate_001. The redlined PDF is still PLANNED |
+| 2 | Agent correction loop + redlined PDF | BUILT: `edits.py` (the four allowed operations and their guards), `agent.py` (the three-round loop), and `redline.py` (the two-page redline), wired into `check --fix --redline` and verified end to end on plate_001 |
 | 3 | Web UI + live deploy | PLANNED |
 | 4 | After hackathon: SAM 3.1 precision, revisions, link to Research Paper Recommender | PLANNED (post-hackathon) |

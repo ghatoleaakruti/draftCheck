@@ -5,6 +5,12 @@
         --from-json tests/fixtures/plate_001.model.json
     python -m draftcheck.cli check samples/generated/plate_001.pdf --provider meta
     python -m draftcheck.cli check samples/generated/plate_001.pdf --fix
+    python -m draftcheck.cli check samples/generated/plate_001.pdf --redline
+
+``--redline`` writes ``redline.pdf`` and ``redline.png`` to the output folder: the drawing
+with a numbered marker over each finding, and a findings page behind it. It works with or
+without ``--fix``; with ``--fix`` the findings page also carries each applied edit, its
+rationale, and whether re-running the rules confirmed the finding cleared.
 
 ``--fix`` runs the correction loop after the check: the model proposes edits, Python
 applies the allowed ones and re-runs the rules to see what actually cleared. It calls the
@@ -41,6 +47,7 @@ from draftcheck.config import SUPPORTED_PROVIDERS, ConfigError, get_provider
 from draftcheck.llm_client import LLMClient
 from draftcheck.llm_parsing import JSONParseError
 from draftcheck.pipeline import ExtractionResult, check, extract
+from draftcheck.redline import render_redline, save_redline
 from draftcheck.render import RenderError, load_pages
 from draftcheck.schema import Drawing, Finding, parse_drawing
 
@@ -173,13 +180,17 @@ def _print_corrections(report: CorrectionReport) -> None:
 
 def _run_corrections(
     drawing: Drawing, drawing_path: Path, dpi: int, provider_name: str | None
-) -> CorrectionReport:
-    """Build a client, render the page again for the model, and run the loop."""
+) -> tuple[CorrectionReport, str]:
+    """Build a client, render the page again for the model, and run the loop.
+
+    Returns the report and the model id that produced it, so the redline stamp can name
+    the model even on a run whose extraction came from a saved JSON file.
+    """
     client = LLMClient(provider=get_provider(provider_name))
     page = load_pages(drawing_path, dpi=dpi)[0]
     print()
     print(f"Fixing with {client.provider.name} / {client.provider.model}...")
-    return correct(drawing, page.png_bytes, client)
+    return correct(drawing, page.png_bytes, client), client.provider.model
 
 
 def _run_model(drawing_path: Path, dpi: int, provider_name: str | None) -> ExtractionResult:
@@ -238,9 +249,14 @@ def run_check(args: argparse.Namespace) -> int:
 
     _print_summary(findings, drawing)
 
+    report: CorrectionReport | None = None
+    model_name = extraction.model if extraction is not None else None
+
     if args.fix:
         try:
-            report = _run_corrections(drawing, drawing_path, args.dpi, args.provider)
+            report, model_name = _run_corrections(
+                drawing, drawing_path, args.dpi, args.provider
+            )
         except ConfigError as exc:
             print(f"Configuration error: {exc}", file=sys.stderr)
             return EXIT_FAILED
@@ -251,6 +267,16 @@ def run_check(args: argparse.Namespace) -> int:
         _print_corrections(report)
         _write_json(out_dir / "corrections.json", report.to_dict())
         written.append("corrections.json")
+
+    if args.redline:
+        try:
+            page = load_pages(drawing_path, dpi=args.dpi)[0]
+        except RenderError as exc:
+            print(f"Could not read the drawing: {exc}", file=sys.stderr)
+            return EXIT_FAILED
+        pages = render_redline(page.png_bytes, findings, report, model_name=model_name)
+        save_redline(pages, out_dir / "redline.pdf", out_dir / "redline.png")
+        written.extend(["redline.pdf", "redline.png"])
 
     print(f"Wrote {', '.join(written)} to {out_dir}/")
 
@@ -292,6 +318,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--fix",
         action="store_true",
         help="After checking, run the correction loop (calls the model, up to 3 rounds).",
+    )
+    check_parser.add_argument(
+        "--redline",
+        action="store_true",
+        help="Also write redline.pdf (marked drawing + findings page) and redline.png.",
     )
     check_parser.add_argument("--dpi", type=int, default=200, help="PDF rasterization DPI.")
     check_parser.set_defaults(handler=run_check)
