@@ -35,7 +35,8 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -48,6 +49,7 @@ from pydantic import ValidationError
 from draftcheck.agent import CorrectionReport, RoundRecord, correct
 from draftcheck.config import SUPPORTED_PROVIDERS, ConfigError, get_provider
 from draftcheck.edits import RejectedEdit, parse_edit
+from draftcheck.limits import Cleaner, LimitExceeded, Limits, UsageLimiter, client_ip
 from draftcheck.llm_client import LLMClient
 from draftcheck.llm_parsing import JSONParseError
 from draftcheck.pipeline import SupportsChatJSON, check, extract
@@ -123,6 +125,47 @@ def get_runs_root() -> Path:
     return RUNS_ROOT
 
 
+#: The limits this process runs under, read once at import — see :mod:`draftcheck.limits`.
+LIMITS = Limits.from_env()
+
+#: The counters and the sweep clock. One of each per process, because both are what this
+#: instance has spent and what it last cleaned up.
+_LIMITER = UsageLimiter(LIMITS)
+_CLEANER = Cleaner(LIMITS)
+
+
+def get_limiter() -> UsageLimiter:
+    """The usage counters, as a dependency so each test gets its own empty set."""
+    return _LIMITER
+
+
+def get_cleaner() -> Cleaner:
+    """The cleanup schedule, as a dependency for the same reason."""
+    return _CLEANER
+
+
+def _resolve(dependency: Callable[[], Any]) -> Any:
+    """Call a dependency the way a request would, honouring a test's override.
+
+    Startup runs outside any request, so FastAPI is not there to inject anything — and a
+    sweep that ignored the override would delete real run folders during the test suite.
+    Looking the override up by hand keeps the one job startup has (find the runs root,
+    clean it) pointed at whatever the app is actually configured with.
+    """
+    return app.dependency_overrides.get(dependency, dependency)()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Sweep stale run folders once, at startup.
+
+    A deploy is the one moment something is guaranteed to run, so it is where the backlog
+    gets cleared; after that cleanup rides along on uploads (:class:`limits.Cleaner`).
+    """
+    _resolve(get_cleaner).sweep(_resolve(get_runs_root), force=True)
+    yield
+
+
 def demo_is_allowed(request: Request) -> bool:
     """True when the demo route may answer: switched on, *and* called from this machine.
 
@@ -146,6 +189,8 @@ def demo_is_allowed(request: Request) -> bool:
 #: rather than out of a default value, which keeps the signatures short and readable.
 RunsRoot = Annotated[Path, Depends(get_runs_root)]
 DemoAllowed = Annotated[bool, Depends(demo_is_allowed)]
+Limiter = Annotated[UsageLimiter, Depends(get_limiter)]
+Cleanup = Annotated[Cleaner, Depends(get_cleaner)]
 Clients = Annotated[ClientFactory, Depends(get_client_factory)]
 DrawingUpload = Annotated[UploadFile, File(description="A .pdf, .png, or .jpg drawing.")]
 ProviderField = Annotated[
@@ -158,7 +203,27 @@ app = FastAPI(
     title="DraftCheck",
     description="Upload an engineering drawing, confirm what was read, check it, fix it.",
     version="0.1.0",
+    lifespan=lifespan,
 )
+
+
+def _claim(limiter: UsageLimiter, request: Request, what: str) -> None:
+    """Spend one slot for this request, or refuse it with a 429.
+
+    ``what`` is ``"upload"`` or ``"fix"``, naming which per-IP budget to draw on. The
+    message is the same either way (:data:`limits.LIMIT_MESSAGE`), and the page shows it
+    as it shows any other refusal, because it arrives in ``detail`` like all the rest.
+    """
+    ip = client_ip(
+        request.headers.get("x-forwarded-for"),
+        request.client.host if request.client else None,
+        limiter.limits.trust_proxy,
+    )
+    claim = limiter.claim_upload if what == "upload" else limiter.claim_fix
+    try:
+        claim(ip)
+    except LimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -249,9 +314,12 @@ def _checked_provider(provider: str | None) -> str | None:
 
 @app.post("/api/runs", status_code=201)
 async def create_run(
+    request: Request,
     file: DrawingUpload,
     root: RunsRoot,
     client_factory: Clients,
+    limiter: Limiter,
+    cleaner: Cleanup,
     provider: ProviderField = None,
 ) -> dict:
     """Upload a drawing, render page 1, and read it with the model.
@@ -260,6 +328,14 @@ async def create_run(
     """
     suffix = _checked_suffix(file.filename)
     provider_name = _checked_provider(provider)
+
+    # Claimed after the cheap checks, so a wrong file type does not cost the visitor one
+    # of their five, and before anything is written or sent, so a refusal costs nothing.
+    _claim(limiter, request, "upload")
+
+    # The only cleanup trigger after startup. `sweep` is a no-op unless an hour has gone
+    # by, so this costs a clock read on all but one upload per hour.
+    cleaner.sweep(root)
 
     run_id = uuid.uuid4()
     run_dir = root / str(run_id)
@@ -438,9 +514,11 @@ def _summarize(report: CorrectionReport) -> dict:
 
 @app.post("/api/runs/{run_id}/fix")
 def fix_run(
+    request: Request,
     run_id: uuid.UUID,
     root: RunsRoot,
     client_factory: Clients,
+    limiter: Limiter,
 ) -> dict:
     """Run the correction loop on the confirmed drawing and write the redline.
 
@@ -455,6 +533,9 @@ def fix_run(
             detail="Confirm the extraction with POST /api/runs/{run_id}/check first.",
         )
 
+    # After the 409: a run that is not ready to be fixed should not spend a fix slot.
+    _claim(limiter, request, "fix")
+
     drawing = parse_drawing(_read_json(confirmed))
     page_png = _existing_file(run_dir, PAGE_PNG, "the upload").read_bytes()
 
@@ -465,6 +546,12 @@ def fix_run(
         raise HTTPException(status_code=500, detail=f"Configuration error: {exc}") from exc
 
     report = correct(drawing, page_png, client)
+
+    # The claim above paid for round one, which is all that could be known before the loop
+    # ran. Each further round was another model call, so the day's budget is charged for
+    # them now that the report says how many there were.
+    limiter.record_model_calls(len(report.rounds) - 1)
+
     _write_json(run_dir / CORRECTIONS_JSON, report.to_dict())
 
     # The redline marks the drawing *as submitted*, so its findings and its numbering match
@@ -560,6 +647,18 @@ def create_demo_run(allowed: DemoAllowed, root: RunsRoot) -> dict:
         "attempts": meta["attempts"],
         "page_url": f"/api/runs/{run_id}/page.png",
     }
+
+
+@app.get("/healthz")
+def healthz() -> dict:
+    """Is the process up and serving? Nothing more.
+
+    A host's health check runs this every few seconds, so it must touch no model, no key,
+    and no disk: a probe that called the provider would spend the day's budget on being
+    asked whether we are alive, and would report us unhealthy whenever the provider
+    hiccuped — which is a different question from the one being asked.
+    """
+    return {"status": "ok"}
 
 
 # Mounted last, so every /api route above wins over the static file server.

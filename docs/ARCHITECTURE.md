@@ -74,6 +74,7 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/agent.py` | `correct(drawing, image_png, client, max_rounds=3)` → `CorrectionReport`. One round = ask, apply, re-run `rules.run_rules`, diff the findings. Records `proposed`, `applied`, `rejected`, findings before and after, `resolved`, and `introduced` per round, and a resolved/unresolved verdict per original finding — all computed from the re-run, never from the model's claim. Stops when no error-severity finding is left or after `max_rounds` — see §4.5 | **BUILT** |
 | `draftcheck/redline.py` | `render_redline(page_png, findings, report=None, model_name=None, when=None)` → two pillow pages, and `save_redline(pages, path_pdf, path_png)` → a 2-page PDF plus page 1 as a PNG. Pillow only, drawn on the rendered page image. Markers are numbered in `run_rules` order, so a number means the same finding on page 1, on page 2, and in `findings.json`. `findings_text(findings, report)` returns page 2's wording as styled lines, so the text can be tested without reading pixels — see §4.7 | **BUILT** |
 | `draftcheck/api.py` | FastAPI app over the same four modules the CLI drives: upload + extract, check the confirmed data, run the correction loop, serve the page image and the redline. One run is one folder under `outputs/web/<uuid4>/`, so each request reads what the previous one wrote — see §4.8. Decides nothing itself | **BUILT** |
+| `draftcheck/limits.py` | What one demo deployment is willing to spend, and on whom. `Limits.from_env()` holds every number (per-IP uploads and fixes per hour, model calls per day, run retention, sweep interval, `TRUST_PROXY`); `UsageLimiter` counts them in memory over sliding windows and raises `LimitExceeded`, which `api.py` turns into a `429`; `client_ip(...)` decides which address a request is counted against; `sweep_runs(root, max_age_hours)` deletes stale run folders and `Cleaner` keeps that to once an hour — see §4.12 | **BUILT** |
 | `draftcheck/static/` | The browser page, served at `/`: `index.html`, `style.css`, `app.js`. Plain HTML, CSS, and JavaScript — no framework, no build step, nothing loaded from a CDN. The upload area is a drag-and-drop zone (click, Enter, or Space opens the file dialog; a dropped file starts reading at once) that rejects a wrong type or a file over 10 MB in the page before any request, beside the provider selector. It uploads the drawing (`POST /api/runs`) and shows what came back: the rendered page beside tables of units, datums, dimensions, and frames, plus model, latency, and any `parse_issues`. **The tables are editable** — see §4.9 — and a Check drawing button posts the edited drawing to `POST /api/runs/{id}/check` and lists the findings underneath. The tables and the drawing are linked by item id: every item with a `bbox` gets a faint box drawn over the page image (positioned in percentages, so it stays aligned at any size), hovering a row or a box lights both, and clicking either scrolls the other into view and keeps it lit until the next click; clicking a finding lights every item in its `item_ids`. A "Show what Muse Spark read" toggle, on by default, hides the boxes; a row whose item came back without a `bbox` is marked "no location". Cells are written with `textContent` or as an input's `value`, so model output is never treated as markup | **BUILT** (upload + view + edit + check) |
 | `frontend/` | Driving `/fix` from the page and showing the correction report and the redline | PLANNED |
 | `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch. The ground truth is written in `schema.py`'s field names — plus `bbox_convention` and `seeded_errors` — so it parses as a `Drawing` and doubles as the target an extraction is scored against | **BUILT** |
@@ -424,13 +425,14 @@ looking.
 
 | Method | Path | Does | Errors |
 | --- | --- | --- | --- |
-| `POST` | `/api/runs` | Multipart upload of a PDF/PNG/JPG, plus an optional `provider` field. Creates the run folder, saves the file, renders page 1, and extracts. Returns `run_id`, the drawing, `parse_issues`, `model`, `latency_s` | `415` unsupported type, `413` over 10 MB, `400` unreadable or empty, `422` unknown provider, `502` the model failed or returned something unusable, `500` missing configuration |
+| `POST` | `/api/runs` | Multipart upload of a PDF/PNG/JPG, plus an optional `provider` field. Creates the run folder, saves the file, renders page 1, and extracts. Returns `run_id`, the drawing, `parse_issues`, `model`, `latency_s` | `415` unsupported type, `413` over 10 MB, `400` unreadable or empty, `422` unknown provider, `429` over a demo limit (§4.12), `502` the model failed or returned something unusable, `500` missing configuration |
 | `GET` | `/api/runs/{run_id}/page.png` | The rendered page, for the review screen to draw on | `404` |
 | `POST` | `/api/runs/{run_id}/check` | Body is the confirmed (possibly edited) drawing JSON. Validates it with `parse_drawing`, saves `confirmed.json`, runs the rules. Returns the findings, `parse_issues`, and the error/warning counts | `404` unknown run, `422` not a drawing object |
-| `POST` | `/api/runs/{run_id}/fix` | Runs the correction loop on `confirmed.json` with the page image, writes `corrections.json` and the redline. Returns the rounds in plain English (see below), the per-finding status, the final findings, and the corrected drawing | `404` unknown run, `409` `/check` has not run |
+| `POST` | `/api/runs/{run_id}/fix` | Runs the correction loop on `confirmed.json` with the page image, writes `corrections.json` and the redline. Returns the rounds in plain English (see below), the per-finding status, the final findings, and the corrected drawing | `404` unknown run, `409` `/check` has not run, `429` over a demo limit (§4.12) |
 | `GET` | `/api/runs/{run_id}/redline.pdf` | The two-page redline | `404` |
 | `GET` | `/api/runs/{run_id}/redline.png` | Page 1 of the redline | `404` |
 | `POST` | `/api/demo/low-confidence` | Builds a run out of `tests/fixtures/plate_001.model.json` and `samples/generated/plate_001.png`, with the first dimension and the frame lowered to `confidence: 0.6`. No model call. Same reply shape as `POST /api/runs`. **Off unless `DRAFTCHECK_ENABLE_DEMO=1`, and loopback only** | `404` unless both gates are open, or if the two repo files are absent |
+| `GET` | `/healthz` | `{"status": "ok"}`. No model, no key, no disk — see §4.12 | — |
 | `GET` | `/` | Static files from `draftcheck/static/`, mounted last so every `/api` route wins | — |
 
 Per run: `source.<ext>`, `page.png`, `extraction.json`, `raw.txt`, `meta.json` from the
@@ -670,6 +672,61 @@ DRAFTCHECK_ENABLE_DEMO=1 python -m uvicorn draftcheck.api:app --port 8000
 
 The variable is read from the process environment, not from `.env`.
 
+### 4.12 Demo limits and housekeeping — BUILT
+
+`draftcheck/limits.py`. DraftCheck is deployed as a free demo paid for out of one set of
+model credits, so what has to be true after a deploy is that no single visitor, and no
+single day, can empty the account. Three limits, each covering what the others cannot:
+
+| Limit | Default | Environment variable | What it is for |
+| --- | --- | --- | --- |
+| Uploads per IP per hour | 5 | `DRAFTCHECK_MAX_UPLOADS_PER_HOUR` | One visitor cannot loop the expensive path |
+| Fix requests per IP per hour | 10 | `DRAFTCHECK_MAX_FIXES_PER_HOUR` | The correction loop is up to three model calls per request, so it gets its own allowance rather than sharing the uploads' |
+| Model calls per day, everyone | 100 | `DRAFTCHECK_MAX_MODEL_CALLS_PER_DAY` | A crowd, or one visitor behind many addresses, still stops. Each upload is 1 and each fix **round** is 1 |
+| Run folder retention | 24 hours | `DRAFTCHECK_RUN_RETENTION_HOURS` | A visitor's uploaded drawing is not kept past the day |
+| Minimum gap between sweeps | 3600 s | `DRAFTCHECK_CLEANUP_INTERVAL_SECONDS` | Cleanup rides along on uploads; this is how often it may actually run |
+| Believe `X-Forwarded-For` | off | `TRUST_PROXY` (exactly `1`) | Only a deployment that really is behind a proxy may read the header |
+
+Going over any of them is `429` with the same sentence — *DraftCheck's demo limit is
+reached; please try again later.* — which reaches the page in `detail` and is shown by the
+error path every other refusal already uses. The page also says so before anything is
+refused, in a footer line: *Demo usage is limited to keep it free for everyone.*
+
+Five things are deliberate:
+
+- **One module holds every number**, each read from an environment variable with the
+  default written beside it. A value that cannot be read falls back to the default rather
+  than stopping the process: a deploy that starts with the documented limit is a better
+  outcome than one that will not start because a number was typed with a comma in it.
+- **`X-Forwarded-For` is ignored unless `TRUST_PROXY=1`.** It is a header, so it is
+  whatever the client typed unless something in front of us overwrites it — believing it
+  by default would make every per-IP limit free to bypass by sending a new address each
+  time. When it is trusted, the **first** entry is taken, since a proxy chain appends and
+  the left-most value is the original client. Otherwise the connection's own address is
+  used, which cannot be forged.
+- **The per-IP slot and the day's model call are spent together or not at all.** A request
+  the day cap refuses does not quietly consume one of the visitor's five on the way out.
+- **A fix claims one model call up front and charges the rest afterwards.** The loop only
+  says how many rounds it ran once it has run them, so round one is paid for before
+  starting — never start what cannot be paid for — and the remainder is recorded from the
+  report. The day's count is therefore accurate rather than an estimate, and it can be
+  pushed a little past the cap by a loop already in flight, which is the right way round.
+- **Cleanup has no scheduler.** It runs once at startup (a deploy is the one moment
+  something is guaranteed to run, so it is where the backlog clears) and then at most once
+  an hour on an upload. "Once an hour" is a ceiling, not a promise: a server nobody uploads
+  to does not sweep, and is not accumulating anything either. Age is the run folder's own
+  modification time, which every write into the run bumps, so a run being worked on is
+  never swept out from under its own browser tab.
+
+State is in memory — a dict of timestamps — because the app runs as a single instance and
+a restart simply forgives everyone. A second instance would need a shared store; that is a
+property of this deployment rather than an oversight.
+
+`GET /healthz` returns `{"status": "ok"}` and touches no model, no key, and no disk. A
+host's probe runs it every few seconds: one that called the provider would spend the day's
+budget on being asked whether we are alive, and would report us unhealthy whenever the
+provider hiccuped — a different question from the one being asked.
+
 ## 5. Repo layout (what exists today)
 
 ```
@@ -685,6 +742,7 @@ draftCheck/
 │   ├── cli.py                  # BUILT  python -m draftcheck.cli check <drawing> [--fix]
 │   ├── config.py               # BUILT
 │   ├── edits.py                # BUILT  the four allowed edit operations + their guards
+│   ├── limits.py               # BUILT  demo usage limits + run-folder cleanup
 │   ├── llm_client.py           # BUILT
 │   ├── llm_parsing.py          # BUILT
 │   ├── api.py                  # BUILT  FastAPI: upload, check, fix, redline
@@ -717,6 +775,7 @@ draftCheck/
 │   ├── test_cli.py
 │   ├── test_config.py
 │   ├── test_edits.py
+│   ├── test_limits.py
 │   ├── test_llm_client.py
 │   ├── test_llm_parsing.py
 │   ├── test_pipeline.py
@@ -774,6 +833,7 @@ draftCheck/
 | 2026-10-30 | A missing confidence on the review screen is *unknown*, not *low*: no marker, not counted in the flagged total | The marker exists to carry something the model said. When the model said nothing, flagging the row would attribute a doubt to it that it never expressed, and a reviewer would spend attention on a row that is no more suspect than any other. Unknown is also the honest state for a datum the user adds by hand |
 | 2026-10-30 | Confidence is shown but never acted on: the rules run on a flagged row exactly as on any other, and a low score neither fails a check nor changes a finding | Same principle as the rest of the project — the LLM reads, deterministic Python decides. Letting the model's own estimate of its reading move a pass/fail would hand the verdict back to it through the side door, and a confident wrong reading is the case that matters most. The score steers a human's attention, which is all it is good for |
 | 2026-10-30 | `?demo=low-confidence` is served by `/api/demo/low-confidence`, off unless `DRAFTCHECK_ENABLE_DEMO=1` **and** the request arrives from loopback | Reviewing the confidence markings should not cost a model call or need a key, but a route that fabricates runs should not exist in a deployment at all. The two gates fail in different directions and so cover each other: the variable is the deliberate act, defaulting to off so forgetting is safe and nothing has to be removed before a deploy; loopback is the backstop for the variable being set somewhere nobody intended, since it is a property of the connection and cannot be misconfigured. Building a real run folder rather than returning a payload means the demo goes through `/check` like any other drawing, so it exercises the page instead of a special case of it |
+| 2026-10-30 | Demo limits are three separate budgets — 5 uploads and 10 fixes per IP per hour, 100 model calls per day across everyone — held in memory, with `X-Forwarded-For` believed only when `TRUST_PROXY=1`; run folders are swept after 24 hours at startup and at most hourly on upload | A free demo on one person's credits has two different failure modes, and one limit cannot cover both: a per-IP limit does nothing about a crowd, and a global cap alone lets one visitor spend everyone's day in a minute. Separating uploads from fixes matters because a fix is up to three model calls, so sharing one allowance would price them as if they were equal. The header is the client's to write, so trusting it by default would make every per-IP limit bypassable by sending a new address each time — the flag has to be a deliberate statement about what is actually in front of the process. In memory is honest about what this is: a single instance where a restart forgives everyone, and the alternative is a datastore a hackathon demo does not need. Cleanup rides on uploads because there is no scheduler and nothing to keep alive between requests, and a server nobody uploads to is not accumulating anything either |
 | 2026-10-30 | `render.load_pages` translates pypdfium2's and pillow's own errors into `RenderError`, rather than each caller catching the dependency's error class | Every caller — the CLI's exit code, the API's status code — catches `RenderError` and nothing else, so an error leaking from a dependency is an exit code or a status code that never happens: a corrupt upload came out as a traceback and a 500 instead of a 400. Translating once at the boundary means the file-reading contract is stated in one place, and swapping the PDF library later does not touch any caller |
 
 ## 8. Status
@@ -782,5 +842,5 @@ draftCheck/
 | --- | --- | --- |
 | 1 | Extraction + JSON schema + rule engine + test generator | BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`, `rules.py` with 6 rules, and `pipeline.py` + `cli.py` joining them into one `check` command that runs a drawing end to end. More rules can be added to the registry as the sample set grows |
 | 2 | Agent correction loop + redlined PDF | BUILT: `edits.py` (the four allowed operations and their guards), `agent.py` (the three-round loop), and `redline.py` (the two-page redline), wired into `check --fix --redline` and verified end to end on plate_001 |
-| 3 | Web UI + live deploy | PARTLY BUILT: `api.py` serves the whole flow over HTTP — upload + extract, check the confirmed data, run the loop, fetch the redline — verified end to end against the live model on plate_001. The browser page uploads a drawing, shows what the model read, lets the reviewer correct it, runs the check from it (§4.9), proposes verified fixes with the redline (§4.10), and marks the rows the model was least sure of (§4.11). The deploy is next |
+| 3 | Web UI + live deploy | PARTLY BUILT: `api.py` serves the whole flow over HTTP — upload + extract, check the confirmed data, run the loop, fetch the redline — verified end to end against the live model on plate_001. The browser page uploads a drawing, shows what the model read, lets the reviewer correct it, runs the check from it (§4.9), proposes verified fixes with the redline (§4.10), and marks the rows the model was least sure of (§4.11). Production safety is in place — per-IP and global usage limits, run-folder cleanup, and `/healthz` (§4.12). The deploy is next |
 | 4 | After hackathon: SAM 3.1 precision, revisions, link to Research Paper Recommender | PLANNED (post-hackathon) |
