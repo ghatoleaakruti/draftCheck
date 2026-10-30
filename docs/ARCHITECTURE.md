@@ -3,7 +3,7 @@
 Every item below is marked **BUILT** (exists in this repo today) or **PLANNED** (designed,
 not yet written).
 
-Last updated: 2026-10-29
+Last updated: 2026-10-30
 
 ## 1. Overview
 
@@ -46,7 +46,7 @@ Stage notes:
 | --- | --- | --- |
 | Render | PDF page rasterized to an image the model can see, via `render.load_pages` | **BUILT** |
 | Extract | Model returns a JSON object; parsed by `llm_parsing.extract_json`, then validated by `schema.parse_drawing`. Wired up as `pipeline.extract` | **BUILT** |
-| Confirm | User reviews and edits the extracted values before any checking | PLANNED |
+| Confirm | User reviews and edits the extracted values before any checking. Over HTTP today: the extraction goes back from `POST /api/runs` and the (possibly edited) data comes in to `POST /api/runs/{id}/check`. The browser screen itself is the next step | **PARTLY BUILT** (API only) |
 | Check | Python rules produce pass/fail per rule, with no model involvement, via `rules.run_rules`, wrapped as `pipeline.check` | **BUILT** |
 | Correct | Agent proposes edits from a fixed menu, Python applies the safe ones and re-runs the rules to verify; **max 3 rounds**, then stop. `agent.correct`, see §4.5 | **BUILT** |
 | Output | Two-page redline: the drawing with a numbered marker per located finding, and a findings page behind it. `redline.render_redline` / `redline.save_redline`, see §4.7 | **BUILT** |
@@ -64,7 +64,7 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/llm_parsing.py` | Pulls a single JSON object out of model output; strips `<think>` blocks and code fences; raises `JSONParseError` with the raw text attached | **BUILT** |
 | `draftcheck/config.py` | Locates `.env` with `find_dotenv` and builds a frozen `Provider` (name, base_url, model, api_key) for one of the providers in `PROVIDER_ENV_VARS` — see §4.4; raises `ConfigError` naming any missing variable, and masks the key in `repr` | **BUILT** |
 | `draftcheck/llm_client.py` | `LLMClient.chat(system, user)` over the configured provider's OpenAI-compatible endpoint at `temperature=0`; `chat_json(system, user, images)` additionally sends PNG pages as `image_url` data URIs, parses the reply with `extract_json`, and retries once on `JSONParseError`. Both return latency, token usage, and model id | **BUILT** |
-| `draftcheck/render.py` | `load_pages(path, dpi, max_side)` rasterizes a PDF with pypdfium2 or loads a PNG/JPG with pillow; returns `PageImage` (PNG bytes, width, height) per page, scaled down to `max_side` | **BUILT** |
+| `draftcheck/render.py` | `load_pages(path, dpi, max_side)` rasterizes a PDF with pypdfium2 or loads a PNG/JPG with pillow; returns `PageImage` (PNG bytes, width, height) per page, scaled down to `max_side`. **`RenderError` is the only error it raises**: pypdfium2's `PdfiumError` and pillow's `UnidentifiedImageError` are both translated, so a file named `.pdf` that is not one becomes the CLI's exit 2 and the API's 400 rather than a traceback | **BUILT** |
 | `draftcheck/prompts.py` | `EXTRACTION_SYSTEM` and `EXTRACTION_USER`: the model is a transcription engine that reports what is printed and never invents or repairs a callout; the user prompt fixes the JSON key set and the field rules, including each dimension's `from_ref`/`to_ref` endpoints (§4.2). `CORRECTION_SYSTEM` and `correction_user(drawing_json, findings, history)`: the model is a drawing checker proposing the smallest edits that preserve design intent, one rationale sentence each, citing the finding ids it addresses. The operation catalogue in the user prompt is generated from `edits.ALLOWED_OPS` and `edits.DIMENSION_FIELDS`, so it cannot drift from what the code accepts | **BUILT** |
 | `draftcheck/schema.py` | pydantic v2 models for the extracted drawing (`Drawing`, `Dimension`, `FCF`, `DatumFeature`, `DatumRef`, `TitleBlock`, `GeneralTolerance`) and for rule output (`Finding`); `Units` and the 14-value `Characteristic` enum, plus `FORM_CONTROLS`. `parse_drawing(data)` validates a raw extraction dict: unknown keys are ignored, missing ids become `DT1…`/`D1…`/`F1…` (datums, dimensions, frames), and any item it cannot read is dropped into `Drawing.parse_issues`. `finding_key(finding)` names one finding as `<rule id>@<item ids>`, which is how rounds are compared and how the model cites a finding. `DatumFeature.location` is an optional plain-words description of where a symbol belongs: extraction leaves it empty, since a transcribed symbol already has a `bbox`, and the correction loop fills it in when it proposes a datum that is not on the sheet yet | **BUILT** |
 | `draftcheck/rules.py` | `Rule` dataclass (id, title, category, severity, `source`, `check`), the `RULES` registry, and `run_rules(drawing)`. Six rules today — see §4.1. Output is sorted by rule id then item ids, so the same drawing always gives the same list | **BUILT** |
@@ -73,7 +73,8 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/edits.py` | The four operations the agent may propose — `set_field`, `add_datum`, `remove_datum_ref`, `add_dimension` — as pydantic models, plus `apply_edits(drawing, edits)` returning `(new_drawing, applied, rejected)`. Applies one edit at a time to a copy, re-validating the whole drawing after each, and refuses anything that deletes a feature, touches a protected field, names an unknown id, uses an unknown operation, or silently fails to take. Never raises on bad model output — see §4.6 | **BUILT** |
 | `draftcheck/agent.py` | `correct(drawing, image_png, client, max_rounds=3)` → `CorrectionReport`. One round = ask, apply, re-run `rules.run_rules`, diff the findings. Records `proposed`, `applied`, `rejected`, findings before and after, `resolved`, and `introduced` per round, and a resolved/unresolved verdict per original finding — all computed from the re-run, never from the model's claim. Stops when no error-severity finding is left or after `max_rounds` — see §4.5 | **BUILT** |
 | `draftcheck/redline.py` | `render_redline(page_png, findings, report=None, model_name=None, when=None)` → two pillow pages, and `save_redline(pages, path_pdf, path_png)` → a 2-page PDF plus page 1 as a PNG. Pillow only, drawn on the rendered page image. Markers are numbered in `run_rules` order, so a number means the same finding on page 1, on page 2, and in `findings.json`. `findings_text(findings, report)` returns page 2's wording as styled lines, so the text can be tested without reading pixels — see §4.7 | **BUILT** |
-| `draftcheck/api.py` | FastAPI app: upload, confirm, results endpoints | PLANNED |
+| `draftcheck/api.py` | FastAPI app over the same four modules the CLI drives: upload + extract, check the confirmed data, run the correction loop, serve the page image and the redline. One run is one folder under `outputs/web/<uuid4>/`, so each request reads what the previous one wrote — see §4.8. Decides nothing itself | **BUILT** |
+| `draftcheck/static/` | Served at `/`. A placeholder page today; the real upload and review screen is the next step | **BUILT** (placeholder) |
 | `frontend/` | Upload page, extraction review/edit screen, findings view | PLANNED |
 | `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch. The ground truth is written in `schema.py`'s field names — plus `bbox_convention` and `seeded_errors` — so it parses as a `Drawing` and doubles as the target an extraction is scored against | **BUILT** |
 | `scripts/smoke_test.py` | One-shot check that the configured model answers over the network; `--provider baseten\|meta` picks which one | **BUILT** |
@@ -408,6 +409,81 @@ which the font has.
 anything is drawn, which is what lets the tests assert on the wording instead of inspecting
 pixels.
 
+### 4.8 The HTTP API — BUILT
+
+`draftcheck/api.py`, run with `uvicorn draftcheck.api:app --port 8000`. It adds no logic:
+extraction is `pipeline.extract`, the verdicts are `pipeline.check`, the loop is
+`agent.correct`, and the redline is `redline.render_redline`. What it adds is the state the
+CLI never needs — one run spread across several requests.
+
+**A run is a folder.** `outputs/web/<uuid4>/` holds everything one drawing produces, and
+each request reads what the previous one left behind. That makes "which step is this run
+at" a fact on disk rather than something the server has to remember: `/check` needs the
+folder, `/fix` needs `confirmed.json`, and a request arriving out of order is refused by
+looking.
+
+| Method | Path | Does | Errors |
+| --- | --- | --- | --- |
+| `POST` | `/api/runs` | Multipart upload of a PDF/PNG/JPG, plus an optional `provider` field. Creates the run folder, saves the file, renders page 1, and extracts. Returns `run_id`, the drawing, `parse_issues`, `model`, `latency_s` | `415` unsupported type, `413` over 10 MB, `400` unreadable or empty, `422` unknown provider, `502` the model failed or returned something unusable, `500` missing configuration |
+| `GET` | `/api/runs/{run_id}/page.png` | The rendered page, for the review screen to draw on | `404` |
+| `POST` | `/api/runs/{run_id}/check` | Body is the confirmed (possibly edited) drawing JSON. Validates it with `parse_drawing`, saves `confirmed.json`, runs the rules. Returns the findings, `parse_issues`, and the error/warning counts | `404` unknown run, `422` not a drawing object |
+| `POST` | `/api/runs/{run_id}/fix` | Runs the correction loop on `confirmed.json` with the page image, writes `corrections.json` and the redline. Returns rounds (proposed/applied/rejected), the per-finding status, the final findings, and the corrected drawing | `404` unknown run, `409` `/check` has not run |
+| `GET` | `/api/runs/{run_id}/redline.pdf` | The two-page redline | `404` |
+| `GET` | `/api/runs/{run_id}/redline.png` | Page 1 of the redline | `404` |
+| `GET` | `/` | Static files from `draftcheck/static/`, mounted last so every `/api` route wins | — |
+
+Per run: `source.<ext>`, `page.png`, `extraction.json`, `raw.txt`, `meta.json` from the
+upload; `confirmed.json` and `findings.json` from `/check`; `corrections.json`,
+`redline.pdf`, and `redline.png` from `/fix`.
+
+Four things are deliberate:
+
+- **`run_id` is typed as a `UUID` in every path.** Anything else is rejected by FastAPI
+  before the endpoint runs, so a run folder is always `root / <uuid>` and a path cannot be
+  traversed out of. Unknown-but-well-formed ids are `404`; malformed ones are `422`.
+- **The upload is streamed in 1 MB chunks and aborted past 10 MB.** A size limit whose
+  check happens after the whole body is buffered is not a limit, and `Content-Length` is
+  the client's claim rather than a measurement. A refused upload removes its own folder.
+- **The LLM client arrives through a dependency** (`get_client_factory`) that returns a
+  *factory*, since the provider is chosen per request. Tests override that one function,
+  and no test anywhere reaches the network.
+- **No key is returned or logged.** `meta.json` carries the provider *name*, the model id,
+  and the latency. `config.Provider` already masks the key in `repr`.
+
+`/check` can be called again with different data — the second confirmation replaces the
+first, so `/fix` always works from what the user last confirmed.
+
+#### A real run on plate_001 — 2026-10-30
+
+Server up, three curl calls, trimmed:
+
+```
+$ curl -s -X POST http://127.0.0.1:8000/api/runs -F "file=@samples/generated/plate_001.pdf"
+run_id   1a089cfd-9f81-4a93-b063-cf43b8dd1cf7
+model    meta-models/muse-spark-open-1026
+latency  17.68 s      parse_issues []
+datums   ['A', 'B']
+dims     ['80', '20', '60 ±0.2', '100 ±0.2', '30', '2X Ø8 ±0.1']
+fcf      position 0.25 ['A', 'B', 'C']
+
+$ curl -s -X POST .../check -H 'Content-Type: application/json' --data @drawing.json
+errors 1  warnings 0  parse_issues []
+  GDT-001 error ['fcf_1'] Feature control frame fcf_1 references datum C, but no datum...
+
+$ curl -s -X POST .../fix
+rounds 1  applied 1  rejected 0  resolved 1  unresolved 0
+  applied  remove_datum_ref  datum C from frame fcf_1
+   why: The two orthogonal edge datums A and B already fully locate the hole pattern...
+  cleared  ['GDT-001@fcf_1']  new []
+status   resolved GDT-001@fcf_1
+
+$ curl -s -o redline.pdf -w '%{http_code} %{content_type} %{size_download}' .../redline.pdf
+200 application/pdf 307707
+```
+
+Same drawing, same model, and the same correction the CLI gets — over HTTP, with the data
+passing through a client in between.
+
 ## 5. Repo layout (what exists today)
 
 ```
@@ -425,12 +501,15 @@ draftCheck/
 │   ├── edits.py                # BUILT  the four allowed edit operations + their guards
 │   ├── llm_client.py           # BUILT
 │   ├── llm_parsing.py          # BUILT
+│   ├── api.py                  # BUILT  FastAPI: upload, check, fix, redline
 │   ├── pipeline.py             # BUILT
 │   ├── prompts.py              # BUILT
 │   ├── render.py               # BUILT
 │   ├── redline.py              # BUILT  two-page redline, pillow only
 │   ├── rules.py                # BUILT
-│   └── schema.py               # BUILT
+│   ├── schema.py               # BUILT
+│   └── static/                 # BUILT  placeholder page served at /
+│       └── index.html
 ├── samples/
 │   └── generated/              # synthetic drawings, regenerable from scripts/
 │       ├── plate_001.pdf       # the drawing
@@ -446,6 +525,7 @@ draftCheck/
 │   ├── fixtures/               # frozen inputs the tests parse
 │   │   └── plate_001.model.json  # real extraction output from the 2026-10-29 spike run
 │   ├── test_agent.py
+│   ├── test_api.py
 │   ├── test_cli.py
 │   ├── test_config.py
 │   ├── test_edits.py
@@ -499,6 +579,8 @@ draftCheck/
 | 2026-10-29 | The loop runs while error-severity findings remain, and ignores warnings | MFG-001's edge-distance threshold is shop practice with a constant we chose, not a standard. Letting a warning drive rounds would push the model into changing a part's geometry to satisfy our own default |
 | 2026-10-29 | Redline drawn on a rendered image; a mark encloses the finding's bbox in a rectangle and carries a numbered balloon on a leader just outside it | No new dependencies, and one code path covers PDF and image inputs — drawing onto the PDF's own content stream would need a second library and would only work for PDFs. The mark encloses rather than centres because a centre marker on a multi-cell feature control frame lands on whichever cell happens to be in the middle and so points at the wrong one; a rectangle round the whole frame points at the frame. The balloon sits outside the rectangle so the callout under review stays readable, and moves to another corner when the default would put it off the sheet |
 | 2026-10-29 | Lenient parsing: bad bboxes become None, unknown units become None, and an item that cannot be read at all is dropped and recorded in `Drawing.parse_issues` instead of failing the parse | Model output is imperfect; the user confirms data in the UI, and rules flag missing values instead of crashing. One unreadable callout must not cost us the rest of the drawing, and `parse_issues` keeps the loss visible rather than silent |
+| 2026-10-30 | Run state is stored as files per run under `outputs/web/<uuid>` | Simple, inspectable, no database needed for a hackathon demo; replaceable later. A run's folder is also exactly what the CLI writes, so a web run can be opened, diffed, or replayed with the same tools, and "which step is this run at" is a file that either exists or does not rather than state a process has to keep |
+| 2026-10-30 | `render.load_pages` translates pypdfium2's and pillow's own errors into `RenderError`, rather than each caller catching the dependency's error class | Every caller — the CLI's exit code, the API's status code — catches `RenderError` and nothing else, so an error leaking from a dependency is an exit code or a status code that never happens: a corrupt upload came out as a traceback and a 500 instead of a 400. Translating once at the boundary means the file-reading contract is stated in one place, and swapping the PDF library later does not touch any caller |
 
 ## 8. Status
 
@@ -506,5 +588,5 @@ draftCheck/
 | --- | --- | --- |
 | 1 | Extraction + JSON schema + rule engine + test generator | BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`, `rules.py` with 6 rules, and `pipeline.py` + `cli.py` joining them into one `check` command that runs a drawing end to end. More rules can be added to the registry as the sample set grows |
 | 2 | Agent correction loop + redlined PDF | BUILT: `edits.py` (the four allowed operations and their guards), `agent.py` (the three-round loop), and `redline.py` (the two-page redline), wired into `check --fix --redline` and verified end to end on plate_001 |
-| 3 | Web UI + live deploy | PLANNED |
+| 3 | Web UI + live deploy | PARTLY BUILT: `api.py` serves the whole flow over HTTP — upload + extract, check the confirmed data, run the loop, fetch the redline — verified end to end against the live model on plate_001. The browser page and the deploy are next |
 | 4 | After hackathon: SAM 3.1 precision, revisions, link to Research Paper Recommender | PLANNED (post-hackathon) |
