@@ -61,6 +61,10 @@ const checkIssuesList = document.getElementById("check-parse-issues-list");
 const proposeButton = document.getElementById("propose-fix");
 const fixHint = document.getElementById("fix-hint");
 const fixStatus = document.getElementById("fix-status");
+const cancelReadButton = document.getElementById("cancel-read");
+const readCancelled = document.getElementById("read-cancelled");
+const cancelFixButton = document.getElementById("cancel-fix");
+const fixCancelled = document.getElementById("fix-cancelled");
 
 const agentPanel = document.getElementById("agent-panel");
 const agentStatus = document.getElementById("agent-status");
@@ -1407,6 +1411,7 @@ function render(run) {
   parseIssuesBox.hidden = issues.length === 0;
 
   pageImage.src = run.page_url;
+  fixCancelled.hidden = true;
 
   renderTables();
   updateCheckButton();
@@ -1440,13 +1445,44 @@ async function errorMessage(response) {
   return `The server returned ${response.status} ${response.statusText}.`;
 }
 
+/* ---- Cancelling a wait ---------------------------------------------------- */
+
+/*
+ * Reading a drawing and proposing fixes each wait on the model for up to a minute or so,
+ * and each has a Cancel button beside its waiting line. Cancel aborts the browser's
+ * request and nothing more: the server has no way to be told, so the model may still
+ * finish, and whatever it finishes is never shown.
+ *
+ * Each request owns an AbortController while it is out. Every `await` in it is followed
+ * by a look at `signal.aborted`, so a reply that lands in the same instant as the click
+ * is dropped rather than drawn — Cancel never leaves half a result on screen.
+ */
+
+// Closing the connection stops our server, but the provider keeps working on the
+// abandoned request and the next one waits behind it (docs/ARCHITECTURE.md §4.13).
+const CANCELLED_MESSAGE =
+  "Cancelled. Muse Spark may still be finishing the previous request, so your next read can take up to a minute.";
+
+/** The controller for the request Cancel would stop, or `null` when none is out. */
+let readController = null;
+let fixController = null;
+
+cancelReadButton.addEventListener("click", () => readController && readController.abort());
+cancelFixButton.addEventListener("click", () => fixController && fixController.abort());
+
 /**
  * Send one file and show what comes back.
  *
  * The one path for both ways in: dropping a file, and the Read drawing button. A file
  * that fails `rejectionReason` never gets here, so nothing unsendable reaches the wire.
+ *
+ * Cancel puts the screen back the way it was before the click — a run already on screen
+ * comes back untouched, because `render` is the only thing that replaces it and it has not
+ * been called.
  */
 async function startRun(file) {
+  const before = { errorHidden: errorBox.hidden, resultHidden: resultSection.hidden };
+  readCancelled.hidden = true;
   clearOutput();
   setDropLabel(file.name);
   setBusy(true);
@@ -1455,18 +1491,37 @@ async function startRun(file) {
   body.append("file", file);
   body.append("provider", providerSelect.value);
 
+  const controller = new AbortController();
+  readController = controller;
+  const { signal } = controller;
+
   try {
-    const response = await fetch("/api/runs", { method: "POST", body });
+    const response = await fetch("/api/runs", { method: "POST", body, signal });
     if (!response.ok) {
-      showError(await errorMessage(response));
+      const message = await errorMessage(response);
+      if (!signal.aborted) {
+        showError(message);
+      }
       return;
     }
-    render(await response.json());
+    const run = await response.json();
+    if (!signal.aborted) {
+      render(run);
+    }
   } catch (problem) {
-    // A fetch only rejects when the request never completed — the server is down, or
-    // the connection dropped. An HTTP error status is handled above.
-    showError(`Could not reach the server: ${problem.message}`);
+    // A fetch only rejects when the request never completed — the server is down, the
+    // connection dropped, or Cancel aborted it. An HTTP error status is handled above.
+    if (!signal.aborted) {
+      showError(`Could not reach the server: ${problem.message}`);
+    }
   } finally {
+    readController = null;
+    if (signal.aborted) {
+      errorBox.hidden = before.errorHidden;
+      resultSection.hidden = before.resultHidden;
+      readCancelled.textContent = CANCELLED_MESSAGE;
+      readCancelled.hidden = false;
+    }
     setBusy(false);
     setDropLabel(null);
     updateCheckButton();
@@ -1559,7 +1614,12 @@ async function runFix() {
     return;
   }
   fixing = true;
+  fixCancelled.hidden = true;
   updateCheckButton();
+
+  const controller = new AbortController();
+  fixController = controller;
+  const { signal } = controller;
 
   let labelChanged = false;
   const labelTimer = setTimeout(() => {
@@ -1575,20 +1635,35 @@ async function runFix() {
     agentPanel.hidden = false;
   }
 
+  // Nothing on screen changes until the reply is drawn, so a cancelled fix needs nothing
+  // put back beyond the button and the waiting line, which `finally` restores anyway.
   try {
-    const response = await fetch(`/api/runs/${state.runId}/fix`, { method: "POST" });
+    const response = await fetch(`/api/runs/${state.runId}/fix`, { method: "POST", signal });
     if (!response.ok) {
-      failed(await errorMessage(response));
+      const message = await errorMessage(response);
+      if (!signal.aborted) {
+        failed(message);
+      }
       return;
     }
-    renderAgent(await response.json());
+    const result = await response.json();
+    if (!signal.aborted) {
+      renderAgent(result);
+    }
   } catch (problem) {
-    failed(`Could not reach the server: ${problem.message}`);
+    if (!signal.aborted) {
+      failed(`Could not reach the server: ${problem.message}`);
+    }
   } finally {
+    fixController = null;
     clearTimeout(labelTimer);
     if (labelChanged) {
       proposeButton.textContent = "Propose fixes";
       fixStatus.hidden = true;
+    }
+    if (signal.aborted) {
+      fixCancelled.textContent = CANCELLED_MESSAGE;
+      fixCancelled.hidden = false;
     }
     fixing = false;
     updateCheckButton();
@@ -1710,6 +1785,7 @@ const LOW_CONFIDENCE_DEMO = "low-confidence";
 
 /** Ask for the demo run and show it, exactly as an upload's reply is shown. */
 async function loadDemo() {
+  readCancelled.hidden = true;
   clearOutput();
   setBusy(true);
   try {

@@ -32,11 +32,15 @@ path cannot be traversed out of.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import shutil
+import threading
+import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -52,7 +56,13 @@ from draftcheck.agent import CorrectionReport, RoundRecord, correct
 from draftcheck.config import SUPPORTED_PROVIDERS, ConfigError, get_provider
 from draftcheck.edits import RejectedEdit, parse_edit
 from draftcheck.limits import Cleaner, LimitExceeded, Limits, UsageLimiter, client_ip
-from draftcheck.llm_client import LLMClient
+from draftcheck.llm_client import (
+    MODEL_TIMEOUT_MESSAGE,
+    JSONChatResult,
+    LLMClient,
+    ModelCancelled,
+    ModelTimeout,
+)
 from draftcheck.llm_parsing import JSONParseError
 from draftcheck.memory import memory_mb
 from draftcheck.pipeline import ExtractionResult, SupportsChatJSON, check, extract_page
@@ -84,6 +94,11 @@ ENV_RENDER_DPI = "DRAFTCHECK_RENDER_DPI"
 ENV_MAX_SIDE = "DRAFTCHECK_MAX_SIDE"
 DEFAULT_RENDER_DPI = 150
 DEFAULT_MAX_SIDE = 1800
+
+#: How long one model call may take on the server before the request gives up with a 504.
+#: The CLI has no such limit beyond the HTTP library's own; a terminal can wait.
+ENV_MODEL_TIMEOUT = "DRAFTCHECK_MODEL_TIMEOUT_SECONDS"
+DEFAULT_MODEL_TIMEOUT_S = 90
 
 #: Each run's files, by the name the code uses for them.
 PAGE_PNG = "page.png"
@@ -137,9 +152,92 @@ def render_settings() -> tuple[int, int]:
     )
 
 
+def model_timeout_s() -> float:
+    """Seconds one model call may take, read from the environment on every request."""
+    return float(_positive_int_env(ENV_MODEL_TIMEOUT, DEFAULT_MODEL_TIMEOUT_S))
+
+
+def get_model_timeout() -> float:
+    """The model-call time limit, as a dependency so tests can make it a fraction of a second."""
+    return model_timeout_s()
+
+
+class GuardedClient:
+    """A client whose every ``chat_json`` call has a time limit and can be cancelled.
+
+    **Time limit.** The HTTP library's own timeout is per network attempt, and it retries,
+    so on its own one call could run several times longer than the limit. This puts a wall
+    clock on the whole call: it runs on a helper thread, and if that thread has not finished
+    in ``seconds`` the caller gets :class:`ModelTimeout` straight away. A call that overran
+    keeps going in the background until the provider answers or the HTTP timeout ends it,
+    and its result is dropped.
+
+    **Cancel.** :meth:`abort` is called when the browser has gone away. It tells the inner
+    client to abort too — :meth:`LLMClient.abort` closes the HTTP request, so the provider
+    stops spending time on it — and the waiting call raises :class:`ModelCancelled` at
+    once. Every later call raises it before it starts, which is what stops the correction
+    loop before its next round.
+
+    The helper thread is a daemon, so it never holds up the server shutting down.
+    """
+
+    #: How often a waiting call looks to see whether it has been cancelled.
+    POLL_S = 0.05
+
+    def __init__(self, inner: SupportsChatJSON, seconds: float) -> None:
+        self._inner = inner
+        self._seconds = seconds
+        self._cancelled = threading.Event()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    def abort(self) -> None:
+        """Stop the call in flight, if any, and every call after it. Any thread."""
+        self._cancelled.set()
+        abort = getattr(self._inner, "abort", None)
+        if callable(abort):
+            abort()
+
+    def chat_json(self, system: str, user: str, images: list[bytes]) -> JSONChatResult:
+        if self.cancelled:
+            raise ModelCancelled()
+        outcome: dict[str, Any] = {}
+
+        def call() -> None:
+            try:
+                outcome["result"] = self._inner.chat_json(system, user, images)
+            except BaseException as exc:  # noqa: BLE001 - handed back to the caller below
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=call, name="model-call", daemon=True)
+        worker.start()
+        deadline = time.monotonic() + self._seconds
+        while worker.is_alive():
+            if self.cancelled:
+                raise ModelCancelled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.info("model call timed out after %.0f s", self._seconds)
+                raise ModelTimeout()
+            worker.join(min(remaining, self.POLL_S))
+        # A reply that lands after the cancel is dropped like one that lands after the limit.
+        if self.cancelled:
+            raise ModelCancelled()
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["result"]
+
+
 def build_client(provider: str | None = None) -> SupportsChatJSON:
-    """The real factory: an ``LLMClient`` for the named provider."""
-    return LLMClient(provider=get_provider(provider))
+    """The real factory: an ``LLMClient`` for the named provider.
+
+    The HTTP library is given the same limit as :class:`GuardedClient`, so a call that
+    overran stops in the background soon after the request has already answered 504.
+    ``abortable`` lets :meth:`GuardedClient.abort` close a request whose browser has gone.
+    """
+    return LLMClient(provider=get_provider(provider), timeout_s=model_timeout_s(), abortable=True)
 
 
 def get_client_factory() -> ClientFactory:
@@ -150,6 +248,67 @@ def get_client_factory() -> ClientFactory:
     request anywhere in the app reaches the network.
     """
     return build_client
+
+
+#: Asks whether the browser that sent ``request`` has gone away.
+DisconnectProbe = Callable[[Request], Awaitable[bool]]
+
+#: How often a request waiting on the model checks that its browser is still there.
+DISCONNECT_POLL_S = 0.25
+
+#: The status a cancelled request ends with. Nobody receives it — the browser has already
+#: gone — but the access log shows it. 499 is nginx's "client closed request".
+CANCELLED_STATUS = 499
+
+
+async def browser_disconnected(request: Request) -> bool:
+    return await request.is_disconnected()
+
+
+def get_disconnect_probe() -> DisconnectProbe:
+    """The disconnect check, as a dependency.
+
+    FastAPI's test client only reports a disconnect once the response is complete, so it
+    cannot show a browser leaving mid-request. Tests override this with a probe they control.
+    """
+    return browser_disconnected
+
+
+class ClientGone(Exception):
+    """The browser disconnected while the model was working, and the call was aborted."""
+
+
+async def _unless_disconnected(
+    request: Request,
+    probe: DisconnectProbe,
+    guard: GuardedClient,
+    what: str,
+    func: Callable[..., Any],
+    *args: Any,
+) -> Any:
+    """Run ``func(*args)`` on a worker thread, aborting ``guard`` if the browser leaves.
+
+    Uvicorn does not stop an endpoint when its client disconnects; the endpoint would run
+    to the end and the model call with it, which is what kept the provider busy after a
+    Cancel. So while the worker runs, this checks every :data:`DISCONNECT_POLL_S` whether
+    the browser is still there. If it has gone, the model call is aborted (closing its
+    HTTP request), the worker is waited for — it ends at once with ``ModelCancelled`` —
+    and :class:`ClientGone` is raised so the caller saves nothing.
+    """
+    work = asyncio.ensure_future(run_in_threadpool(func, *args))
+    while True:
+        done, _ = await asyncio.wait({work}, timeout=DISCONNECT_POLL_S)
+        if done:
+            return work.result()
+        if await probe(request):
+            break
+    logger.info("%s cancelled by client", what)
+    guard.abort()
+    try:
+        await work
+    except Exception:  # noqa: BLE001, S110 - the outcome no longer matters to anyone
+        pass
+    raise ClientGone()
 
 
 def get_runs_root() -> Path:
@@ -196,7 +355,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """
     # Uvicorn configures only its own loggers, so ours would print nothing at INFO. This is
     # a no-op when something (pytest, a host) has already set up the root logger.
-    logging.basicConfig(format="%(levelname)s:     %(name)s - %(message)s")
+    logging.basicConfig(format="%(asctime)s %(levelname)s:     %(name)s - %(message)s")
     logging.getLogger("draftcheck").setLevel(logging.INFO)
     _resolve(get_cleaner).sweep(_resolve(get_runs_root), force=True)
     yield
@@ -228,6 +387,8 @@ DemoAllowed = Annotated[bool, Depends(demo_is_allowed)]
 Limiter = Annotated[UsageLimiter, Depends(get_limiter)]
 Cleanup = Annotated[Cleaner, Depends(get_cleaner)]
 Clients = Annotated[ClientFactory, Depends(get_client_factory)]
+ModelTimeoutS = Annotated[float, Depends(get_model_timeout)]
+Disconnects = Annotated[DisconnectProbe, Depends(get_disconnect_probe)]
 DrawingUpload = Annotated[UploadFile, File(description="A .pdf, .png, or .jpg drawing.")]
 ProviderField = Annotated[
     str | None, Form(description="baseten or meta. Default: the LLM_PROVIDER setting.")
@@ -348,9 +509,7 @@ def _checked_provider(provider: str | None) -> str | None:
     return name
 
 
-def _render_and_extract(
-    source: Path, run_dir: Path, client_factory: ClientFactory, provider_name: str | None
-) -> tuple[SupportsChatJSON, ExtractionResult]:
+def _render_and_extract(source: Path, run_dir: Path, client: GuardedClient) -> ExtractionResult:
     """The slow, blocking half of an upload: render page 1, save it, read it with the model.
 
     Plain synchronous code, run in a worker thread by :func:`create_run`. Rendered once:
@@ -368,10 +527,9 @@ def _render_and_extract(
         memory_mb(),
     )
 
-    client = client_factory(provider_name)
     # The page is on disk now and the model call holds its own reference to the bytes, so
     # this function's copy goes as soon as the call returns.
-    return client, extract_page(png_bytes, client)
+    return extract_page(png_bytes, client)
 
 
 @app.post("/api/runs", status_code=201)
@@ -382,12 +540,17 @@ async def create_run(
     client_factory: Clients,
     limiter: Limiter,
     cleaner: Cleanup,
+    timeout_s: ModelTimeoutS,
+    disconnected: Disconnects,
     provider: ProviderField = None,
 ) -> dict:
     """Upload a drawing, render page 1, and read it with the model.
 
-    The extraction comes back for the user to confirm or edit; nothing is checked yet.
+    The extraction comes back for the user to confirm or edit; nothing is checked yet. If
+    the browser goes away first (Cancel), the model call is aborted and the run folder is
+    deleted: a cancelled upload leaves nothing behind.
     """
+    logger.info("upload received (memory %.0f MB)", memory_mb())
     suffix = _checked_suffix(file.filename)
     provider_name = _checked_provider(provider)
 
@@ -413,13 +576,19 @@ async def create_run(
         raise
 
     try:
+        client = client_factory(provider_name)
+        guard = GuardedClient(client, timeout_s)
         # This endpoint is async (it streams the upload), so anything slow called directly
         # here would stall the event loop — every other request, /healthz included, would
         # wait for the model. Render restarts an instance whose health check fails for 60 s,
-        # so the render and the model call go to a worker thread and this coroutine waits.
-        client, result = await run_in_threadpool(
-            _render_and_extract, source, run_dir, client_factory, provider_name
+        # so the render and the model call go to a worker thread and this coroutine waits,
+        # watching for the browser to leave while it does.
+        result = await _unless_disconnected(
+            request, disconnected, guard, "upload", _render_and_extract, source, run_dir, guard
         )
+    except ClientGone:
+        await run_in_threadpool(shutil.rmtree, run_dir, ignore_errors=True)
+        raise HTTPException(status_code=CANCELLED_STATUS, detail="Cancelled by client.") from None
     except RenderError as exc:
         # Covers a file that is named .pdf and is not one: `load_pages` translates
         # pypdfium2's and pillow's own errors into RenderError, so a corrupt upload is the
@@ -427,6 +596,8 @@ async def create_run(
         raise HTTPException(status_code=400, detail=f"Could not read the drawing: {exc}") from exc
     except ConfigError as exc:
         raise HTTPException(status_code=500, detail=f"Configuration error: {exc}") from exc
+    except ModelTimeout as exc:
+        raise HTTPException(status_code=504, detail=MODEL_TIMEOUT_MESSAGE) from exc
     except JSONParseError as exc:
         raise HTTPException(
             status_code=502, detail=f"The model did not return usable JSON: {exc}"
@@ -574,21 +745,45 @@ def _summarize(report: CorrectionReport) -> dict:
     }
 
 
-# Deliberately a plain ``def``: FastAPI runs those in a worker thread, so the correction
-# loop's model calls and the redline drawing never hold up the event loop. Making this
-# ``async def`` without moving that work to a thread would freeze /healthz during a fix.
+def _save_fix(run_dir: Path, report: CorrectionReport, page_png: bytes, meta: dict) -> None:
+    """Write ``corrections.json`` and the two redline files. Slow; runs in a worker thread."""
+    _write_json(run_dir / CORRECTIONS_JSON, report.to_dict())
+
+    # The redline marks the drawing *as submitted*, so its findings and its numbering match
+    # findings.json; the report adds each applied edit and the rule engine's verdict.
+    pages = render_redline(
+        page_png,
+        report.original_findings,
+        report,
+        model_name=meta.get("model"),
+    )
+    save_redline(pages, run_dir / REDLINE_PDF, run_dir / REDLINE_PNG)
+
+
+# ``async def`` so it can watch for the browser leaving, but everything slow — the loop's
+# model calls and the redline drawing — goes to a worker thread. Calling either directly
+# here would freeze the event loop, and /healthz with it, for the length of a fix.
 @app.post("/api/runs/{run_id}/fix")
-def fix_run(
+async def fix_run(
     request: Request,
     run_id: uuid.UUID,
     root: RunsRoot,
     client_factory: Clients,
     limiter: Limiter,
+    timeout_s: ModelTimeoutS,
+    disconnected: Disconnects,
 ) -> dict:
     """Run the correction loop on the confirmed drawing and write the redline.
 
     Whether a finding cleared is decided by ``agent.correct`` re-running the rules, never
     by the model's account of its own edits. This endpoint only reports what it is told.
+
+    A model call that runs out of time ends the loop at that round. If it was round one
+    there is nothing to report and the request is a 504; otherwise the rounds that did run
+    are reported as usual, and the last one says it timed out.
+
+    If the browser goes away (Cancel), the model call in flight is aborted, the loop stops
+    before another round, and nothing is written: the run keeps its previous results.
     """
     run_dir = _run_dir(root, run_id)
     confirmed = run_dir / CONFIRMED_JSON
@@ -610,24 +805,23 @@ def fix_run(
     except ConfigError as exc:
         raise HTTPException(status_code=500, detail=f"Configuration error: {exc}") from exc
 
-    report = correct(drawing, page_png, client)
+    guard = GuardedClient(client, timeout_s)
+    try:
+        report = await _unless_disconnected(
+            request, disconnected, guard, "fix", correct, drawing, page_png, guard
+        )
+    except ClientGone:
+        raise HTTPException(status_code=CANCELLED_STATUS, detail="Cancelled by client.") from None
 
     # The claim above paid for round one, which is all that could be known before the loop
     # ran. Each further round was another model call, so the day's budget is charged for
     # them now that the report says how many there were.
     limiter.record_model_calls(len(report.rounds) - 1)
 
-    _write_json(run_dir / CORRECTIONS_JSON, report.to_dict())
+    if report.rounds and report.rounds[0].timed_out:
+        raise HTTPException(status_code=504, detail=MODEL_TIMEOUT_MESSAGE)
 
-    # The redline marks the drawing *as submitted*, so its findings and its numbering match
-    # findings.json; the report adds each applied edit and the rule engine's verdict.
-    pages = render_redline(
-        page_png,
-        report.original_findings,
-        report,
-        model_name=meta.get("model"),
-    )
-    save_redline(pages, run_dir / REDLINE_PDF, run_dir / REDLINE_PNG)
+    await run_in_threadpool(_save_fix, run_dir, report, page_png, meta)
 
     summary = _summarize(report)
     summary["run_id"] = str(run_id)

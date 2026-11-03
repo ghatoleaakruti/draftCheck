@@ -9,8 +9,16 @@ a real fix, a fix that breaks something else, a deletion, nonsense, and an endle
 import json
 from pathlib import Path
 
+import pytest
+
 from draftcheck.agent import correct
-from draftcheck.llm_client import JSONChatResult, Usage
+from draftcheck.llm_client import (
+    MODEL_TIMEOUT_MESSAGE,
+    JSONChatResult,
+    ModelCancelled,
+    ModelTimeout,
+    Usage,
+)
 from draftcheck.rules import run_rules
 from draftcheck.schema import parse_drawing
 
@@ -244,6 +252,32 @@ def test_a_failing_model_call_stops_the_loop_and_is_recorded():
     assert len(report.rounds) == 1
     assert "timed out" in report.rounds[0].error
     assert statuses(report) == {"GDT-001@F1": "unresolved"}
+
+
+def test_a_timed_out_round_stops_the_loop_and_keeps_the_rounds_before_it():
+    """Round one proposes nothing useful, round two runs out of time: the loop ends there."""
+    client = ScriptedClient({"edits": []}, ModelTimeout(), define_b())
+
+    report = correct(drawing_with_undefined_datum(), PAGE, client)
+
+    assert len(client.calls) == 2  # the third reply is never asked for
+    assert [record.number for record in report.rounds] == [1, 2]
+    assert report.rounds[0].error is None
+    assert not report.rounds[0].timed_out
+    assert report.rounds[1].timed_out
+    assert report.rounds[1].error == MODEL_TIMEOUT_MESSAGE
+    assert statuses(report) == {"GDT-001@F1": "unresolved"}
+    assert report.to_dict()["rounds"][1]["timed_out"] is True
+
+
+def test_a_cancelled_call_ends_the_loop_with_nothing_recorded():
+    """Cancel is not a failed round: nobody wants the report, so the loop just stops."""
+    client = ScriptedClient({"edits": []}, ModelCancelled(), define_b())
+
+    with pytest.raises(ModelCancelled):
+        correct(drawing_with_undefined_datum(), PAGE, client)
+
+    assert len(client.calls) == 2  # round three is never asked for
 
 
 # --- giving up ------------------------------------------------------------------------

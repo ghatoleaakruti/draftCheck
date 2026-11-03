@@ -36,3 +36,7 @@ services:
         value: "150"
       - key: DRAFTCHECK_MAX_SIDE
         value: "1800"
+      # Longest one model call may take before the request answers 504. The CLI has no
+      # such limit. See docs/ARCHITECTURE.md §4.13.
+      - key: DRAFTCHECK_MODEL_TIMEOUT_SECONDS
+        value: "90"

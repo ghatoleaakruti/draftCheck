@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from draftcheck.edits import Edit, RejectedEdit, apply_edits
+from draftcheck.llm_client import ModelCancelled, ModelTimeout
 from draftcheck.pipeline import SupportsChatJSON
 from draftcheck.prompts import CORRECTION_SYSTEM, correction_user
 from draftcheck.rules import run_rules
@@ -53,6 +54,8 @@ class RoundRecord:
     #: Set when the round could not happen at all — the model call failed, or its reply
     #: was unusable. Earlier rounds keep their work; the loop stops here.
     error: str | None = None
+    #: True when that failure was the model call running out of time.
+    timed_out: bool = False
 
 
 @dataclass(frozen=True)
@@ -103,6 +106,7 @@ class CorrectionReport:
                     "resolved": record.resolved,
                     "introduced": record.introduced,
                     "error": record.error,
+                    "timed_out": record.timed_out,
                 }
                 for record in self.rounds
             ],
@@ -166,6 +170,9 @@ def correct(
         A :class:`CorrectionReport`: the final drawing, the final findings, one
         :class:`RoundRecord` per round, and a resolved/unresolved verdict for every
         finding the drawing started with.
+
+    Raises:
+        ModelCancelled: If the client was aborted. The loop stops at that round.
     """
     original_findings = run_rules(drawing)
     current = drawing
@@ -185,11 +192,16 @@ def correct(
                 [image_png],
             )
             proposed = reply.data.get("edits")
+        except ModelCancelled:
+            # Nobody is waiting for this report any more, so there is nothing to record:
+            # the caller gets the exception and saves nothing.
+            raise
         except Exception as exc:  # noqa: BLE001 - see below
             # Deliberately broad. A provider timeout, a reply that is not JSON, a reply
             # shaped nothing like we asked for — none of those are bugs in DraftCheck, and
             # none should throw away the rounds that already worked. The failure is
             # recorded on the round and the loop stops there.
+            timed_out = isinstance(exc, ModelTimeout)
             rounds.append(
                 RoundRecord(
                     number=number,
@@ -200,7 +212,10 @@ def correct(
                     findings_after=findings,
                     resolved=[],
                     introduced=[],
-                    error=f"{type(exc).__name__}: {exc}",
+                    # A timeout is said in its own plain sentence; anything else keeps
+                    # the exception's name, which is what someone debugging it needs.
+                    error=str(exc) if timed_out else f"{type(exc).__name__}: {exc}",
+                    timed_out=timed_out,
                 )
             )
             break

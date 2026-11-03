@@ -59,7 +59,11 @@
       <p id="status" class="status" hidden>
         <span class="spinner" aria-hidden="true"></span>
         <span>Muse Spark is reading your drawing… (about 20–30 seconds)</span>
+        <button id="cancel-read" class="btn btn-quiet btn-small" type="button">Cancel</button>
       </p>
+
+      <!-- Shown after Cancel, and cleared by the next upload. -->
+      <p id="read-cancelled" class="cancelled-note" hidden role="status"></p>
 
       <div id="error" class="box box-error" hidden role="alert">
         <strong>Could not read the drawing.</strong>
@@ -232,7 +236,10 @@
             <span>
               Muse Spark is proposing fixes… (each round is checked by the rule engine)
             </span>
+            <button id="cancel-fix" class="btn btn-quiet btn-small" type="button">Cancel</button>
           </p>
+
+          <p id="fix-cancelled" class="cancelled-note" hidden role="status"></p>
         </section>
 
         <!-- What the correction loop did, round by round, and the redline it produced.
