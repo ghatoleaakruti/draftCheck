@@ -109,13 +109,10 @@ class LLMClient:
         """
         content: list[dict] = [{"type": "text", "text": user}]
         for png_bytes in images:
-            encoded = base64.b64encode(png_bytes).decode("ascii")
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{encoded}"},
-                }
-            )
+            # One expression, so the base64 bytes and the bare string are dropped at once
+            # and only the finished data URI stays alive for the request.
+            url = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+            content.append({"type": "image_url", "image_url": {"url": url}})
 
         messages = [
             {"role": "system", "content": system},

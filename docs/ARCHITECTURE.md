@@ -64,11 +64,11 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/llm_parsing.py` | Pulls a single JSON object out of model output; strips `<think>` blocks and code fences; raises `JSONParseError` with the raw text attached | **BUILT** |
 | `draftcheck/config.py` | Locates `.env` with `find_dotenv` and builds a frozen `Provider` (name, base_url, model, api_key) for one of the providers in `PROVIDER_ENV_VARS` — see §4.4; raises `ConfigError` naming any missing variable, and masks the key in `repr` | **BUILT** |
 | `draftcheck/llm_client.py` | `LLMClient.chat(system, user)` over the configured provider's OpenAI-compatible endpoint at `temperature=0`; `chat_json(system, user, images)` additionally sends PNG pages as `image_url` data URIs, parses the reply with `extract_json`, and retries once on `JSONParseError`. Both return latency, token usage, and model id | **BUILT** |
-| `draftcheck/render.py` | `load_pages(path, dpi, max_side)` rasterizes a PDF with pypdfium2 or loads a PNG/JPG with pillow; returns `PageImage` (PNG bytes, width, height) per page, scaled down to `max_side`. **`RenderError` is the only error it raises**: pypdfium2's `PdfiumError` and pillow's `UnidentifiedImageError` are both translated, so a file named `.pdf` that is not one becomes the CLI's exit 2 and the API's 400 rather than a traceback | **BUILT** |
+| `draftcheck/render.py` | `load_pages(path, dpi, max_side, max_pages)` rasterizes a PDF with pypdfium2 or loads a PNG/JPG with pillow; returns `PageImage` (PNG bytes, width, height) per page, scaled down to `max_side`. A PDF page is drawn at a scale already capped to `max_side` (`render_scale`), so pdfium never builds a bitmap bigger than the one that is kept, and `max_pages=1` skips the pages nobody uses. **`RenderError` is the only error it raises**: pypdfium2's `PdfiumError` and pillow's `UnidentifiedImageError` are both translated, so a file named `.pdf` that is not one becomes the CLI's exit 2 and the API's 400 rather than a traceback | **BUILT** |
 | `draftcheck/prompts.py` | `EXTRACTION_SYSTEM` and `EXTRACTION_USER`: the model is a transcription engine that reports what is printed and never invents or repairs a callout; the user prompt fixes the JSON key set and the field rules, including each dimension's `from_ref`/`to_ref` endpoints (§4.2). `CORRECTION_SYSTEM` and `correction_user(drawing_json, findings, history)`: the model is a drawing checker proposing the smallest edits that preserve design intent, one rationale sentence each, citing the finding ids it addresses. The operation catalogue in the user prompt is generated from `edits.ALLOWED_OPS` and `edits.DIMENSION_FIELDS`, so it cannot drift from what the code accepts | **BUILT** |
 | `draftcheck/schema.py` | pydantic v2 models for the extracted drawing (`Drawing`, `Dimension`, `FCF`, `DatumFeature`, `DatumRef`, `TitleBlock`, `GeneralTolerance`) and for rule output (`Finding`); `Units` and the 14-value `Characteristic` enum, plus `FORM_CONTROLS`. `parse_drawing(data)` validates a raw extraction dict: unknown keys are ignored, missing ids become `DT1…`/`D1…`/`F1…` (datums, dimensions, frames), and any item it cannot read is dropped into `Drawing.parse_issues`. `finding_key(finding)` names one finding as `<rule id>@<item ids>`, which is how rounds are compared and how the model cites a finding. `DatumFeature.location` is an optional plain-words description of where a symbol belongs: extraction leaves it empty, since a transcribed symbol already has a `bbox`, and the correction loop fills it in when it proposes a datum that is not on the sheet yet | **BUILT** |
 | `draftcheck/rules.py` | `Rule` dataclass (id, title, category, severity, `source`, `check`), the `RULES` registry, and `run_rules(drawing)`. Six rules today — see §4.1. Output is sorted by rule id then item ids, so the same drawing always gives the same list | **BUILT** |
-| `draftcheck/pipeline.py` | The two stages of one run, with no printing and no argument parsing, so the CLI and later the API can both drive them. `extract(path, client, dpi)` renders **page 1 only**, calls `chat_json` with the extraction prompts, and validates the reply with `parse_drawing`; it returns an `ExtractionResult` (the `Drawing` plus raw reply text, latency, model id, token usage, attempts). `check(drawing)` wraps `run_rules` | **BUILT** |
+| `draftcheck/pipeline.py` | The two stages of one run, with no printing and no argument parsing, so the CLI and later the API can both drive them. `extract(path, client, dpi)` renders **page 1 only** and hands the PNG to `extract_page(png_bytes, client)`, which calls `chat_json` with the extraction prompts and validates the reply with `parse_drawing` (the API calls `extract_page` directly with the page it already rendered); it returns an `ExtractionResult` (the `Drawing` plus raw reply text, latency, model id, token usage, attempts). `check(drawing)` wraps `run_rules` | **BUILT** |
 | `draftcheck/cli.py` | The `check` subcommand — see §4.3. Writes the run's files, prints the findings table and any `parse_issues`, and sets the exit code | **BUILT** |
 | `draftcheck/edits.py` | The four operations the agent may propose — `set_field`, `add_datum`, `remove_datum_ref`, `add_dimension` — as pydantic models, plus `apply_edits(drawing, edits)` returning `(new_drawing, applied, rejected)`. Applies one edit at a time to a copy, re-validating the whole drawing after each, and refuses anything that deletes a feature, touches a protected field, names an unknown id, uses an unknown operation, or silently fails to take. Never raises on bad model output — see §4.6 | **BUILT** |
 | `draftcheck/agent.py` | `correct(drawing, image_png, client, max_rounds=3)` → `CorrectionReport`. One round = ask, apply, re-run `rules.run_rules`, diff the findings. Records `proposed`, `applied`, `rejected`, findings before and after, `resolved`, and `introduced` per round, and a resolved/unresolved verdict per original finding — all computed from the re-run, never from the model's claim. Stops when no error-severity finding is left or after `max_rounds` — see §4.5 | **BUILT** |
@@ -760,6 +760,48 @@ the app cannot be reached except through that proxy.
 **`DRAFTCHECK_ENABLE_DEMO` is not set**, so the low-confidence demo route stays off in
 production.
 
+**Memory on the upload path.** The free plan has 512 MB, and going over kills the
+process with no Python error — the logs show only a restart. Three things keep an upload
+small:
+
+- **Page 1 is rendered once, at a capped size.** Uploads use `DRAFTCHECK_RENDER_DPI=150`
+  and `DRAFTCHECK_MAX_SIDE=1800` (set in `render.yaml`; the CLI keeps 200 dpi / 2400 px).
+  pdfium is asked for that size directly instead of drawing the full sheet and shrinking
+  it, and only page 1 of a PDF is rasterized. The same PNG is saved as `page.png` and sent
+  to the model, rather than rendering the page a second time inside `extract`.
+- **Intermediate images are closed as soon as they are encoded**, and the base64 data URI
+  is the only copy of the image held while the request is built.
+- **Each stage logs the process's memory** at INFO: `render done`, `model call started`,
+  `model call done`, `parse done` (`draftcheck/memory.py` reads `VmRSS` on Linux). If the
+  instance is killed again, the last of these lines says where. They carry sizes and
+  memory only, never the image, the prompt, the reply, or a key.
+
+Measured locally with the model faked (peak resident memory of the whole process, about
+95–110 MB of it the imported app itself):
+
+| Upload | Before | After |
+| --- | --- | --- |
+| `plate_001.pdf` (one letter-size page) | 127 MB | 120–129 MB |
+| A synthetic 4-page A0 PDF | 662 MB | 128 MB |
+
+plate_001 was never large: its PNG is 0.1 MB. A big multi-page sheet was what crossed
+512 MB, because every page was rendered at full size, twice.
+
+**Slow work never runs on the event loop.** Render probes `/healthz` every few seconds and
+restarts an instance that has failed for 60 seconds, which a single model call can take. So
+nothing slow may hold up the one thread that answers requests:
+
+- `POST /api/runs` has to be `async def` to stream the upload, so the slow half — the
+  hourly cleanup sweep, rendering page 1, and the model call (`_render_and_extract`) — is
+  handed to a worker thread with Starlette's `run_in_threadpool`, and the endpoint awaits it.
+- `POST /api/runs/{id}/fix` is a plain `def`, which FastAPI already runs in a worker thread,
+  so the correction loop and the redline drawing are off the event loop as written. A
+  comment beside it says why it must not become `async def` as it stands.
+
+Two tests hold this: a fake model call that blocks until released, and a `/healthz` request
+that must answer within two seconds while it is blocked — once during an upload and once
+during a fix. Before the change, the upload test failed: `/healthz` waited for the model.
+
 **Cold starts.** A free web service goes to sleep after 15 minutes with no traffic. The
 next visitor waits about a minute while it wakes. Each wake-up is also a restart, and two
 things follow from that. The disk is ephemeral, so run folders under `outputs/web/` are
@@ -785,6 +827,7 @@ draftCheck/
 │   ├── limits.py               # BUILT  demo usage limits + run-folder cleanup
 │   ├── llm_client.py           # BUILT
 │   ├── llm_parsing.py          # BUILT
+│   ├── memory.py               # BUILT  process memory in MB, for the upload's log lines
 │   ├── api.py                  # BUILT  FastAPI: upload, check, fix, redline
 │   ├── pipeline.py             # BUILT
 │   ├── prompts.py              # BUILT
@@ -816,6 +859,7 @@ draftCheck/
 │   ├── test_config.py
 │   ├── test_edits.py
 │   ├── test_limits.py
+│   ├── test_memory.py
 │   ├── test_llm_client.py
 │   ├── test_llm_parsing.py
 │   ├── test_pipeline.py
