@@ -236,6 +236,12 @@ button:disabled {
   color: var(--ink-soft);
 }
 
+/* Cleared by the next attempt; quiet, because cancelling is not an error. */
+.cancelled-note {
+  margin: 12px 0 0;
+  color: var(--ink-soft);
+}
+
 .spinner {
   width: 16px;
   height: 16px;

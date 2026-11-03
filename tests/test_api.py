@@ -21,19 +21,25 @@ from fastapi.testclient import TestClient
 
 from draftcheck.api import (
     DEFAULT_MAX_SIDE,
+    DEFAULT_MODEL_TIMEOUT_S,
     DEFAULT_RENDER_DPI,
     DEMO_ENV_VAR,
     ENV_MAX_SIDE,
+    ENV_MODEL_TIMEOUT,
     ENV_RENDER_DPI,
+    GuardedClient,
     app,
     get_cleaner,
     get_client_factory,
+    get_disconnect_probe,
     get_limiter,
+    get_model_timeout,
     get_runs_root,
+    model_timeout_s,
     render_settings,
 )
 from draftcheck.limits import LIMIT_MESSAGE, Cleaner, Limits, UsageLimiter
-from draftcheck.llm_client import JSONChatResult, Usage
+from draftcheck.llm_client import MODEL_TIMEOUT_MESSAGE, JSONChatResult, ModelCancelled, Usage
 from draftcheck.prompts import EXTRACTION_SYSTEM
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -815,6 +821,7 @@ def test_upload_logs_each_stage_with_memory(client: TestClient, caplog) -> None:
 
     messages = [r.getMessage() for r in caplog.records if r.name.startswith("draftcheck")]
     assert [m.split(" (")[0] for m in messages] == [
+        "upload received",
         "render done",
         "model call started",
         "model call done",
@@ -891,3 +898,258 @@ def test_healthz_answers_while_a_fix_waits_on_the_model(slow_client) -> None:
     slow.blocking = True
 
     _healthz_answers_during(client, slow, lambda: client.post(f"/api/runs/{run_id}/fix"))
+
+
+# ---- The model-call time limit ---------------------------------------------------
+
+
+def test_model_timeout_defaults_to_ninety_seconds(monkeypatch) -> None:
+    monkeypatch.delenv(ENV_MODEL_TIMEOUT, raising=False)
+    assert model_timeout_s() == DEFAULT_MODEL_TIMEOUT_S == 90
+
+
+def test_model_timeout_reads_the_environment(monkeypatch) -> None:
+    monkeypatch.setenv(ENV_MODEL_TIMEOUT, "30")
+    assert model_timeout_s() == 30
+
+
+#: The limit the timeout tests run under, so a "too slow" call costs a fraction of a second.
+SHORT_LIMIT_S = 0.2
+
+
+class HangingClient(FakeClient):
+    """A fake whose model calls, from number ``hang_from`` on, outlast any sane limit.
+
+    It waits on an event rather than sleeping, so the test can let the abandoned call
+    finish at teardown instead of leaving it running.
+    """
+
+    def __init__(self, extraction: dict, hang_from: int, *corrections: dict) -> None:
+        super().__init__(extraction, *corrections)
+        self.hang_from = hang_from
+        self.release = threading.Event()
+
+    def chat_json(self, system: str, user: str, images: list[bytes]) -> JSONChatResult:
+        if len(self.calls) + 1 >= self.hang_from:
+            self.release.wait(timeout=10)
+        return super().chat_json(system, user, images)
+
+
+@pytest.fixture
+def hanging(tmp_path: Path):
+    """Build a TestClient around a HangingClient under a short time limit."""
+    made: list[HangingClient] = []
+
+    def build(hang_from: int, *corrections: dict):
+        slow = HangingClient(extraction_data(), hang_from, *corrections)
+        made.append(slow)
+        app.dependency_overrides[get_model_timeout] = lambda: SHORT_LIMIT_S
+        return make_client(tmp_path, slow, UsageLimiter(ROOMY), Cleaner(ROOMY)), slow
+
+    yield build
+    for slow in made:
+        slow.release.set()
+    app.dependency_overrides.clear()
+
+
+def test_an_upload_whose_model_call_outlasts_the_limit_is_504(hanging) -> None:
+    test_client, _ = hanging(hang_from=1)
+    started = time.perf_counter()
+    with test_client, DRAWING.open("rb") as handle:
+        response = test_client.post(
+            "/api/runs", files={"file": (DRAWING.name, handle, "application/pdf")}
+        )
+    assert response.status_code == 504
+    assert response.json()["detail"] == MODEL_TIMEOUT_MESSAGE
+    # The request ended at the limit, not when the fake was eventually let go.
+    assert time.perf_counter() - started < 5
+
+
+def _checked_run(test_client: TestClient) -> str:
+    created = upload(test_client)
+    run_id = created["run_id"]
+    assert test_client.post(f"/api/runs/{run_id}/check", json=created["drawing"]).status_code == 200
+    return run_id
+
+
+def test_a_fix_whose_first_round_times_out_is_504(hanging, tmp_path: Path) -> None:
+    test_client, _ = hanging(hang_from=2)  # call 1 is the extraction, call 2 is round one
+    with test_client:
+        run_id = _checked_run(test_client)
+        response = test_client.post(f"/api/runs/{run_id}/fix")
+    assert response.status_code == 504
+    assert response.json()["detail"] == MODEL_TIMEOUT_MESSAGE
+    assert not (tmp_path / run_id / "redline.pdf").exists()
+
+
+def test_a_fix_stops_at_a_timed_out_round_and_reports_the_rounds_before_it(hanging) -> None:
+    # Round one proposes nothing, so the error is still there and round two is asked for —
+    # and round two never answers in time.
+    test_client, slow = hanging(3, {"edits": []})
+    with test_client:
+        run_id = _checked_run(test_client)
+        response = test_client.post(f"/api/runs/{run_id}/fix")
+    assert response.status_code == 200, response.text
+    rounds = response.json()["rounds"]
+    assert [entry["round"] for entry in rounds] == [1, 2]
+    assert rounds[0]["error"] is None
+    assert rounds[1]["error"] == MODEL_TIMEOUT_MESSAGE
+    assert slow.calls == ["extract", "correct"]  # the hung call never got to record itself
+
+
+# ---- Cancel: the browser goes away mid-call ---------------------------------------
+
+
+class AbortableClient(FakeClient):
+    """A slow fake model that, like ``LLMClient``, can be aborted from another thread.
+
+    From call number ``hang_from`` on, each call waits until it is aborted (or the test
+    gives up), and an aborted call raises ``ModelCancelled`` as the real client does.
+    """
+
+    def __init__(self, extraction: dict, hang_from: int) -> None:
+        super().__init__(extraction)
+        self.hang_from = hang_from
+        self.in_call = threading.Event()
+        self.aborted = threading.Event()
+        self.attempted = 0
+
+    def abort(self) -> None:
+        self.aborted.set()
+
+    def chat_json(self, system: str, user: str, images: list[bytes]) -> JSONChatResult:
+        self.attempted += 1
+        if self.attempted >= self.hang_from:
+            self.in_call.set()
+            if self.aborted.wait(timeout=10):
+                raise ModelCancelled()
+        return super().chat_json(system, user, images)
+
+
+@pytest.fixture
+def cancelling(tmp_path: Path):
+    """A TestClient whose browser "disconnects" once the slow fake model call is under way.
+
+    The test client cannot drop a connection mid-request, so the disconnect check is
+    replaced with one that says the browser has gone as soon as the model is busy.
+    """
+    made: list[AbortableClient] = []
+
+    def build(hang_from: int):
+        slow = AbortableClient(extraction_data(), hang_from)
+        made.append(slow)
+
+        async def gone_once_the_model_is_busy(request) -> bool:
+            return slow.in_call.is_set()
+
+        app.dependency_overrides[get_disconnect_probe] = lambda: gone_once_the_model_is_busy
+        return make_client(tmp_path, slow, UsageLimiter(ROOMY), Cleaner(ROOMY)), slow
+
+    yield build
+    for slow in made:
+        slow.aborted.set()
+    app.dependency_overrides.clear()
+
+
+def test_a_cancelled_upload_aborts_the_model_call_and_saves_nothing(
+    cancelling, tmp_path: Path, caplog
+) -> None:
+    test_client, slow = cancelling(hang_from=1)
+    started = time.perf_counter()
+    with caplog.at_level(logging.INFO, logger="draftcheck"), test_client:
+        with DRAWING.open("rb") as handle:
+            response = test_client.post(
+                "/api/runs", files={"file": (DRAWING.name, handle, "application/pdf")}
+            )
+
+    assert response.status_code == 499
+    assert slow.aborted.is_set(), "the model call was left running"
+    assert time.perf_counter() - started < 5  # ended by the abort, not by the fake's own wait
+    assert slow.calls == []  # the call never got as far as answering
+    assert list(tmp_path.iterdir()) == []  # no run folder, no page, no extraction
+    assert any("cancelled by client" in r.getMessage() for r in caplog.records)
+
+
+def test_a_cancelled_fix_aborts_the_round_and_saves_nothing(cancelling, tmp_path: Path) -> None:
+    test_client, slow = cancelling(hang_from=2)  # call 1 is the extraction, call 2 is round one
+    with test_client:
+        run_id = _checked_run(test_client)
+        response = test_client.post(f"/api/runs/{run_id}/fix")
+
+    assert response.status_code == 499
+    assert slow.aborted.is_set()
+    assert slow.attempted == 2  # no second round was started after the abort
+    run_dir = tmp_path / run_id
+    for name in ("corrections.json", "redline.pdf", "redline.png"):
+        assert not (run_dir / name).exists(), name
+    # What the run had before the fix is untouched.
+    assert (run_dir / "confirmed.json").is_file()
+
+
+def test_an_aborted_guard_refuses_the_next_call_without_asking_the_model(fake) -> None:
+    """What stops the correction loop before its next round once the browser has gone."""
+    guard = GuardedClient(fake, seconds=5)
+    guard.abort()
+    with pytest.raises(ModelCancelled):
+        guard.chat_json("SYSTEM", "USER", [])
+    assert fake.calls == []
+
+
+def test_a_guard_returns_promptly_when_aborted_mid_call() -> None:
+    slow = AbortableClient(extraction_data(), hang_from=1)
+    guard = GuardedClient(slow, seconds=30)
+    outcome: dict = {}
+
+    def run() -> None:
+        try:
+            guard.chat_json(EXTRACTION_SYSTEM, "USER", [])
+        except ModelCancelled as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert slow.in_call.wait(timeout=5)
+    guard.abort()
+    worker.join(timeout=2)
+    assert isinstance(outcome.get("error"), ModelCancelled)
+    assert slow.aborted.is_set()  # the abort reached the client underneath
+
+
+
+def test_a_cancelled_request_does_not_slow_the_next_one(tmp_path: Path) -> None:
+    """Aborting one request's client leaves the next request's client alone.
+
+    Each request gets its own client from the factory, as in production. The first upload
+    is cancelled mid-call; the second, sent straight after, must answer at once.
+    """
+    clients: list[AbortableClient] = []
+
+    def factory(provider=None) -> AbortableClient:
+        # Only the first client is slow; the next one answers immediately.
+        made = AbortableClient(extraction_data(), hang_from=1 if not clients else 99)
+        clients.append(made)
+        return made
+
+    async def gone_while_the_first_call_is_busy(request) -> bool:
+        return clients[0].in_call.is_set() and not clients[0].aborted.is_set()
+
+    with make_client(
+        tmp_path, FakeClient(extraction_data()), UsageLimiter(ROOMY), Cleaner(ROOMY)
+    ) as test_client:
+        app.dependency_overrides[get_client_factory] = lambda: factory
+        app.dependency_overrides[get_disconnect_probe] = lambda: gone_while_the_first_call_is_busy
+        try:
+            assert upload_response(test_client).status_code == 499
+            started = time.perf_counter()
+            second = upload_response(test_client)
+            elapsed = time.perf_counter() - started
+            leaked = clients[1].aborted.is_set()
+        finally:
+            for made in clients:
+                made.aborted.set()  # let any still-waiting fake go
+            app.dependency_overrides.clear()
+
+    assert second.status_code == 201, second.text
+    assert elapsed < 2
+    assert len(clients) == 2
+    assert not leaked, "the abort leaked into the next request's client"

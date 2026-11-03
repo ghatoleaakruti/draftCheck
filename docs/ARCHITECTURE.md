@@ -802,6 +802,55 @@ Two tests hold this: a fake model call that blocks until released, and a `/healt
 that must answer within two seconds while it is blocked — once during an upload and once
 during a fix. Before the change, the upload test failed: `/healthz` waited for the model.
 
+**Cancel and the model time limit.** Reading a drawing and proposing fixes both wait on
+the model, so each has a time limit on the server and a Cancel button on the page.
+
+- **Server.** Every model call the web app makes is wrapped in `GuardedClient`
+  (`api.py`). It runs the call on a helper thread and waits at most
+  `DRAFTCHECK_MODEL_TIMEOUT_SECONDS` (default 90, set in `render.yaml`). The HTTP
+  library's own timeout applies to each network attempt and it retries, so without the
+  wrapper one call could take several times the limit. The library is given the same
+  limit too, so an overrun call also stops in the background soon after. A timed-out
+  upload answers **504** with "Muse Spark took too long to answer. Please try again." In
+  the correction loop a timeout ends the loop at that round (`RoundRecord.timed_out`). If
+  it was round one there is nothing to report, and `/fix` answers the same 504. Otherwise
+  the rounds that ran are reported and the redline is written as usual, and the last round
+  carries the timeout message. The CLI builds `LLMClient` without a limit and keeps the
+  library's default.
+- **Page.** While "Read drawing" or "Propose fixes" is waiting, a Cancel button sits next
+  to the waiting line. It aborts the browser request (`AbortController`), puts that stage
+  back the way it was before the click, and says "Cancelled. Muse Spark may still be
+  finishing the previous request, so your next read can take up to a minute." Every `await` is followed by a check of
+  `signal.aborted`, so a reply that lands at the moment of the click is dropped rather than
+  half-shown.
+- **Cancel reaches the server.** Uvicorn does not stop an endpoint when its browser
+  disconnects, so before this change a cancelled upload ran its model call to the end and
+  saved the run. Now `/api/runs` and `/fix` run their slow work on a worker thread and,
+  every 0.25 s, ask whether the browser is still there (`_unless_disconnected`). When it
+  has gone, the server logs "upload cancelled by client" or "fix cancelled by client" and
+  calls `GuardedClient.abort()`, which calls `LLMClient.abort()`. For the server,
+  `LLMClient` is built with `abortable=True`: each request is sent with the async OpenAI
+  client as an asyncio task on its own event loop, and `abort()` cancels that task, which
+  closes the HTTP connection. A cancelled upload deletes its run folder. A cancelled fix
+  stops before the next round (`ModelCancelled` is re-raised by `agent.correct` rather
+  than recorded as a failed round) and writes no `corrections.json` or redline. The
+  request ends with 499, which only the access log ever sees. The CLI's `LLMClient` is
+  not abortable and sends requests exactly as before.
+
+  Measured against Muse Spark Open on Baseten, 2026-11-03 (upload, drop the connection
+  after 5 s, upload again at once):
+
+  | | Cancelled call | Next upload's model call |
+  | --- | --- | --- |
+  | Before | ran to completion (21–26 s) and its run was saved | 22.9 s; then >90 s (504) |
+  | After | aborted ~20 ms after the disconnect; nothing saved | 68.5 s; then >90 s (504) |
+
+  A plain upload with no cancel before it took 20.6–20.7 s. In every case "model call
+  started" came within 40 ms of "upload received", so our server queues nothing. The
+  slowdown is at the provider: closing the connection stops our side, but Baseten appears
+  to keep working on the abandoned request, and the next one waits behind it. That part
+  cannot be fixed from here.
+
 **Cold starts.** A free web service goes to sleep after 15 minutes with no traffic. The
 next visitor waits about a minute while it wakes. Each wake-up is also a restart, and two
 things follow from that. The disk is ephemeral, so run folders under `outputs/web/` are

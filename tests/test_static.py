@@ -8,6 +8,8 @@ the docs both say it is — which is exactly the thing that rots when it is not 
 
 from pathlib import Path
 
+import pytest
+
 from draftcheck.api import STATIC_DIR
 
 APP_JS = STATIC_DIR / "app.js"
@@ -48,3 +50,33 @@ def test_repo_has_the_demo_files() -> None:
     repo_root = Path(__file__).resolve().parent.parent
     assert (repo_root / "tests" / "fixtures" / "plate_001.model.json").is_file()
     assert (repo_root / "samples" / "generated" / "plate_001.png").is_file()
+
+
+def read_index() -> str:
+    return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("button_id", "waiting_line"),
+    [("cancel-read", 'id="status"'), ("cancel-fix", 'id="fix-status"')],
+)
+def test_each_waiting_line_has_a_cancel_button(button_id: str, waiting_line: str) -> None:
+    """The Cancel button sits inside the waiting message it cancels, and app.js wires it."""
+    index = read_index()
+    start = index.index(waiting_line)
+    line = index[start : index.index("</p>", start)]
+    assert f'<button id="{button_id}"' in line
+    assert ">Cancel</button>" in line
+    assert f'getElementById("{button_id}")' in read_app_js()
+
+
+def test_cancel_aborts_the_request_and_says_so() -> None:
+    source = read_app_js()
+    assert source.count("new AbortController()") == 2
+    assert source.count("signal })") == 2  # both fetches carry the signal
+    assert (
+        '"Cancelled. Muse Spark may still be finishing the previous request, '
+        'so your next read can take up to a minute."'
+    ) in source
+    for note in ("read-cancelled", "fix-cancelled"):
+        assert f'id="{note}"' in read_index()

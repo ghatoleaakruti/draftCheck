@@ -1,12 +1,23 @@
 """Tests for chat_json. A fake client stands in for the provider, so no network."""
 
+import asyncio
 import base64
+import socket
+import threading
 from dataclasses import dataclass
 
+import httpx
 import pytest
+from openai import APITimeoutError
 
 from draftcheck.config import Provider
-from draftcheck.llm_client import JSON_MAX_TOKENS, LLMClient
+from draftcheck.llm_client import (
+    JSON_MAX_TOKENS,
+    MODEL_TIMEOUT_MESSAGE,
+    LLMClient,
+    ModelCancelled,
+    ModelTimeout,
+)
 from draftcheck.llm_parsing import JSONParseError
 
 PNG_A = b"\x89PNG\r\n\x1a\nfirst-page-bytes"
@@ -121,3 +132,158 @@ def test_raises_after_a_second_failure():
 
     assert excinfo.value.raw_text == "still no json"
     assert len(fake.calls) == 2
+
+
+def test_a_provider_timeout_becomes_model_timeout():
+    """The HTTP library's own timeout reaches the caller as our exception, with our words."""
+    client, fake = make_client([])
+
+    def time_out(**kwargs):
+        raise APITimeoutError(request=httpx.Request("POST", "https://example.invalid"))
+
+    fake.completions.create = time_out
+
+    with pytest.raises(ModelTimeout) as excinfo:
+        client.chat_json("SYSTEM", "USER", [PNG_A])
+
+    assert str(excinfo.value) == MODEL_TIMEOUT_MESSAGE
+
+
+# ---- abort() ------------------------------------------------------------------------
+
+
+class HangingAsyncClient:
+    """An async OpenAI-shaped client whose request never answers until it is cancelled."""
+
+    def __init__(self) -> None:
+        self.chat = self
+        self.completions = self
+        self.started = threading.Event()
+        self.cancelled = False
+        self.closed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        self.closed = True
+
+    async def create(self, **kwargs):
+        self.started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+def call_in_thread(client: LLMClient) -> tuple[threading.Thread, dict]:
+    """Start ``chat_json`` on another thread, as the server does, and keep its outcome."""
+    outcome: dict = {}
+
+    def run() -> None:
+        try:
+            outcome["result"] = client.chat_json("SYSTEM", "USER", [PNG_A])
+        except Exception as exc:  # noqa: BLE001 - inspected by the test
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    return worker, outcome
+
+
+def test_abort_stops_a_request_in_flight():
+    base, fake = make_client([])
+    fake_async = HangingAsyncClient()
+    client = LLMClient(provider=base.provider, client=fake, async_client_factory=lambda: fake_async)
+
+    worker, outcome = call_in_thread(client)
+    assert fake_async.started.wait(timeout=5)
+    client.abort()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive(), "chat_json was still waiting after abort()"
+    assert isinstance(outcome.get("error"), ModelCancelled)
+    assert fake_async.cancelled
+    assert fake_async.closed
+
+
+def test_an_aborted_client_sends_nothing_more():
+    base, fake = make_client([])
+    fake_async = HangingAsyncClient()
+    client = LLMClient(provider=base.provider, client=fake, async_client_factory=lambda: fake_async)
+    client.abort()
+
+    with pytest.raises(ModelCancelled):
+        client.chat_json("SYSTEM", "USER", [PNG_A])
+    assert not fake_async.started.is_set()
+
+
+def test_abort_closes_the_http_connection():
+    """Against a local socket that never replies: abort() makes the client hang up."""
+    listener = socket.create_server(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    seen: dict = {}
+
+    def serve() -> None:
+        connection, _ = listener.accept()
+        connection.settimeout(10)
+        seen["request"] = connection.recv(65536)
+        # Never answer. The next recv returns b"" only once the client closes its end.
+        try:
+            while connection.recv(65536):
+                pass
+            seen["closed"] = True
+        except TimeoutError:
+            seen["closed"] = False
+        connection.close()
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+    provider = Provider(
+        name="baseten",
+        base_url=f"http://127.0.0.1:{port}/v1",
+        model="test-model",
+        api_key="not-a-real-key",
+    )
+    client = LLMClient(provider=provider, abortable=True)
+
+    worker, outcome = call_in_thread(client)
+    for _ in range(100):
+        if "request" in seen:
+            break
+        threading.Event().wait(0.05)
+    client.abort()
+    worker.join(timeout=5)
+    server.join(timeout=10)
+    listener.close()
+
+    assert seen.get("request", b"").startswith(b"POST /v1/chat/completions")
+    assert isinstance(outcome.get("error"), ModelCancelled)
+    assert seen.get("closed") is True, "the connection stayed open after abort()"
+
+
+
+class AnsweringAsyncClient(HangingAsyncClient):
+    """An async OpenAI-shaped client that answers straight away."""
+
+    async def create(self, **kwargs):
+        self.started.set()
+        return FakeCompletions(['{"ok": true}']).create(**kwargs)
+
+
+def test_aborting_one_client_leaves_another_working():
+    """abort() belongs to one client: a second client built the same way still answers."""
+    base, fake = make_client([])
+    hanging = HangingAsyncClient()
+    first = LLMClient(provider=base.provider, client=fake, async_client_factory=lambda: hanging)
+    worker, outcome = call_in_thread(first)
+    assert hanging.started.wait(timeout=5)
+    first.abort()
+    worker.join(timeout=5)
+    assert isinstance(outcome.get("error"), ModelCancelled)
+
+    second = LLMClient(
+        provider=base.provider, client=fake, async_client_factory=AnsweringAsyncClient
+    )
+    assert second.chat_json("SYSTEM", "USER", [PNG_A]).data == {"ok": True}
