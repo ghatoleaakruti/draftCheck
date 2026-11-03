@@ -42,23 +42,55 @@ def _fit_to_max_side(image: Image.Image, max_side: int) -> Image.Image:
     return image.resize(new_size, Image.LANCZOS)
 
 
+def render_scale(width_pt: float, height_pt: float, dpi: int, max_side: int) -> float:
+    """The pdfium scale that renders a page at ``dpi`` but no bigger than ``max_side``.
+
+    Rendering at full dpi and shrinking afterwards would first build the full-size bitmap,
+    which for a large sheet (A0 at 200 dpi is about 9400 x 6600 px, roughly 250 MB) is
+    most of a small server's memory. Capping the scale here means the bitmap pdfium makes
+    is already about the size that will be sent.
+    """
+    scale = dpi / POINTS_PER_INCH
+    longest_pt = max(width_pt, height_pt)
+    if longest_pt > 0:
+        scale = min(scale, max_side / longest_pt)
+    return scale
+
+
 def _to_page_image(image: Image.Image, max_side: int) -> PageImage:
-    """Fit, flatten to RGB, and encode a pillow image as a PageImage."""
-    image = _fit_to_max_side(image, max_side)
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    return PageImage(png_bytes=buffer.getvalue(), width=image.width, height=image.height)
+    """Fit, flatten to RGB, and encode a pillow image as a PageImage.
+
+    Each intermediate image (resized, converted) is closed as soon as the next one exists,
+    so at most two full-size copies of the page are alive at once. The caller's own image
+    is left for the caller to close.
+    """
+    working = _fit_to_max_side(image, max_side)
+    if working.mode != "RGB":
+        converted = working.convert("RGB")
+        if working is not image:
+            working.close()
+        working = converted
+    try:
+        buffer = io.BytesIO()
+        working.save(buffer, format="PNG")
+        return PageImage(png_bytes=buffer.getvalue(), width=working.width, height=working.height)
+    finally:
+        if working is not image:
+            working.close()
 
 
-def load_pages(path: str | Path, dpi: int = 200, max_side: int = 2400) -> list[PageImage]:
+def load_pages(
+    path: str | Path, dpi: int = 200, max_side: int = 2400, max_pages: int | None = None
+) -> list[PageImage]:
     """Load a drawing as a list of page images.
 
     Args:
         path: A .pdf (all pages) or .png/.jpg/.jpeg (one page) file.
         dpi: Rasterization resolution for PDFs. Ignored for image files.
         max_side: Longest allowed pixel side; larger pages are scaled down.
+        max_pages: Render at most this many pages from the front of a PDF. ``None`` renders
+            them all. Callers that only use page 1 pass 1, so a long PDF does not cost a
+            full-size bitmap per page it will never send.
 
     Raises:
         RenderError: If the file is missing, empty, an unsupported type, or cannot be
@@ -72,6 +104,8 @@ def load_pages(path: str | Path, dpi: int = 200, max_side: int = 2400) -> list[P
         raise RenderError(f"dpi must be positive, got {dpi}")
     if max_side <= 0:
         raise RenderError(f"max_side must be positive, got {max_side}")
+    if max_pages is not None and max_pages <= 0:
+        raise RenderError(f"max_pages must be positive, got {max_pages}")
     if not path.is_file():
         raise RenderError(f"No such file: {path}")
 
@@ -100,10 +134,19 @@ def load_pages(path: str | Path, dpi: int = 200, max_side: int = 2400) -> list[P
     try:
         if len(pdf) == 0:
             raise RenderError(f"PDF has no pages: {path}")
-        scale = dpi / POINTS_PER_INCH
-        for page in pdf:
-            bitmap = page.render(scale=scale)
-            pages.append(_to_page_image(bitmap.to_pil(), max_side))
+        count = len(pdf) if max_pages is None else min(len(pdf), max_pages)
+        for index in range(count):
+            page = pdf[index]
+            width_pt, height_pt = page.get_size()
+            bitmap = page.render(scale=render_scale(width_pt, height_pt, dpi, max_side))
+            try:
+                with bitmap.to_pil() as image:
+                    pages.append(_to_page_image(image, max_side))
+            finally:
+                # The raw bitmap is the biggest thing in memory; let it go before the next
+                # page rather than whenever the garbage collector gets round to it.
+                bitmap.close()
+                page.close()
     except pdfium.PdfiumError as exc:
         # A document that loads can still have a page that will not draw.
         raise RenderError(f"Could not render {path}: {exc}") from exc

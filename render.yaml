@@ -30,3 +30,9 @@ services:
       # Render terminates TLS in a proxy and sets X-Forwarded-For; see limits.py.
       - key: TRUST_PROXY
         value: "1"
+      # Page-1 render size for uploads; smaller than the CLI's 200 dpi / 2400 px so an
+      # upload fits the free plan's RAM. See docs/ARCHITECTURE.md §4.13.
+      - key: DRAFTCHECK_RENDER_DPI
+        value: "150"
+      - key: DRAFTCHECK_MAX_SIDE
+        value: "1800"

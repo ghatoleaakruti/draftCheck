@@ -1,13 +1,16 @@
 """Tests for the extract/check pipeline. A fake client replies, so no network."""
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
 
+from draftcheck import pipeline
 from draftcheck.llm_client import JSONChatResult, Usage
-from draftcheck.pipeline import check, extract
-from draftcheck.render import RenderError
+from draftcheck.pipeline import check, extract, extract_page
+from draftcheck.prompts import EXTRACTION_USER
+from draftcheck.render import RenderError, load_pages
 from draftcheck.schema import Units
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -93,3 +96,35 @@ def test_check_is_deterministic():
     drawing = extract(SAMPLE_PDF, FakeClient(model_output())).drawing
 
     assert check(drawing) == check(drawing)
+
+
+def test_extract_page_sends_the_given_bytes_and_logs_each_stage(caplog):
+    client = FakeClient(model_output())
+    png = load_pages(SAMPLE_PDF, dpi=72)[0].png_bytes
+
+    with caplog.at_level(logging.INFO, logger="draftcheck"):
+        result = extract_page(png, client)
+
+    assert client.calls[0]["images"] == [png]
+    assert result.drawing.units == Units.MM
+    messages = [record.getMessage() for record in caplog.records]
+    assert [m.split(" (")[0] for m in messages] == [
+        "model call started",
+        "model call done",
+        "parse done",
+    ]
+    assert all("memory" in m and " MB" in m for m in messages)
+    # Sizes only: nothing from the prompt or the reply reaches the log.
+    assert not any(EXTRACTION_USER[:40] in m or "fcf_1" in m for m in messages)
+
+
+def test_extract_renders_only_page_one(monkeypatch):
+    seen: dict = {}
+
+    def fake_load_pages(path, **kwargs):
+        seen.update(kwargs)
+        return load_pages(path, **kwargs)
+
+    monkeypatch.setattr(pipeline, "load_pages", fake_load_pages)
+    extract(SAMPLE_PDF, FakeClient(model_output()))
+    assert seen["max_pages"] == 1

@@ -1,6 +1,6 @@
 """HTTP front end for one DraftCheck run.
 
-This module decides nothing. Extraction is :func:`pipeline.extract`, the verdicts are
+This module decides nothing. Extraction is :func:`pipeline.extract_page`, the verdicts are
 :func:`pipeline.check`, the correction loop is :func:`agent.correct`, and the redline is
 :mod:`draftcheck.redline` — exactly as the CLI drives them. What is here is the plumbing
 the CLI gets for free from a terminal: receiving a file, keeping one run's state between
@@ -33,6 +33,7 @@ path cannot be traversed out of.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -45,6 +46,7 @@ from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, 
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from draftcheck.agent import CorrectionReport, RoundRecord, correct
 from draftcheck.config import SUPPORTED_PROVIDERS, ConfigError, get_provider
@@ -52,7 +54,8 @@ from draftcheck.edits import RejectedEdit, parse_edit
 from draftcheck.limits import Cleaner, LimitExceeded, Limits, UsageLimiter, client_ip
 from draftcheck.llm_client import LLMClient
 from draftcheck.llm_parsing import JSONParseError
-from draftcheck.pipeline import SupportsChatJSON, check, extract
+from draftcheck.memory import memory_mb
+from draftcheck.pipeline import ExtractionResult, SupportsChatJSON, check, extract_page
 from draftcheck.redline import EditNames, plain_edit, render_redline, save_redline
 from draftcheck.render import RenderError, load_pages
 from draftcheck.schema import Finding, finding_key, parse_drawing
@@ -75,7 +78,12 @@ CHUNK_BYTES = 1024 * 1024
 #: browser's content type, which is guesswork on the client's side.
 ALLOWED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg"}
 
-DPI = 200
+#: How page 1 is rasterized on the server. Lower than the CLI's 200 dpi / 2400 px because
+#: the free host has little RAM; each is overridable without a code change.
+ENV_RENDER_DPI = "DRAFTCHECK_RENDER_DPI"
+ENV_MAX_SIDE = "DRAFTCHECK_MAX_SIDE"
+DEFAULT_RENDER_DPI = 150
+DEFAULT_MAX_SIDE = 1800
 
 #: Each run's files, by the name the code uses for them.
 PAGE_PNG = "page.png"
@@ -101,8 +109,32 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 #: Set this to ``"1"`` in the environment to turn the demo route on. Off by default.
 DEMO_ENV_VAR = "DRAFTCHECK_ENABLE_DEMO"
 
+#: Stage lines for the server log — sizes and memory only, never images, prompts, or keys.
+logger = logging.getLogger(__name__)
+
 #: A client, given a provider name or ``None`` for the configured default.
 ClientFactory = Callable[[str | None], SupportsChatJSON]
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    """An environment variable as a positive int, or the default if unset or unusable.
+
+    Like the limits, a bad value falls back instead of stopping the server from starting.
+    """
+    raw = os.environ.get(name, "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def render_settings() -> tuple[int, int]:
+    """The ``(dpi, max_side)`` an upload is rendered with, read on every upload."""
+    return (
+        _positive_int_env(ENV_RENDER_DPI, DEFAULT_RENDER_DPI),
+        _positive_int_env(ENV_MAX_SIDE, DEFAULT_MAX_SIDE),
+    )
 
 
 def build_client(provider: str | None = None) -> SupportsChatJSON:
@@ -162,6 +194,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     A deploy is the one moment something is guaranteed to run, so it is where the backlog
     gets cleared; after that cleanup rides along on uploads (:class:`limits.Cleaner`).
     """
+    # Uvicorn configures only its own loggers, so ours would print nothing at INFO. This is
+    # a no-op when something (pytest, a host) has already set up the root logger.
+    logging.basicConfig(format="%(levelname)s:     %(name)s - %(message)s")
+    logging.getLogger("draftcheck").setLevel(logging.INFO)
     _resolve(get_cleaner).sweep(_resolve(get_runs_root), force=True)
     yield
 
@@ -312,6 +348,32 @@ def _checked_provider(provider: str | None) -> str | None:
     return name
 
 
+def _render_and_extract(
+    source: Path, run_dir: Path, client_factory: ClientFactory, provider_name: str | None
+) -> tuple[SupportsChatJSON, ExtractionResult]:
+    """The slow, blocking half of an upload: render page 1, save it, read it with the model.
+
+    Plain synchronous code, run in a worker thread by :func:`create_run`. Rendered once:
+    the same PNG is saved for the browser and the correction loop, and sent to the model.
+    Only page 1 is rasterized, at the server's settings.
+    """
+    dpi, max_side = render_settings()
+    png_bytes = load_pages(source, dpi=dpi, max_side=max_side, max_pages=1)[0].png_bytes
+    (run_dir / PAGE_PNG).write_bytes(png_bytes)
+    logger.info(
+        "render done (%d dpi, max side %d, PNG %.1f MB, memory %.0f MB)",
+        dpi,
+        max_side,
+        len(png_bytes) / 1e6,
+        memory_mb(),
+    )
+
+    client = client_factory(provider_name)
+    # The page is on disk now and the model call holds its own reference to the bytes, so
+    # this function's copy goes as soon as the call returns.
+    return client, extract_page(png_bytes, client)
+
+
 @app.post("/api/runs", status_code=201)
 async def create_run(
     request: Request,
@@ -334,8 +396,9 @@ async def create_run(
     _claim(limiter, request, "upload")
 
     # The only cleanup trigger after startup. `sweep` is a no-op unless an hour has gone
-    # by, so this costs a clock read on all but one upload per hour.
-    cleaner.sweep(root)
+    # by, so this costs a clock read on all but one upload per hour — but the one that does
+    # sweep deletes folders, so it runs in a worker thread like the rest of the slow work.
+    await run_in_threadpool(cleaner.sweep, root)
 
     run_id = uuid.uuid4()
     run_dir = root / str(run_id)
@@ -350,14 +413,13 @@ async def create_run(
         raise
 
     try:
-        # Rendered here so the browser has a page to show and the correction loop has one
-        # to send later. ``extract`` renders page 1 again for itself, which keeps this
-        # endpoint free of a second copy of the extraction flow.
-        page = load_pages(source, dpi=DPI)[0]
-        (run_dir / PAGE_PNG).write_bytes(page.png_bytes)
-
-        client = client_factory(provider_name)
-        result = extract(source, client, dpi=DPI)
+        # This endpoint is async (it streams the upload), so anything slow called directly
+        # here would stall the event loop — every other request, /healthz included, would
+        # wait for the model. Render restarts an instance whose health check fails for 60 s,
+        # so the render and the model call go to a worker thread and this coroutine waits.
+        client, result = await run_in_threadpool(
+            _render_and_extract, source, run_dir, client_factory, provider_name
+        )
     except RenderError as exc:
         # Covers a file that is named .pdf and is not one: `load_pages` translates
         # pypdfium2's and pillow's own errors into RenderError, so a corrupt upload is the
@@ -512,6 +574,9 @@ def _summarize(report: CorrectionReport) -> dict:
     }
 
 
+# Deliberately a plain ``def``: FastAPI runs those in a worker thread, so the correction
+# loop's model calls and the redline drawing never hold up the event loop. Making this
+# ``async def`` without moving that work to a thread would freeze /healthz during a fix.
 @app.post("/api/runs/{run_id}/fix")
 def fix_run(
     request: Request,

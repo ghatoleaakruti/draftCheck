@@ -8,15 +8,21 @@ the CLI and, later, the API can both drive them.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from draftcheck.llm_client import JSONChatResult, Usage
+from draftcheck.memory import memory_mb
 from draftcheck.prompts import EXTRACTION_SYSTEM, EXTRACTION_USER
 from draftcheck.render import load_pages
 from draftcheck.rules import run_rules
 from draftcheck.schema import Drawing, Finding, parse_drawing
+
+#: Stage lines for the server log. Messages carry sizes and memory only — never the image,
+#: the prompt, or the model's reply.
+logger = logging.getLogger(__name__)
 
 
 class SupportsChatJSON(Protocol):
@@ -55,10 +61,29 @@ def extract(path: str | Path, client: SupportsChatJSON, dpi: int = 200) -> Extra
         pydantic.ValidationError: If the JSON is not shaped like a drawing at all. Single
             unreadable items do not raise; they land in ``Drawing.parse_issues``.
     """
-    first_page = load_pages(path, dpi=dpi)[0]
-    result = client.chat_json(EXTRACTION_SYSTEM, EXTRACTION_USER, [first_page.png_bytes])
+    png_bytes = load_pages(path, dpi=dpi, max_pages=1)[0].png_bytes
+    return extract_page(png_bytes, client)
+
+
+def extract_page(png_bytes: bytes, client: SupportsChatJSON) -> ExtractionResult:
+    """Read one already-rendered page with the model and return it as a ``Drawing``.
+
+    The API renders page 1 itself (it keeps the PNG for the browser), so it calls this
+    directly rather than :func:`extract`, which would render the same page a second time.
+
+    Raises:
+        JSONParseError: If the model's reply contains no usable JSON object.
+        pydantic.ValidationError: If the JSON is not shaped like a drawing at all.
+    """
+    logger.info(
+        "model call started (image %.1f MB, memory %.0f MB)", len(png_bytes) / 1e6, memory_mb()
+    )
+    result = client.chat_json(EXTRACTION_SYSTEM, EXTRACTION_USER, [png_bytes])
+    logger.info("model call done (%.1f s, memory %.0f MB)", result.latency_s, memory_mb())
+    drawing = parse_drawing(result.data)
+    logger.info("parse done (memory %.0f MB)", memory_mb())
     return ExtractionResult(
-        drawing=parse_drawing(result.data),
+        drawing=drawing,
         raw_text=result.text,
         latency_s=result.latency_s,
         model=result.model,

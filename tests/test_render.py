@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from draftcheck.render import PageImage, RenderError, load_pages
+from draftcheck.render import PageImage, RenderError, load_pages, render_scale
 from scripts.make_sample_drawing import build
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -152,3 +152,47 @@ def test_page_image_is_frozen(sample_pdf: Path) -> None:
     page = load_pages(sample_pdf, dpi=72)[0]
     with pytest.raises(dataclasses.FrozenInstanceError):
         page.width = 1  # type: ignore[misc]
+
+
+def _three_page_pdf(path: Path, pagesize: tuple[float, float]) -> Path:
+    from reportlab.pdfgen import canvas
+
+    pdf = canvas.Canvas(str(path), pagesize=pagesize)
+    for number in range(3):
+        pdf.drawString(72, 72, f"page {number + 1}")
+        pdf.line(0, 0, pagesize[0], pagesize[1])
+        pdf.showPage()
+    pdf.save()
+    return path
+
+
+def test_max_pages_renders_only_the_front_of_a_pdf(tmp_path: Path) -> None:
+    pdf = _three_page_pdf(tmp_path / "three.pdf", (792, 612))
+    assert len(load_pages(pdf, dpi=72)) == 3
+    assert len(load_pages(pdf, dpi=72, max_pages=1)) == 1
+    assert len(load_pages(pdf, dpi=72, max_pages=10)) == 3
+
+
+@pytest.mark.parametrize("max_pages", [0, -1])
+def test_bad_max_pages_raises(sample_pdf: Path, max_pages: int) -> None:
+    with pytest.raises(RenderError):
+        load_pages(sample_pdf, max_pages=max_pages)
+
+
+def test_render_scale_is_the_dpi_when_the_page_fits() -> None:
+    # 792 pt at 150 dpi is 1650 px, under 1800.
+    assert render_scale(792, 612, dpi=150, max_side=1800) == pytest.approx(150 / 72)
+
+
+def test_render_scale_is_capped_by_max_side_for_a_large_sheet() -> None:
+    """A0 landscape is 3370 pt wide; at 150 dpi that would be about 7000 px."""
+    scale = render_scale(3370, 2384, dpi=150, max_side=1800)
+    assert 3370 * scale == pytest.approx(1800)
+
+
+def test_a_large_sheet_comes_out_at_max_side(tmp_path: Path) -> None:
+    pdf = _three_page_pdf(tmp_path / "a0.pdf", (3370, 2384))
+    page = load_pages(pdf, dpi=150, max_side=1800, max_pages=1)[0]
+    assert max(page.width, page.height) <= 1800
+    assert max(page.width, page.height) >= 1795
+    assert page.width / page.height == pytest.approx(3370 / 2384, rel=0.01)

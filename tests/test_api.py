@@ -10,7 +10,9 @@ rules themselves, the loop, and the redline have their own tests.
 """
 
 import json
+import logging
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -18,12 +20,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from draftcheck.api import (
+    DEFAULT_MAX_SIDE,
+    DEFAULT_RENDER_DPI,
     DEMO_ENV_VAR,
+    ENV_MAX_SIDE,
+    ENV_RENDER_DPI,
     app,
     get_cleaner,
     get_client_factory,
     get_limiter,
     get_runs_root,
+    render_settings,
 )
 from draftcheck.limits import LIMIT_MESSAGE, Cleaner, Limits, UsageLimiter
 from draftcheck.llm_client import JSONChatResult, Usage
@@ -765,3 +772,122 @@ def test_the_page_says_usage_is_limited(client: TestClient):
     """Told up front, in the page itself rather than only in a 429."""
     page = client.get("/")
     assert "Demo usage is limited to keep it free for everyone." in page.text
+
+
+# ---- Render settings and the upload's log lines --------------------------------
+
+
+def test_render_settings_default_to_the_small_server_values(monkeypatch) -> None:
+    monkeypatch.delenv(ENV_RENDER_DPI, raising=False)
+    monkeypatch.delenv(ENV_MAX_SIDE, raising=False)
+    assert render_settings() == (DEFAULT_RENDER_DPI, DEFAULT_MAX_SIDE) == (150, 1800)
+
+
+def test_render_settings_read_the_environment(monkeypatch) -> None:
+    monkeypatch.setenv(ENV_RENDER_DPI, "100")
+    monkeypatch.setenv(ENV_MAX_SIDE, " 900 ")
+    assert render_settings() == (100, 900)
+
+
+@pytest.mark.parametrize("value", ["", "0", "-5", "1,800", "big"])
+def test_unusable_render_settings_fall_back(monkeypatch, value: str) -> None:
+    monkeypatch.setenv(ENV_RENDER_DPI, value)
+    monkeypatch.setenv(ENV_MAX_SIDE, value)
+    assert render_settings() == (DEFAULT_RENDER_DPI, DEFAULT_MAX_SIDE)
+
+
+def test_upload_renders_page_one_once_at_the_server_settings(
+    client: TestClient, fake: FakeClient, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv(ENV_MAX_SIDE, "600")
+    run_id = upload(client)["run_id"]
+
+    from PIL import Image
+
+    with Image.open(tmp_path / run_id / "page.png") as page:
+        assert max(page.size) == 600
+    assert fake.calls == ["extract"]
+
+
+def test_upload_logs_each_stage_with_memory(client: TestClient, caplog) -> None:
+    with caplog.at_level(logging.INFO, logger="draftcheck"):
+        upload(client)
+
+    messages = [r.getMessage() for r in caplog.records if r.name.startswith("draftcheck")]
+    assert [m.split(" (")[0] for m in messages] == [
+        "render done",
+        "model call started",
+        "model call done",
+        "parse done",
+    ]
+    assert all("memory" in m and " MB" in m for m in messages)
+
+
+# ---- Slow work runs off the event loop ------------------------------------------
+
+
+class BlockingClient(FakeClient):
+    """A fake whose model call waits until the test lets it go, like a slow real model."""
+
+    def __init__(self, extraction: dict) -> None:
+        super().__init__(extraction)
+        self.in_call = threading.Event()
+        self.release = threading.Event()
+        self.blocking = True
+
+    def chat_json(self, system: str, user: str, images: list[bytes]) -> JSONChatResult:
+        if self.blocking:
+            self.in_call.set()
+            self.release.wait(timeout=30)
+        return super().chat_json(system, user, images)
+
+
+def _healthz_answers_during(client: TestClient, slow: BlockingClient, request) -> None:
+    """Start ``request`` in a thread, and while the model call hangs, ask /healthz."""
+    outcome: dict = {}
+    worker = threading.Thread(target=lambda: outcome.setdefault("response", request()))
+    worker.start()
+    try:
+        assert slow.in_call.wait(timeout=10), "the fake model call never started"
+        health: dict = {}
+        prober = threading.Thread(target=lambda: health.setdefault("r", client.get("/healthz")))
+        prober.start()
+        prober.join(timeout=2)
+        # Checked before the release: a blocked event loop answers only once the call ends.
+        assert "r" in health, "/healthz did not answer while the model call was in progress"
+        assert health["r"].status_code == 200
+    finally:
+        slow.release.set()
+        worker.join(timeout=30)
+    assert outcome["response"].status_code in (200, 201), outcome["response"].text
+
+
+@pytest.fixture
+def slow_client(tmp_path: Path):
+    slow = BlockingClient(extraction_data())
+    with make_client(tmp_path, slow, UsageLimiter(ROOMY), Cleaner(ROOMY)) as test_client:
+        yield test_client, slow
+    app.dependency_overrides.clear()
+
+
+def test_healthz_answers_while_an_upload_waits_on_the_model(slow_client) -> None:
+    client, slow = slow_client
+
+    def post_upload():
+        with DRAWING.open("rb") as handle:
+            return client.post(
+                "/api/runs", files={"file": (DRAWING.name, handle, "application/pdf")}
+            )
+
+    _healthz_answers_during(client, slow, post_upload)
+
+
+def test_healthz_answers_while_a_fix_waits_on_the_model(slow_client) -> None:
+    client, slow = slow_client
+    slow.blocking = False
+    created = upload(client)
+    run_id = created["run_id"]
+    assert client.post(f"/api/runs/{run_id}/check", json=created["drawing"]).status_code == 200
+    slow.blocking = True
+
+    _healthz_answers_during(client, slow, lambda: client.post(f"/api/runs/{run_id}/fix"))
