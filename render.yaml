@@ -1,0 +1,32 @@
+# Render Blueprint for the DraftCheck web demo. See docs/ARCHITECTURE.md §4.13.
+# Secrets (the two API keys) are sync: false — Render asks for them in the dashboard
+# when the Blueprint is first created; their values never live in this file.
+services:
+  - type: web
+    name: draftcheck
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn draftcheck.api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: LLM_PROVIDER
+        value: baseten
+      - key: BASETEN_BASE_URL
+        value: https://inference.baseten.co/v1
+      - key: BASETEN_MODEL
+        value: meta-models/muse-spark-open-1026
+      - key: BASETEN_API_KEY
+        sync: false
+      - key: META_BASE_URL
+        value: https://api.meta.ai/v1
+      - key: META_MODEL
+        value: muse-spark-1.2
+      - key: META_API_KEY
+        sync: false
+      # Render terminates TLS in a proxy and sets X-Forwarded-For; see limits.py.
+      - key: TRUST_PROXY
+        value: "1"

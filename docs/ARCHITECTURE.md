@@ -727,6 +727,46 @@ host's probe runs it every few seconds: one that called the provider would spend
 budget on being asked whether we are alive, and would report us unhealthy whenever the
 provider hiccuped — a different question from the one being asked.
 
+### 4.13 Deploy — CONFIGURED (not yet deployed)
+
+DraftCheck runs on **Render**, as one Python web service on the **free plan** in the
+Oregon region. Everything about the service is written down in `render.yaml` at the repo
+root (a Render Blueprint), so the setup is reviewed like code instead of clicked together
+in a dashboard:
+
+- **Build:** `pip install -r requirements.txt`. Every library is pinned with `==` to the
+  version tested locally, so the deploy installs exactly what the tests ran against.
+- **Start:** `uvicorn draftcheck.api:app --host 0.0.0.0 --port $PORT`. Render chooses the
+  port and passes it in `PORT`; only the start command reads it, and no Python code does.
+- **Health check:** `/healthz` (§4.12), which touches no model and no key.
+- **Python:** `PYTHON_VERSION=3.12.7`. Render needs the full version number here, and
+  without it a new service would get Render's default, which is newer than the version we
+  test on.
+
+**Settings come from environment variables, not a `.env` file.** The non-secret ones
+(provider choice, base URLs, model ids) are written in `render.yaml`. The two secrets,
+`BASETEN_API_KEY` and `META_API_KEY`, are marked `sync: false`: the file names them but
+holds no value. Render asks for them in the dashboard when the Blueprint is first created,
+and after that they are changed only in the dashboard. On Render there is no `.env`, so
+`load_dotenv` finds nothing and does nothing, and `config.py` reads the variables Render
+set. A test covers this case.
+
+**`TRUST_PROXY=1`** because Render puts its own proxy in front of the app. Every request
+reaches uvicorn from that proxy's address, so without the setting all visitors would share
+one per-IP allowance. Render sets `X-Forwarded-For` to the real visitor's address, and
+`TRUST_PROXY=1` tells `limits.py` to use it (§4.12). This is safe on Render only because
+the app cannot be reached except through that proxy.
+
+**`DRAFTCHECK_ENABLE_DEMO` is not set**, so the low-confidence demo route stays off in
+production.
+
+**Cold starts.** A free web service goes to sleep after 15 minutes with no traffic. The
+next visitor waits about a minute while it wakes. Each wake-up is also a restart, and two
+things follow from that. The disk is ephemeral, so run folders under `outputs/web/` are
+gone, which suits a demo that already throws them away after 24 hours. The in-memory usage
+counters also reset, the trade-off accepted in §4.12. Before a live demo, open the page
+once a minute or two early so it is awake.
+
 ## 5. Repo layout (what exists today)
 
 ```
@@ -789,7 +829,8 @@ draftCheck/
 ├── LICENSE                     # MIT
 ├── README.md
 ├── pyproject.toml
-└── requirements.txt
+├── render.yaml                 # Render Blueprint: one free web service (§4.13)
+└── requirements.txt            # pinned with == to the tested versions
 ```
 
 ## 6. Development workflow — BUILT
@@ -842,5 +883,5 @@ draftCheck/
 | --- | --- | --- |
 | 1 | Extraction + JSON schema + rule engine + test generator | BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`, `rules.py` with 6 rules, and `pipeline.py` + `cli.py` joining them into one `check` command that runs a drawing end to end. More rules can be added to the registry as the sample set grows |
 | 2 | Agent correction loop + redlined PDF | BUILT: `edits.py` (the four allowed operations and their guards), `agent.py` (the three-round loop), and `redline.py` (the two-page redline), wired into `check --fix --redline` and verified end to end on plate_001 |
-| 3 | Web UI + live deploy | PARTLY BUILT: `api.py` serves the whole flow over HTTP — upload + extract, check the confirmed data, run the loop, fetch the redline — verified end to end against the live model on plate_001. The browser page uploads a drawing, shows what the model read, lets the reviewer correct it, runs the check from it (§4.9), proposes verified fixes with the redline (§4.10), and marks the rows the model was least sure of (§4.11). Production safety is in place — per-IP and global usage limits, run-folder cleanup, and `/healthz` (§4.12). The deploy is next |
+| 3 | Web UI + live deploy | PARTLY BUILT: `api.py` serves the whole flow over HTTP — upload + extract, check the confirmed data, run the loop, fetch the redline — verified end to end against the live model on plate_001. The browser page uploads a drawing, shows what the model read, lets the reviewer correct it, runs the check from it (§4.9), proposes verified fixes with the redline (§4.10), and marks the rows the model was least sure of (§4.11). Production safety is in place — per-IP and global usage limits, run-folder cleanup, and `/healthz` (§4.12). The Render deploy is configured in `render.yaml` (§4.13) but not yet run |
 | 4 | After hackathon: SAM 3.1 precision, revisions, link to Research Paper Recommender | PLANNED (post-hackathon) |
