@@ -1,8 +1,9 @@
 """Configuration loading for DraftCheck.
 
-Reads LLM provider settings from environment variables, which are populated from a
-``.env`` file found by searching upward from the current working directory. Secrets
-are never printed: the provider's ``repr`` masks the API key.
+Reads LLM provider settings from environment variables. Locally they are populated from a
+``.env`` file found by searching upward from the current working directory; on a host such
+as Render there is no ``.env`` and they are set on the service, so loading simply finds
+nothing. Secrets are never printed: the provider's ``repr`` masks the API key.
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ def _require(var_name: str) -> str:
     if not value.strip():
         raise ConfigError(
             f"Missing required environment variable: {var_name}. "
-            f"Add it to your .env file at the project root."
+            f"Set it in the environment (locally: your .env file at the project root)."
         )
     return value.strip()
 

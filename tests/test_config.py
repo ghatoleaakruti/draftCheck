@@ -153,3 +153,13 @@ def test_repr_masks_api_key(fake_env: None) -> None:
     provider = load()
     assert "fake-key-not-real" not in repr(provider)
     assert "***" in repr(provider)
+
+
+def test_loading_without_any_env_file_uses_the_environment(
+    fake_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """As on Render: no .env anywhere above the working folder, settings only in env vars."""
+    monkeypatch.chdir(tmp_path)
+    provider = get_provider(load_env=True)
+    assert provider.name == "baseten"
+    assert provider.model == "fake-model-id"
