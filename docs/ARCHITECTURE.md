@@ -3,7 +3,7 @@
 Every item below is marked **BUILT** (exists in this repo today) or **PLANNED** (designed,
 not yet written).
 
-Last updated: 2026-10-30
+Last updated: 2026-11-03
 
 ## 1. Overview
 
@@ -75,7 +75,7 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/redline.py` | `render_redline(page_png, findings, report=None, model_name=None, when=None)` → two pillow pages, and `save_redline(pages, path_pdf, path_png)` → a 2-page PDF plus page 1 as a PNG. Pillow only, drawn on the rendered page image. Markers are numbered in `run_rules` order, so a number means the same finding on page 1, on page 2, and in `findings.json`. `findings_text(findings, report)` returns page 2's wording as styled lines, so the text can be tested without reading pixels — see §4.7 | **BUILT** |
 | `draftcheck/api.py` | FastAPI app over the same four modules the CLI drives: upload + extract, check the confirmed data, run the correction loop, serve the page image and the redline. One run is one folder under `outputs/web/<uuid4>/`, so each request reads what the previous one wrote — see §4.8. Decides nothing itself | **BUILT** |
 | `draftcheck/limits.py` | What one demo deployment is willing to spend, and on whom. `Limits.from_env()` holds every number (per-IP uploads and fixes per hour, model calls per day, run retention, sweep interval, `TRUST_PROXY`); `UsageLimiter` counts them in memory over sliding windows and raises `LimitExceeded`, which `api.py` turns into a `429`; `client_ip(...)` decides which address a request is counted against; `sweep_runs(root, max_age_hours)` deletes stale run folders and `Cleaner` keeps that to once an hour — see §4.12 | **BUILT** |
-| `draftcheck/static/` | The browser page, served at `/`: `index.html`, `style.css`, `app.js`, and `fonts/` (Archivo, JetBrains Mono, Nanum Pen Script, each with its OFL licence). Plain HTML, CSS, and JavaScript — no framework, no build step, nothing loaded from a CDN. Laid out as "the checker's desk" (§4.15): a header with a five-stage stepper and a model pill, the drawing as paper on a dark desk with an SVG overlay in image pixels, and a tabbed review panel (Extracted, Issues, Corrections) with one primary button whose label follows the stage. The tables are editable (§4.9), linked to the drawing by item id, and checked and fixed through the same endpoints as before. Cells are written with `textContent` or as an input's `value`, so model output is never treated as markup | **BUILT** (upload + view + edit + check + fix + redline) |
+| `draftcheck/static/` | The browser page, served at `/`: `index.html`, `style.css`, `app.js`, `sheet.js` (the drawing primitives for the sheet: scan band, revision clouds, pen notes, stamp — §4.17), and `fonts/` (Archivo, JetBrains Mono, Nanum Pen Script, each with its OFL licence). Plain HTML, CSS, and JavaScript — no framework, no build step, nothing loaded from a CDN. Laid out as "the checker's desk" (§4.15): a header with a five-stage stepper and a model pill, the drawing as paper on a dark desk with an SVG overlay in image pixels, and a tabbed review panel (Extracted, Issues, Corrections) with one primary button whose label follows the stage. The tables are editable (§4.9), linked to the drawing by item id, and checked and fixed through the same endpoints as before. Cells are written with `textContent` or as an input's `value`, so model output is never treated as markup | **BUILT** (upload + view + edit + check + fix + redline) |
 | `frontend/` | Driving `/fix` from the page and showing the correction report and the redline | PLANNED |
 | `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch. The ground truth is written in `schema.py`'s field names — plus `bbox_convention` and `seeded_errors` — so it parses as a `Drawing` and doubles as the target an extraction is scored against | **BUILT** |
 | `scripts/smoke_test.py` | One-shot check that the configured model answers over the network; `--provider baseten\|meta` picks which one | **BUILT** |
@@ -427,8 +427,8 @@ looking.
 | --- | --- | --- | --- |
 | `POST` | `/api/runs` | Multipart upload of a PDF/PNG/JPG, plus an optional `provider` field. Creates the run folder, saves the file, renders page 1, and extracts. Returns `run_id`, the drawing, `parse_issues`, `model`, `latency_s` | `415` unsupported type, `413` over 10 MB, `400` unreadable or empty, `422` unknown provider, `429` over a demo limit (§4.12), `502` the model failed or returned something unusable, `500` missing configuration |
 | `GET` | `/api/runs/{run_id}/page.png` | The rendered page, for the review screen to draw on | `404` |
-| `POST` | `/api/runs/{run_id}/check` | Body is the confirmed (possibly edited) drawing JSON. Validates it with `parse_drawing`, saves `confirmed.json`, runs the rules. Returns the findings (each with its rule's short `title`, for the Issues card), `parse_issues`, and the error/warning counts | `404` unknown run, `422` not a drawing object |
-| `POST` | `/api/runs/{run_id}/fix` | Runs the correction loop on `confirmed.json` with the page image, writes `corrections.json` and the redline. Returns the rounds in plain English (see below), the per-finding status, the final findings, and the corrected drawing | `404` unknown run, `409` `/check` has not run, `429` over a demo limit (§4.12) |
+| `POST` | `/api/runs/{run_id}/check` | Body is the confirmed (possibly edited) drawing JSON. Validates it with `parse_drawing`, saves `confirmed.json`, runs the rules. Returns the findings (each with its rule's short `title`, for the Issues card, and its `key`, the `finding_key` name `/fix` reports verdicts under), `parse_issues`, the error/warning counts, and `rules_run` (how many rules ran) | `404` unknown run, `422` not a drawing object |
+| `POST` | `/api/runs/{run_id}/fix` | Runs the correction loop on `confirmed.json` with the page image, writes `corrections.json` and the redline. Returns the rounds in plain English (see below), each edit's short before/after and pen note with its verdict (§4.17), the per-finding status and `outcome`, the final findings, and the corrected drawing | `404` unknown run, `409` `/check` has not run, `429` over a demo limit (§4.12) |
 | `GET` | `/api/runs/{run_id}/redline.pdf` | The two-page redline | `404` |
 | `GET` | `/api/runs/{run_id}/redline.png` | Page 1 of the redline | `404` |
 | `POST` | `/api/demo/low-confidence` | Builds a run out of `tests/fixtures/plate_001.model.json` and `samples/generated/plate_001.png`, with the first dimension and the frame lowered to `confidence: 0.6`. No model call. Same reply shape as `POST /api/runs`. **Off unless `DRAFTCHECK_ENABLE_DEMO=1`, and loopback only** | `404` unless both gates are open, or if the two repo files are absent |
@@ -911,13 +911,14 @@ The page fills the window (100vh) and only the review panel's body scrolls.
 - **Desk (left).** File name and source, Upload, Try the sample drawing, and the model
   selector. Before a run, a dashed drop zone; after, the rendered page as paper, scaled to
   fit, with an `<svg id="overlay">` on top whose `viewBox` is the image's natural size. It
-  holds two layers: `#boxes`, the linked-highlight rectangles, and `#markup`, left empty for
-  step 19b. A status bar gives the phase and the colour legend. The whole desk takes a drop.
+  holds two layers: `#boxes`, the linked-highlight rectangles, and `#markup`, drawn on in
+  step 19b (§4.17). A status bar gives the phase and the colour legend. The whole desk takes a drop.
 - **Panel (right).** Tabs for Extracted (the editable tables, now with an id column, a
   Zone column, a confidence column, and a plain-language tip on every column header),
   Issues (one card per finding: number, rule title, rule id and zone, severity, the
-  message, and its source), and Corrections (rounds, verdicts, and the redline; an empty
-  state until a fix has run).
+  message, and its source; since 19b also a rounds strip and each round's attempt), and
+  Corrections (since 19b a before/after table and the two exports; an empty state until
+  a fix has run).
 - **One primary button.** Its label follows the stage: Read drawing → Confirm and run
   checks → Let the agent fix them → Running rounds (up to 3)… → Download redlined PDF.
   Cancel sits beside it while a model call is out. Errors and short confirmations are
@@ -960,6 +961,80 @@ the fake's pause waits on an event that `abort()` sets.
 machine gets the real model even when it is set. `tests/test_api.py` checks both gates
 each way; `tests/test_fake_model.py` checks the fake itself.
 
+### 4.17 The drawing sheet and the corrections tab — BUILT (step 19b)
+
+Everything the checker would draw by hand is drawn on the overlay SVG, from the API's
+replies only. `sheet.js` holds the drawing primitives and knows nothing about a run;
+`app.js` decides what to draw and when.
+
+**Sheet units.** The overlay's `viewBox` is the page image in pixels. One sheet unit is the
+image width / 800 (`SHEET_UNITS`), carried on the SVG as the CSS variable `--u`; every stroke
+width, font size, and symbol size in `style.css` is a multiple of it, so a cloud looks the
+same on a 1,200 px render and a 2,400 px one.
+
+**What is drawn, and when.**
+
+| Moment | On the sheet |
+| --- | --- |
+| Reading | A blue band (transparent → 16 %) with a solid leading line loops down a stand-in sheet. The rendered page only exists once `POST /api/runs` answers, so the stand-in is the picked file when it is an image and a blank sheet for a PDF |
+| Reply lands | One last sweep over the real page; each model box appears as the line passes its centre |
+| Confirm | Model boxes: 7 % blue fill, 1.2-unit stroke, 2-unit corners, the item id in a blue tag above the top-left corner. Hover or a linked highlight: 2.6-unit stroke, 16 % fill |
+| After Check | The boxes fade out ("Show boxes" brings them back). Every finding with a `bbox` gets a revision cloud, padded 5 units, one outward arc per ~4.5 units of perimeter, 2-unit pen-red, roughened by an `feTurbulence` + `feDisplacementMap` filter, drawn with a dash-offset animation (0.7 s, 160 ms apart), and a numbered delta triangle outside its top-left corner |
+| After Fix | The rounds replay (below); then each cloud takes its finding's `outcome` colour (green verified, amber held or unresolved), a pen note is written beside it in Nanum Pen Script (revealed left to right, 260 ms apart; rejected notes are struck through), and the CHECKED stamp lands on the clearest spot |
+
+Clouds are focusable buttons: a click or Enter opens the Issues tab on that card, and
+selecting a card thickens its cloud to 3.4 units. Cloud N, card N, delta N, and marker N on
+the redline PDF are the same finding — `run_rules` order throughout.
+
+**The stamp's spot** is chosen in the page: a 9 × 9 grid of candidate positions, dropping any
+that touch a box, cloud, or note, and any whose patch of the page image (read from a small
+canvas copy) has more than 2 % dark pixels. Of the rest, the one nearest the lower middle
+wins; with none left, it goes in the lower middle anyway. It reads "N VERIFIED, M FOR
+DESIGNER", where M counts held and unresolved findings.
+
+**What `/fix` adds for this.** The page never words a correction itself. For every applied
+edit, and every refused edit that `parse_edit` can read, the server sends:
+
+| Field | Example | From |
+| --- | --- | --- |
+| `before`, `after` | `⌖ Ø0.25 Ⓜ \| A \| B \| C` → `⌖ Ø0.25 Ⓜ \| A \| B` | `redline.edit_display`. `_summarize` re-applies each round's edits one at a time from the original drawing (`apply_edits` is deterministic), so each pair is read off the drawing exactly either side of that edit. A refused edit's `after` is what it asked for, worked out on a copy |
+| `pen` | `drop C`, `add datum C`, `±0.025`, `62`, `make basic` | `redline.pen_label`. A frame's tolerance is written `Ø0.3` rather than `±0.3`, since a zone is a width, not a band |
+| `target_id` | `fcf_1` | The item the edit changes, so a note with no cloud can sit by its box |
+| `status`, `note` | `verified`, "The re-run no longer reports GDT-001@fcf_1." | `api.edit_verdict`, below |
+
+`edit_verdict` is plain Python over the round's re-run: `verified` when every finding the
+edit cites is gone after the round; `held` when that is so but the edit is an `add_datum` or
+`add_dimension` (`HELD_OPS`) — it passes the rules, but only the designer can say where
+the new feature really goes on the part; `failed` otherwise. Refused edits are `rejected`.
+As on the redline, the edit's `finding_ids` (the model's claim) only says *which* finding an
+edit is about; whether that finding cleared is `record.resolved`. Each `status` entry also
+carries `outcome` — `verified`, `held`, or `unresolved` — which is what the clouds, the
+stamp, and the Corrections tab count.
+
+**Issues tab.** Above the cards, a strip of four cells — Found, Round 1, Round 2, Round 3 —
+each a label, a big number (findings found; findings left after the round), and one line
+("6 rules ran", "1 verified, 1 rejected", "Waiting"). `/fix` returns every round at once, so
+the page replays them about 600 ms apart, with a blinking blue underline on the cell that is
+"running". Each card then lists its rounds' attempts: "Round N proposal", a diff (before in
+red, struck through; after in green, or grey and struck through when refused), the verdict
+chip ("✓ Rule engine: pass", "! pass, held for designer", "✕ Rule engine: fail"), and
+Python's note. Proposals that cite no finding get a card of their own.
+
+**Corrections tab.** "N corrections passed the rule engine. M need a designer.", a table
+(delta, before, after, status) with one row per original finding plus any applied edit that
+cites none, and two exports: the redlined PDF (the existing endpoint) and the correction list
+as CSV, built in the browser from the same replies (issue, rule, zone, severity, before,
+after, status, source; UTF-8 with a byte-order mark; a cell a spreadsheet would read as a
+formula is written as text).
+
+**Reduced motion.** Every animation's base style is its end state, so the stylesheet's
+`prefers-reduced-motion` rule (animations off) shows the final picture; the JavaScript skips
+the scan, the sweep, and the round replay.
+
+**The pen font is lazy.** Nanum Pen Script is 3.2 MB, so it is not declared in `style.css`
+and not preloaded: `Sheet.loadPenFont()` adds it with the `FontFace` API (`display: swap`)
+the first time a note is written, and the notes are measured again once it arrives.
+
 ## 5. Repo layout (what exists today)
 
 ```
@@ -991,6 +1066,7 @@ draftCheck/
 │       ├── index.html
 │       ├── style.css
 │       ├── app.js
+│       ├── sheet.js            # drawing on the sheet: scan, clouds, pen notes, stamp
 │       └── fonts/              # Archivo, JetBrains Mono, Nanum Pen Script + OFL.txt each
 ├── samples/
 │   └── generated/              # synthetic drawings, regenerable from scripts/
@@ -1010,6 +1086,7 @@ draftCheck/
 │   ├── test_api.py
 │   ├── test_cli.py
 │   ├── test_config.py
+│   ├── test_edit_display.py    # short before/after strings and pen labels
 │   ├── test_edits.py
 │   ├── test_limits.py
 │   ├── test_memory.py

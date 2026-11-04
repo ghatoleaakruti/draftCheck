@@ -56,7 +56,7 @@ from starlette.concurrency import run_in_threadpool
 
 from draftcheck.agent import CorrectionReport, RoundRecord, correct
 from draftcheck.config import DEFAULT_PROVIDER, SUPPORTED_PROVIDERS, ConfigError, get_provider
-from draftcheck.edits import RejectedEdit, parse_edit
+from draftcheck.edits import Edit, RejectedEdit, apply_edits, parse_edit
 from draftcheck.fake_model import fake_client_factory
 from draftcheck.limits import Cleaner, LimitExceeded, Limits, UsageLimiter, client_ip
 from draftcheck.llm_client import (
@@ -69,10 +69,17 @@ from draftcheck.llm_client import (
 from draftcheck.llm_parsing import JSONParseError
 from draftcheck.memory import memory_mb
 from draftcheck.pipeline import ExtractionResult, SupportsChatJSON, check, extract_page
-from draftcheck.redline import EditNames, plain_edit, render_redline, save_redline
+from draftcheck.redline import (
+    EditDisplay,
+    EditNames,
+    edit_display,
+    plain_edit,
+    render_redline,
+    save_redline,
+)
 from draftcheck.render import RenderError, load_pages
 from draftcheck.rules import RULES
-from draftcheck.schema import Finding, finding_key, parse_drawing
+from draftcheck.schema import Drawing, Finding, finding_key, parse_drawing
 
 #: Where run folders are created. A dependency, so tests point it at a tmp folder.
 RUNS_ROOT = Path("outputs/web")
@@ -911,6 +918,7 @@ def check_run(
         "parse_issues": drawing.parse_issues,
         "error_count": errors,
         "warning_count": len(findings) - errors,
+        "rules_run": len(RULES),
     }
 
 
@@ -927,26 +935,95 @@ def finding_payload(finding: Finding) -> dict:
     """
     payload = finding.model_dump(mode="json")
     payload["title"] = RULE_TITLES.get(finding.rule_id, finding.rule_id)
+    # The name /fix reports its verdicts under, so the page can match the two up.
+    payload["key"] = finding_key(finding)
     return payload
 
 
-def _rejected_summary(item: RejectedEdit, names: EditNames) -> dict:
+def _display_fields(display: EditDisplay | None) -> dict:
+    """The short before/after/pen strings, or ``None`` for each when there are none."""
+    if display is None:
+        return {"before": None, "after": None, "pen": None, "target_id": None}
+    return {
+        "before": display.before,
+        "after": display.after,
+        "pen": display.pen,
+        "target_id": display.target_id,
+    }
+
+
+def _rejected_summary(item: RejectedEdit, names: EditNames, drawing: Drawing) -> dict:
     """A refused proposal as the page shows it, in the same words as an applied one.
 
     A proposal can be refused before it is understood (``{"op": "delete_fcf"}``) or after
     (an edit that names an id the drawing does not have), so the sentence is only available
     when ``parse_edit`` can make an ``Edit`` out of it. When it cannot, the page says what
-    the model called the operation rather than inventing a description of it.
+    the model called the operation rather than inventing a description of it, and there is
+    no before/after to show.
     """
     raw = item.edit
     edit, _ = parse_edit(raw)
+    display = None
+    finding_ids: list[str] = []
     if edit is not None:
         sentence, rationale = plain_edit(edit, names), edit.rationale
+        display = edit_display(edit, drawing, None)
+        finding_ids = edit.finding_ids
     elif isinstance(raw, dict) and isinstance(raw.get("op"), str) and raw["op"].strip():
         sentence, rationale = f"an edit the model called {raw['op'].strip()!r}", ""
     else:
         sentence, rationale = "an edit that was not shaped like an edit", ""
-    return {"edit": sentence, "rationale": rationale, "reason": item.reason}
+    return {
+        "edit": sentence,
+        "rationale": rationale,
+        "reason": item.reason,
+        "finding_ids": finding_ids,
+        **_display_fields(display),
+        "status": "rejected",
+        "note": f"Refused before the rules ran: {item.reason}",
+    }
+
+
+#: Operations that can pass the rules and still need a designer. Each describes a feature
+#: that is not on the sheet yet — a datum symbol or a dimension given in words — and only
+#: the designer can say where on the part it really goes.
+HELD_OPS = frozenset({"add_datum", "add_dimension"})
+
+
+def edit_verdict(edit: Edit, record: RoundRecord) -> tuple[str, str]:
+    """What the rule engine made of one applied edit: ``(status, note)``.
+
+    ``status`` is ``"verified"`` when every finding the edit cites was gone on the re-run,
+    ``"held"`` when that is so but the edit adds a feature a designer has to place
+    (:data:`HELD_OPS`), and ``"failed"`` otherwise. The citation is the model's claim and
+    is used only to say *which* finding an edit is about; whether that finding cleared is
+    ``record.resolved``, computed by re-running the rules.
+    """
+    cited = list(edit.finding_ids)
+    if not cited:
+        return "failed", "It cites no finding, so the re-run has nothing to confirm."
+    still = [key for key in cited if key not in record.resolved]
+    if still:
+        return "failed", f"The re-run still reports {', '.join(still)}."
+    cleared = ", ".join(cited)
+    if edit.op in HELD_OPS:
+        return "held", f"The re-run no longer reports {cleared}; a designer has to place it."
+    return "verified", f"The re-run no longer reports {cleared}."
+
+
+def _applied_summary(
+    edit: Edit, names: EditNames, record: RoundRecord, before: Drawing, after: Drawing
+) -> dict:
+    """One applied edit: its sentence, its before/after on the sheet, and its verdict."""
+    status, note = edit_verdict(edit, record)
+    return {
+        "edit": plain_edit(edit, names),
+        "rationale": edit.rationale,
+        "finding_ids": edit.finding_ids,
+        **_display_fields(edit_display(edit, before, after)),
+        "status": status,
+        "note": note,
+    }
 
 
 def _named_findings(findings: list[Finding], keys: list[str]) -> list[dict]:
@@ -955,25 +1032,31 @@ def _named_findings(findings: list[Finding], keys: list[str]) -> list[dict]:
     return [{"key": key, "message": messages.get(key, key)} for key in keys]
 
 
-def _round_summary(record: RoundRecord, names: EditNames) -> dict:
-    """One round as the page shows it: what was proposed, what stuck, and what changed.
+def _round_summary(record: RoundRecord, names: EditNames, start: Drawing) -> tuple[dict, Drawing]:
+    """One round as the page shows it, and the drawing as it stands after the round.
 
     The edits are in plain English — the same sentences :mod:`draftcheck.redline` prints on
     page 2, built by the same function, so the screen and the PDF can never word a
     correction differently. ``corrections.json`` keeps the id-carrying form, which is what
     is wanted when you are reading the file rather than the drawing.
+
+    The report keeps each round's edits but not the drawing between them, so the edits are
+    applied again here, one at a time from ``start``, to read every edit's before and after
+    off the drawing exactly as it was either side of it. ``apply_edits`` is deterministic,
+    so this lands on the same drawing the loop did.
     """
-    return {
+    applied = []
+    current = start
+    for edit in record.applied:
+        changed, took, _ = apply_edits(current, [edit])
+        after = changed if took else current
+        applied.append(_applied_summary(edit, names, record, current, after))
+        current = after
+    summary = {
         "round": record.number,
-        "applied": [
-            {
-                "edit": plain_edit(edit, names),
-                "rationale": edit.rationale,
-                "finding_ids": edit.finding_ids,
-            }
-            for edit in record.applied
-        ],
-        "rejected": [_rejected_summary(item, names) for item in record.rejected],
+        "applied": applied,
+        # Refused edits are shown against the drawing as the round found it.
+        "rejected": [_rejected_summary(item, names, start) for item in record.rejected],
         "findings_before": len(record.findings_before),
         "findings_after": len(record.findings_after),
         # Resolved findings are gone by the end of the round, so their wording comes from
@@ -986,15 +1069,46 @@ def _round_summary(record: RoundRecord, names: EditNames) -> dict:
         "fell_back": record.fell_back,
         "fallback_reason": record.fallback_reason,
     }
+    return summary, current
+
+
+def _outcomes(report: CorrectionReport, rounds: list[dict]) -> list[dict]:
+    """Each original finding's verdict, plus whether a designer still has to act on it.
+
+    ``outcome`` is ``"unresolved"`` when the rules still report the finding, ``"held"``
+    when it cleared but only through an edit a designer has to place, and ``"verified"``
+    otherwise. The first comes straight from ``report.statuses``; the split of resolved
+    into the other two follows each applied edit's own status.
+    """
+    held = {
+        key
+        for summary in rounds
+        for edit in summary["applied"]
+        if edit["status"] == "held"
+        for key in edit["finding_ids"]
+    }
+    entries = []
+    for entry in report.to_dict()["status"]:
+        if entry["status"] != "resolved":
+            outcome = "unresolved"
+        else:
+            outcome = "held" if entry["finding"] in held else "verified"
+        entries.append({**entry, "outcome": outcome})
+    return entries
 
 
 def _summarize(report: CorrectionReport) -> dict:
     """The correction report as the UI needs it: rounds, edits, and the verdicts."""
     payload = report.to_dict()
     names = EditNames(report)
+    rounds = []
+    current = report.original_drawing
+    for record in report.rounds:
+        summary, current = _round_summary(record, names, current)
+        rounds.append(summary)
     return {
-        "rounds": [_round_summary(record, names) for record in report.rounds],
-        "status": payload["status"],
+        "rounds": rounds,
+        "status": _outcomes(report, rounds),
         "final_findings": payload["final_findings"],
         "final_drawing": payload["final_drawing"],
         "applied_count": sum(len(record.applied) for record in report.rounds),

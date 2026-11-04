@@ -27,10 +27,11 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
+from pydantic import ValidationError
 
 from draftcheck.agent import CorrectionReport
 from draftcheck.edits import AddDatum, AddDimension, Edit, RemoveDatumRef, SetField
-from draftcheck.schema import Characteristic, Finding, finding_key
+from draftcheck.schema import FCF, Characteristic, Dimension, Drawing, Finding, finding_key
 
 RED = (200, 30, 30)
 INK = (25, 25, 25)
@@ -436,6 +437,243 @@ def plain_edit(edit: Edit, names: EditNames) -> str:
     if isinstance(edit, AddDimension):
         return _plain_add_dimension(edit)
     return edit.describe()
+
+
+# ---- Short forms, for the page's diff lines and pen labels ----------------------------
+#
+# The page shows each correction twice: as a before/after pair in the Issues card, the way
+# the callout reads on the sheet, and as a two-word note written beside its cloud. Both
+# are worded here, beside ``plain_edit``, so the browser never builds a sentence of its own.
+
+#: The symbol each characteristic is printed with in a feature control frame.
+_CHARACTERISTIC_SYMBOLS = {
+    Characteristic.POSITION: "⌖",
+    Characteristic.FLATNESS: "⏥",
+    Characteristic.STRAIGHTNESS: "⏤",
+    Characteristic.CIRCULARITY: "○",
+    Characteristic.CYLINDRICITY: "⌭",
+    Characteristic.PERPENDICULARITY: "⟂",
+    Characteristic.PARALLELISM: "∥",
+    Characteristic.ANGULARITY: "∠",
+    Characteristic.PROFILE_LINE: "⌒",
+    Characteristic.PROFILE_SURFACE: "⌓",
+    Characteristic.CIRCULAR_RUNOUT: "↗",
+    Characteristic.TOTAL_RUNOUT: "⌰",
+    Characteristic.CONCENTRICITY: "◎",
+    Characteristic.SYMMETRY: "⌯",
+}
+
+#: Material condition modifiers as the circled letters a frame prints.
+_MODIFIER_SYMBOLS = {"MMC": "Ⓜ", "LMC": "Ⓛ"}
+
+#: What the "before" of an addition reads as: there was nothing there.
+NOTHING = "—"
+
+#: Fields whose new value is a ± band, so the pen label carries the sign.
+_PLUS_MINUS_FIELDS = ("tol_plus", "tol_minus", "general_tolerance")
+
+
+def short_fcf(frame: FCF) -> str:
+    """A frame the way it reads on the sheet, e.g. ``⌖ Ø0.25 Ⓜ | A | B | C``."""
+    symbol = _CHARACTERISTIC_SYMBOLS.get(frame.characteristic, frame.characteristic.value)
+    zone = "Ø" if frame.diameter_zone else ""
+    head = f"{symbol} {zone}{_number(frame.tolerance)}"
+    if frame.material_modifier in _MODIFIER_SYMBOLS:
+        head = f"{head} {_MODIFIER_SYMBOLS[frame.material_modifier]}"
+    refs = [
+        f"{ref.label} {_MODIFIER_SYMBOLS[ref.modifier]}"
+        if ref.modifier in _MODIFIER_SYMBOLS
+        else ref.label
+        for ref in frame.datum_refs
+    ]
+    return " | ".join([head, *refs])
+
+
+def short_dimension(dimension: Dimension) -> str:
+    """A dimension the way it reads on the sheet: ``2X Ø8 ±0.1``, ``[80]`` when basic."""
+    count = f"{dimension.quantity}X " if dimension.quantity > 1 else ""
+    diameter = "Ø" if dimension.feature_type == "diameter" else ""
+    size = f"{count}{diameter}{_number(dimension.value)}"
+    if dimension.is_basic:
+        return f"[{size}]"
+    if dimension.is_reference:
+        return f"({size})"
+    plus, minus = dimension.tol_plus, dimension.tol_minus
+    if plus is not None and plus == minus:
+        return f"{size} ±{_number(plus)}"
+    if plus is not None or minus is not None:
+        return f"{size} +{_number(plus or 0)}/−{_number(minus or 0)}"
+    return size
+
+
+def _short_drawing_field(drawing: Drawing, field: str) -> str:
+    """One of the drawing's own two values, as a short line."""
+    if field == "units":
+        return f"units {drawing.units.value}" if drawing.units else "no units"
+    tolerance = drawing.general_tolerance
+    if tolerance is not None and tolerance.linear_plus_minus is not None:
+        return f"general ±{_number(tolerance.linear_plus_minus)}"
+    return "no general tolerance"
+
+
+def _find_item(drawing: Drawing, list_name: str, item_id: str | None):
+    for item in getattr(drawing, list_name):
+        if item.id == item_id:
+            return item
+    return None
+
+
+#: Which list a ``set_field`` target lives in, and how an item of it is written short.
+_TARGETS = {
+    "fcf": ("fcfs", short_fcf),
+    "dimension": ("dimensions", short_dimension),
+    "datum": ("datums", lambda datum: f"datum {datum.label}"),
+}
+
+
+def edit_target_id(edit: Edit) -> str | None:
+    """The id of the item an edit changes, or ``None`` for an addition or the drawing."""
+    if isinstance(edit, RemoveDatumRef):
+        return edit.fcf_id
+    if isinstance(edit, SetField) and edit.target != "drawing":
+        return edit.id
+    return None
+
+
+def _short_item(drawing: Drawing, edit: Edit) -> str | None:
+    """The item ``edit`` touches as it reads in ``drawing``, or ``None`` if it is not there."""
+    if isinstance(edit, RemoveDatumRef):
+        frame = _find_item(drawing, "fcfs", edit.fcf_id)
+        return short_fcf(frame) if frame is not None else None
+    if isinstance(edit, SetField):
+        if edit.target == "drawing":
+            return _short_drawing_field(drawing, edit.field)
+        list_name, short = _TARGETS[edit.target]
+        item = _find_item(drawing, list_name, edit.id)
+        return short(item) if item is not None else None
+    return None
+
+
+def _proposed_item(drawing: Drawing, edit: Edit) -> str:
+    """What a *refused* edit would have made the item read, worked out on a copy.
+
+    A refused edit never reached the corrected drawing, so there is nothing to read its
+    "after" from. The page still shows what was asked for — struck through — so this
+    applies the one change to a copy of the item, re-validated, and writes that. If even
+    that cannot be read, the requested value is written as it was sent.
+    """
+    if isinstance(edit, RemoveDatumRef):
+        frame = _find_item(drawing, "fcfs", edit.fcf_id)
+        if frame is None:
+            return f"drop {edit.label.upper()}"
+        kept = [ref for ref in frame.datum_refs if ref.label != edit.label.upper()]
+        return short_fcf(frame.model_copy(update={"datum_refs": kept}))
+    if isinstance(edit, SetField):
+        fallback = f"{_FIELD_WORDS.get(edit.field, _words(edit.field))} {_plain_value(edit.value)}"
+        if edit.target == "drawing":
+            try:
+                changed = Drawing.model_validate({**drawing.model_dump(), edit.field: edit.value})
+            except ValidationError:
+                return fallback
+            return _short_drawing_field(changed, edit.field)
+        list_name, short = _TARGETS[edit.target]
+        item = _find_item(drawing, list_name, edit.id)
+        if item is None:
+            return fallback
+        try:
+            changed = type(item).model_validate({**item.model_dump(), edit.field: edit.value})
+        except ValidationError:
+            return fallback
+        return short(changed)
+    if isinstance(edit, AddDatum):
+        return f"datum {edit.label.upper()}"
+    if isinstance(edit, AddDimension):
+        try:
+            return short_dimension(Dimension.model_validate(edit.dimension))
+        except ValidationError:
+            return "a new dimension"
+    return NOTHING
+
+
+def _added_dimension(before: Drawing, after: Drawing) -> Dimension | None:
+    """The dimension that is in ``after`` and was not in ``before``."""
+    was = {dimension.id for dimension in before.dimensions}
+    for dimension in after.dimensions:
+        if dimension.id not in was:
+            return dimension
+    return None
+
+
+def pen_label(edit: Edit, drawing: Drawing) -> str:
+    """Two or three words a checker would write beside the cloud, e.g. ``drop C``.
+
+    ``drawing`` is the drawing the edit was made to, for the one case (a frame's tolerance)
+    where how a value is written depends on the item it lands on.
+    """
+    if isinstance(edit, RemoveDatumRef):
+        return f"drop {edit.label.upper()}"
+    if isinstance(edit, AddDatum):
+        return f"add datum {edit.label.upper()}"
+    if isinstance(edit, AddDimension):
+        value = edit.dimension.get("value")
+        return f"add {_number(value)}" if isinstance(value, (int, float)) else "add dimension"
+
+    field, value = edit.field, edit.value
+    if field in _PLUS_MINUS_FIELDS and value is not None:
+        written = _plain_value(value)
+        return written if written.startswith("±") else f"±{written}"
+    if field == "tolerance" and isinstance(value, (int, float)):
+        # A frame's zone is a width, not a band either side, so it carries no ±.
+        frame = _find_item(drawing, "fcfs", edit.id)
+        zone = "Ø" if frame is not None and frame.diameter_zone else ""
+        return f"{zone}{_number(value)}"
+    if field == "value":
+        return _plain_value(value)
+    if field in ("is_basic", "is_reference"):
+        kind = "basic" if field == "is_basic" else "ref"
+        return f"make {kind}" if value else f"not {kind}"
+    if field == "material_modifier":
+        return str(value).upper() if value else "no modifier"
+    if field == "units" and value:
+        return f"units {value}"
+    words = _FIELD_WORDS.get(field, _words(field)).split()
+    verb = "clear" if value is None else "set"
+    return " ".join([verb, *words][:3])
+
+
+@dataclass(frozen=True)
+class EditDisplay:
+    """One edit as the page draws it: the callout before and after, and the pen note."""
+
+    before: str
+    after: str
+    pen: str
+    #: The item the edit changes, so the page can put the pen note beside its box.
+    target_id: str | None
+
+
+def edit_display(edit: Edit, before: Drawing, after: Drawing | None) -> EditDisplay:
+    """Short before/after strings for one edit, read off the drawing either side of it.
+
+    ``after`` is the drawing with this edit applied, or ``None`` for an edit the guards
+    refused, whose "after" is then what it asked for (:func:`_proposed_item`).
+    """
+    was = _short_item(before, edit)
+    if after is None:
+        now = _proposed_item(before, edit)
+    elif isinstance(edit, AddDimension):
+        added = _added_dimension(before, after)
+        now = short_dimension(added) if added is not None else _proposed_item(before, edit)
+    elif isinstance(edit, AddDatum):
+        now = f"datum {edit.label.upper()}"
+    else:
+        now = _short_item(after, edit) or _proposed_item(before, edit)
+    return EditDisplay(
+        before=was if was is not None else NOTHING,
+        after=now,
+        pen=pen_label(edit, before),
+        target_id=edit_target_id(edit),
+    )
 
 
 class _Column:

@@ -98,13 +98,29 @@
               </div>
             </div>
 
+            <!-- While the model reads: a sheet with the scan band sweeping over it. The
+                 rendered page only exists once the reply arrives, so this shows the
+                 picked image itself when it is one, and a blank sheet for a PDF. -->
+            <div id="reading-sheet" class="paper reading-sheet" hidden>
+              <img id="reading-preview" alt="" hidden />
+              <p id="reading-label" class="reading-label"></p>
+              <svg id="reading-overlay" class="overlay" aria-hidden="true"></svg>
+            </div>
+
             <!-- The page, as paper. app.js sizes #paper to fit the stage; the SVG covers
                  exactly the image and is in image pixels (viewBox = natural size). -->
             <div id="paper" class="paper" hidden>
               <img id="page-image" alt="The uploaded drawing, page 1, as rendered." />
-              <svg id="overlay" class="overlay" aria-hidden="true">
-                <g id="boxes"></g>
-                <g id="markup"></g>
+              <svg id="overlay" class="overlay">
+                <!-- The model's boxes mirror the table rows, which carry the same
+                     information for a screen reader; the clouds are real buttons. -->
+                <g id="boxes" aria-hidden="true"></g>
+                <g id="markup">
+                  <g id="clouds" aria-label="Issues on the drawing"></g>
+                  <g id="pen-notes" aria-hidden="true"></g>
+                  <g id="stamp-layer"></g>
+                  <g id="scan-layer" aria-hidden="true"></g>
+                </g>
               </svg>
             </div>
           </div>
@@ -239,6 +255,30 @@
               <div id="issues-empty" class="pane-empty">
                 <p>No checks run yet. Confirm the extracted tables to run the rules.</p>
               </div>
+
+              <!-- Found, then each round of the correction loop, filled as they replay. -->
+              <div id="rounds-strip" class="rounds-strip" role="group" aria-label="Correction rounds" hidden>
+                <div class="round-cell" data-cell="0">
+                  <p class="strip-label">Found</p>
+                  <p class="strip-number">–</p>
+                  <p class="strip-sub">Waiting</p>
+                </div>
+                <div class="round-cell" data-cell="1">
+                  <p class="strip-label">Round 1</p>
+                  <p class="strip-number">–</p>
+                  <p class="strip-sub">Waiting</p>
+                </div>
+                <div class="round-cell" data-cell="2">
+                  <p class="strip-label">Round 2</p>
+                  <p class="strip-number">–</p>
+                  <p class="strip-sub">Waiting</p>
+                </div>
+                <div class="round-cell" data-cell="3">
+                  <p class="strip-label">Round 3</p>
+                  <p class="strip-number">–</p>
+                  <p class="strip-sub">Waiting</p>
+                </div>
+              </div>
               <p id="findings-none" class="pane-empty is-ok" hidden>No issues found.</p>
               <ol id="findings-list" class="findings-list"></ol>
             </div>
@@ -246,8 +286,8 @@
             <!-- Corrections -->
             <div id="pane-corrections" class="pane" role="tabpanel" aria-labelledby="tab-corrections" hidden>
               <p class="intro">
-                What the agent proposed, round by round, and what the rules said about each
-                edit. Every verdict comes from re-running the rules, not from the model.
+                Each correction, as the drawing read before and after it. Every verdict comes
+                from re-running the rules, not from the model.
               </p>
 
               <div id="corrections-empty" class="pane-empty">
@@ -256,19 +296,34 @@
 
               <div id="agent-panel" class="agent" hidden>
                 <p id="agent-status" class="check-status" hidden></p>
-                <ol id="agent-rounds" class="rounds"></ol>
+                <p id="corrections-intro" class="corrections-intro"></p>
 
-                <h3>What became of each finding</h3>
-                <ul id="agent-verdicts" class="verdicts"></ul>
+                <div class="table-scroll">
+                  <table class="data corrections-table">
+                    <thead>
+                      <tr>
+                        <th scope="col"><span class="visually-hidden">Issue</span><span aria-hidden="true">Δ</span></th>
+                        <th scope="col">Before</th>
+                        <th scope="col">After</th>
+                        <th scope="col">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody id="corrections-rows"></tbody>
+                  </table>
+                </div>
                 <p class="verdict-note">Decided by re-running the rules, not by the model.</p>
 
-                <h3>Redline</h3>
-                <figure class="redline">
-                  <img id="redline-image" alt="The drawing with every finding marked in red." />
-                </figure>
-                <p class="redline-actions">
-                  <a id="redline-pdf" class="btn-quiet" href="#" download="redline.pdf">Download redline PDF</a>
-                </p>
+                <div class="exports">
+                  <a id="redline-pdf" class="export-card" href="#" download="redline.pdf">
+                    <span class="export-title">Download redlined PDF</span>
+                    <span class="export-sub">The drawing with every finding marked, plus the corrections page</span>
+                  </a>
+                  <button id="export-csv" class="export-card" type="button">
+                    <span class="export-title">Download correction list (CSV)</span>
+                    <span class="export-sub">One row per issue: rule, zone, severity, before, after, status, source</span>
+                  </button>
+                </div>
+
                 <p class="redline-note">
                   Proposed corrections are verified by DraftCheck's rule engine and require
                   engineer review.
@@ -294,6 +349,7 @@
     <!-- Toasts: errors and short confirmations. -->
     <div id="toasts" class="toasts" aria-live="polite"></div>
 
+    <script src="/sheet.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>
