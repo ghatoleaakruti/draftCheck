@@ -9,35 +9,47 @@ requests, and the fact that the data the user confirms is the data the rules run
 rules themselves, the loop, and the redline have their own tests.
 """
 
+import dataclasses
 import json
 import logging
 import os
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
+from openai import APIConnectionError, BadRequestError, InternalServerError
 
 from draftcheck.api import (
     DEFAULT_MAX_SIDE,
     DEFAULT_MODEL_TIMEOUT_S,
     DEFAULT_RENDER_DPI,
     DEMO_ENV_VAR,
+    ENV_FALLBACK_PROVIDER,
     ENV_MAX_SIDE,
     ENV_MODEL_TIMEOUT,
+    ENV_PRIMARY_TIMEOUT,
     ENV_RENDER_DPI,
+    Fallback,
+    FallbackPolicy,
     GuardedClient,
     app,
+    fallback_policy,
     get_cleaner,
     get_client_factory,
     get_disconnect_probe,
+    get_fallback_policy,
     get_limiter,
     get_model_timeout,
     get_runs_root,
     model_timeout_s,
     render_settings,
+    stamp_model_name,
 )
+from draftcheck.config import ConfigError
 from draftcheck.limits import LIMIT_MESSAGE, Cleaner, Limits, UsageLimiter
 from draftcheck.llm_client import MODEL_TIMEOUT_MESSAGE, JSONChatResult, ModelCancelled, Usage
 from draftcheck.prompts import EXTRACTION_SYSTEM
@@ -47,6 +59,9 @@ DRAWING = REPO_ROOT / "samples" / "generated" / "plate_001.pdf"
 FIXTURE_JSON = REPO_ROOT / "tests" / "fixtures" / "plate_001.model.json"
 
 UNKNOWN_RUN = "00000000-0000-4000-8000-000000000000"
+
+#: The fallback switched off, for the tests that are not about it.
+NO_FALLBACK = FallbackPolicy(provider=None, primary_timeout_s=45)
 
 
 class FakeClient:
@@ -100,6 +115,9 @@ def make_client(tmp_path: Path, fake: FakeClient, limiter: UsageLimiter, cleaner
     app.dependency_overrides[get_client_factory] = lambda: (lambda provider=None: fake)
     app.dependency_overrides[get_limiter] = lambda: limiter
     app.dependency_overrides[get_cleaner] = lambda: cleaner
+    # Off unless a test turns it on: these tests are about other things, and a fallback to
+    # the same fake would only blur what they check. The fallback has its own tests below.
+    app.dependency_overrides.setdefault(get_fallback_policy, lambda: NO_FALLBACK)
     return TestClient(app)
 
 
@@ -313,6 +331,9 @@ def test_meta_json_never_holds_a_key(client: TestClient, tmp_path):
         "source",
         "provider",
         "model",
+        "answered_provider",
+        "fell_back",
+        "fallback_reason",
         "latency_s",
         "attempts",
         "created",
@@ -1153,3 +1174,297 @@ def test_a_cancelled_request_does_not_slow_the_next_one(tmp_path: Path) -> None:
     assert elapsed < 2
     assert len(clients) == 2
     assert not leaked, "the abort leaked into the next request's client"
+
+
+# ---- Automatic fallback: Baseten stalls or fails, Meta answers --------------------
+
+
+def test_fallback_policy_defaults_to_meta_after_45_seconds(monkeypatch) -> None:
+    monkeypatch.delenv(ENV_FALLBACK_PROVIDER, raising=False)
+    monkeypatch.delenv(ENV_PRIMARY_TIMEOUT, raising=False)
+    assert fallback_policy() == FallbackPolicy(provider="meta", primary_timeout_s=45)
+
+
+def test_an_empty_fallback_provider_turns_the_fallback_off(monkeypatch) -> None:
+    monkeypatch.setenv(ENV_FALLBACK_PROVIDER, "")
+    monkeypatch.setenv(ENV_PRIMARY_TIMEOUT, "20")
+    assert fallback_policy() == FallbackPolicy(provider=None, primary_timeout_s=20)
+
+
+def _http_error(status: int) -> Exception:
+    """The error the OpenAI library raises for an HTTP status, built without a network."""
+    request = httpx.Request("POST", "https://provider.invalid/v1/chat/completions")
+    response = httpx.Response(status, request=request)
+    error_class = InternalServerError if status >= 500 else BadRequestError
+    return error_class(f"HTTP {status}", response=response, body=None)
+
+
+class ScriptedProvider(FakeClient):
+    """A fake provider whose calls follow a script, one step per call.
+
+    ``"ok"`` answers; ``"hang"`` waits until aborted (or the test ends) and then raises
+    ``ModelCancelled`` as the real client does; ``"5xx"``, ``"4xx"``, and ``"down"`` raise
+    the errors the OpenAI library raises for a server error, a refusal, and no connection.
+    After the script runs out, every call answers.
+    """
+
+    def __init__(self, name: str, model: str, *script: str, corrections=()) -> None:
+        super().__init__(extraction_data(), *corrections)
+        self.provider = SimpleNamespace(name=name)
+        self.model = model
+        self.script = list(script)
+        self.attempted = 0
+        self.in_call = threading.Event()
+        self.aborted = threading.Event()
+
+    def abort(self) -> None:
+        self.aborted.set()
+
+    def chat_json(self, system: str, user: str, images: list[bytes]) -> JSONChatResult:
+        self.attempted += 1
+        step = self.script.pop(0) if self.script else "ok"
+        if step == "hang":
+            self.in_call.set()
+            self.aborted.wait(timeout=10)
+            raise ModelCancelled()
+        if step == "5xx":
+            raise _http_error(503)
+        if step == "4xx":
+            raise _http_error(400)
+        if step == "down":
+            raise APIConnectionError(request=httpx.Request("POST", "https://provider.invalid"))
+        return dataclasses.replace(super().chat_json(system, user, images), model=self.model)
+
+
+BASETEN_MODEL = "meta-models/muse-spark-open-1026"
+META_MODEL = "muse-spark-1.2"
+
+
+@pytest.fixture
+def providers(tmp_path: Path):
+    """A TestClient with a scripted Baseten and a scripted Meta, and the fallback on.
+
+    Baseten gets a fraction of a second before the fallback; the normal limit, which the
+    fallback call runs under, is long enough that it never ends a test by itself.
+    """
+    made: dict = {}
+
+    def build(baseten_script=(), meta_script=(), corrections=(), policy=None):
+        made["baseten"] = ScriptedProvider(
+            "baseten", BASETEN_MODEL, *baseten_script, corrections=corrections
+        )
+        made["meta"] = ScriptedProvider("meta", META_MODEL, *meta_script, corrections=corrections)
+        made["asked_for"] = []
+        limiter = UsageLimiter(ROOMY)
+
+        def factory(provider=None):
+            name = provider or "baseten"
+            made["asked_for"].append(name)
+            return made[name]
+
+        app.dependency_overrides[get_fallback_policy] = lambda: policy or FallbackPolicy(
+            provider="meta", primary_timeout_s=SHORT_LIMIT_S
+        )
+        app.dependency_overrides[get_model_timeout] = lambda: 5.0
+        test_client = make_client(tmp_path, FakeClient(extraction_data()), limiter, Cleaner(ROOMY))
+        app.dependency_overrides[get_client_factory] = lambda: factory
+        return test_client, made, limiter
+
+    yield build
+    for key in ("baseten", "meta"):
+        if key in made:
+            made[key].aborted.set()  # let any still-waiting fake go
+    app.dependency_overrides.clear()
+
+
+def test_a_stalled_baseten_call_falls_back_to_meta(providers, tmp_path, caplog) -> None:
+    test_client, made, limiter = providers(baseten_script=["hang"])
+    started = time.perf_counter()
+    with caplog.at_level(logging.INFO, logger="draftcheck"), test_client:
+        body = upload(test_client)
+    assert time.perf_counter() - started < 5  # ended by the short limit, not the fake
+
+    assert body["model"] == META_MODEL
+    assert body["answered_provider"] == "meta"
+    assert body["fell_back"] is True
+    assert body["fallback_reason"] == "timeout"
+    meta = json.loads((tmp_path / body["run_id"] / "meta.json").read_text())
+    assert meta["model"] == META_MODEL
+    assert meta["fell_back"] is True
+    assert meta["fallback_reason"] == "timeout"
+    # The run still belongs to Baseten, so the fix tries Baseten first again.
+    assert meta["provider"] == "baseten"
+    assert any(
+        r.getMessage().startswith("fallback: baseten -> meta after ")
+        and r.getMessage().endswith(" s (timeout)")
+        for r in caplog.records
+    )
+    # The upload's own call plus the fallback.
+    assert limiter.model_calls_today() == 2
+
+
+def test_a_baseten_server_error_falls_back_to_meta(providers) -> None:
+    test_client, made, limiter = providers(baseten_script=["5xx"])
+    with test_client:
+        body = upload(test_client)
+    assert body["fell_back"] is True
+    assert body["fallback_reason"] == "HTTP 503"
+    assert body["model"] == META_MODEL
+    assert limiter.model_calls_today() == 2
+
+
+def test_a_baseten_connection_error_falls_back_to_meta(providers) -> None:
+    test_client, _, _ = providers(baseten_script=["down"])
+    with test_client:
+        body = upload(test_client)
+    assert body["fell_back"] is True
+    assert body["fallback_reason"] == "connection error"
+
+
+def test_a_baseten_answer_needs_no_fallback(providers) -> None:
+    test_client, made, limiter = providers()
+    with test_client:
+        body = upload(test_client)
+    assert body["model"] == BASETEN_MODEL
+    assert body["answered_provider"] == "baseten"
+    assert body["fell_back"] is False
+    assert body["fallback_reason"] is None
+    assert made["asked_for"] == ["baseten"]  # Meta's client was never even built
+    assert limiter.model_calls_today() == 1
+
+
+def test_a_baseten_refusal_is_not_retried(providers) -> None:
+    """A 4xx means our request was refused. Meta would refuse it too, so it is not asked."""
+    test_client, made, limiter = providers(baseten_script=["4xx"])
+    with test_client, DRAWING.open("rb") as handle:
+        response = test_client.post(
+            "/api/runs", files={"file": (DRAWING.name, handle, "application/pdf")}
+        )
+    assert response.status_code == 502
+    assert "HTTP 400" in response.json()["detail"]
+    assert made["meta"].attempted == 0
+    assert made["asked_for"] == ["baseten"]
+    assert limiter.model_calls_today() == 1
+
+
+def test_with_the_fallback_off_a_stalled_call_is_504_as_before(providers) -> None:
+    test_client, made, _ = providers(
+        baseten_script=["hang"], policy=FallbackPolicy(provider=None, primary_timeout_s=45)
+    )
+    app.dependency_overrides[get_model_timeout] = lambda: SHORT_LIMIT_S
+    with test_client, DRAWING.open("rb") as handle:
+        response = test_client.post(
+            "/api/runs", files={"file": (DRAWING.name, handle, "application/pdf")}
+        )
+    assert response.status_code == 504
+    assert response.json()["detail"] == MODEL_TIMEOUT_MESSAGE
+    assert made["meta"].attempted == 0
+
+
+def test_picking_meta_means_no_fallback(providers) -> None:
+    test_client, made, _ = providers(meta_script=["hang"])
+    app.dependency_overrides[get_model_timeout] = lambda: SHORT_LIMIT_S
+    with test_client, DRAWING.open("rb") as handle:
+        response = test_client.post(
+            "/api/runs",
+            files={"file": (DRAWING.name, handle, "application/pdf")},
+            data={"provider": "meta"},
+        )
+    assert response.status_code == 504
+    assert made["baseten"].attempted == 0
+
+
+def test_a_backup_that_cannot_be_built_returns_the_original_error(providers) -> None:
+    test_client, made, _ = providers(baseten_script=["5xx"])
+
+    def factory(provider=None):
+        if provider == "meta":
+            raise ConfigError("Missing required environment variable: META_API_KEY.")
+        return made["baseten"]
+
+    app.dependency_overrides[get_client_factory] = lambda: factory
+    with test_client, DRAWING.open("rb") as handle:
+        response = test_client.post(
+            "/api/runs", files={"file": (DRAWING.name, handle, "application/pdf")}
+        )
+    assert response.status_code == 502
+    assert "HTTP 503" in response.json()["detail"]
+
+
+def test_cancel_during_the_fallback_call_aborts_it(providers, tmp_path: Path) -> None:
+    test_client, made, _ = providers(baseten_script=["hang"], meta_script=["hang"])
+
+    async def gone_once_meta_is_busy(request) -> bool:
+        return made["meta"].in_call.is_set()
+
+    app.dependency_overrides[get_disconnect_probe] = lambda: gone_once_meta_is_busy
+    started = time.perf_counter()
+    with test_client:
+        response = upload_response(test_client)
+
+    assert response.status_code == 499
+    assert made["meta"].aborted.is_set(), "the fallback call was left running"
+    assert made["baseten"].aborted.is_set()
+    assert time.perf_counter() - started < 5
+    assert list(tmp_path.iterdir()) == []  # a cancelled upload leaves nothing
+
+
+def test_an_aborted_guard_refuses_to_build_the_backup() -> None:
+    """A cancel that lands while Baseten is failing stops the fallback before it starts."""
+    baseten = ScriptedProvider("baseten", BASETEN_MODEL, "5xx")
+    meta = ScriptedProvider("meta", META_MODEL)
+    guard = None
+
+    def build_meta():
+        guard.abort()  # the browser leaves just as the backup is being made
+        return meta
+
+    guard = GuardedClient(
+        baseten,
+        5,
+        provider="baseten",
+        fallback=Fallback(provider="meta", build=build_meta, primary_seconds=5),
+    )
+    with pytest.raises(ModelCancelled):
+        guard.chat_json(EXTRACTION_SYSTEM, "USER", [])
+    assert meta.attempted == 0
+    assert meta.aborted.is_set()
+
+
+def test_each_fix_round_falls_back_on_its_own(providers, tmp_path: Path) -> None:
+    # Call 1 is the extraction (Baseten answers), call 2 is round one (Baseten stalls, so
+    # Meta answers it), and rounds two and three go to Baseten first again — and it answers.
+    # Every round proposes nothing, so the GDT-001 error keeps the loop going to round three.
+    test_client, made, limiter = providers(baseten_script=["ok", "hang"])
+    with test_client:
+        run_id = _checked_run(test_client)
+        assert limiter.model_calls_today() == 1
+        response = test_client.post(f"/api/runs/{run_id}/fix")
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    rounds = body["rounds"]
+    assert [r["model"] for r in rounds] == [META_MODEL, BASETEN_MODEL, BASETEN_MODEL]
+    assert [r["fell_back"] for r in rounds] == [True, False, False]
+    assert rounds[0]["fallback_reason"] == "timeout"
+    assert rounds[1]["fallback_reason"] is None
+    assert body["fell_back"] is True
+    assert body["model"] == BASETEN_MODEL
+
+    saved = json.loads((tmp_path / run_id / "corrections.json").read_text())
+    assert [r["provider"] for r in saved["rounds"]] == ["meta", "baseten", "baseten"]
+
+    # Extraction 1; fix claim 1, two more rounds, and the fallback: 5 in all.
+    assert limiter.model_calls_today() == 5
+
+
+def test_the_stamp_names_every_model_that_answered() -> None:
+    record = SimpleNamespace(model=META_MODEL, fell_back=True)
+    report = SimpleNamespace(rounds=[record, SimpleNamespace(model=BASETEN_MODEL, fell_back=False)])
+    name = stamp_model_name({"model": BASETEN_MODEL, "fell_back": False}, report)
+    assert name == f"{BASETEN_MODEL} + {META_MODEL} (fallback)"
+
+
+def test_the_stamp_is_unchanged_when_nothing_fell_back() -> None:
+    report = SimpleNamespace(rounds=[SimpleNamespace(model=BASETEN_MODEL, fell_back=False)])
+    assert stamp_model_name({"model": BASETEN_MODEL}, report) == BASETEN_MODEL

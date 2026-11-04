@@ -42,6 +42,10 @@ class ExtractionResult:
     model: str
     usage: Usage
     attempts: int
+    #: Who answered, copied from the model call: see :class:`JSONChatResult`.
+    provider: str | None = None
+    fell_back: bool = False
+    fallback_reason: str | None = None
 
 
 def extract(path: str | Path, client: SupportsChatJSON, dpi: int = 200) -> ExtractionResult:
@@ -89,6 +93,9 @@ def extract_page(png_bytes: bytes, client: SupportsChatJSON) -> ExtractionResult
         model=result.model,
         usage=result.usage,
         attempts=result.attempts,
+        provider=getattr(result, "provider", None),
+        fell_back=bool(getattr(result, "fell_back", False)),
+        fallback_reason=getattr(result, "fallback_reason", None),
     )
 
 

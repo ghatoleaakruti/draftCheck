@@ -42,6 +42,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -49,11 +50,12 @@ from typing import Annotated, Any
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from openai import APIConnectionError, APIStatusError, APITimeoutError
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from draftcheck.agent import CorrectionReport, RoundRecord, correct
-from draftcheck.config import SUPPORTED_PROVIDERS, ConfigError, get_provider
+from draftcheck.config import DEFAULT_PROVIDER, SUPPORTED_PROVIDERS, ConfigError, get_provider
 from draftcheck.edits import RejectedEdit, parse_edit
 from draftcheck.limits import Cleaner, LimitExceeded, Limits, UsageLimiter, client_ip
 from draftcheck.llm_client import (
@@ -162,6 +164,75 @@ def get_model_timeout() -> float:
     return model_timeout_s()
 
 
+#: The automatic fallback. Muse Spark Open on Baseten stays the default provider; when one
+#: of its calls stalls or the service is down, the same call is sent once to the provider
+#: named here instead. An empty value turns the fallback off.
+ENV_FALLBACK_PROVIDER = "DRAFTCHECK_FALLBACK_PROVIDER"
+DEFAULT_FALLBACK_PROVIDER = "meta"
+
+#: How long Baseten gets before the fallback is tried. Shorter than the normal limit so a
+#: stalled call costs 45 s of waiting rather than 90 before somebody else is asked.
+ENV_PRIMARY_TIMEOUT = "DRAFTCHECK_PRIMARY_TIMEOUT_SECONDS"
+DEFAULT_PRIMARY_TIMEOUT_S = 45
+
+#: The only provider that falls back. Somebody who picks Meta has picked it on purpose.
+FALLS_BACK_FROM = "baseten"
+
+
+@dataclass(frozen=True)
+class FallbackPolicy:
+    """Whether model calls fall back, to whom, and how long the first provider gets."""
+
+    #: The provider to retry on, or ``None`` for no fallback at all.
+    provider: str | None
+    primary_timeout_s: float
+
+
+def fallback_policy() -> FallbackPolicy:
+    """The fallback settings, read from the environment on every request."""
+    raw = os.environ.get(ENV_FALLBACK_PROVIDER)
+    name = (DEFAULT_FALLBACK_PROVIDER if raw is None else raw).strip().lower()
+    return FallbackPolicy(
+        provider=name or None,
+        primary_timeout_s=float(_positive_int_env(ENV_PRIMARY_TIMEOUT, DEFAULT_PRIMARY_TIMEOUT_S)),
+    )
+
+
+def get_fallback_policy() -> FallbackPolicy:
+    """The fallback settings, as a dependency so tests can switch it and shorten it."""
+    return fallback_policy()
+
+
+def outage_reason(exc: BaseException) -> str | None:
+    """A short reason if ``exc`` means the provider is not answering, else ``None``.
+
+    Only an outage is worth asking someone else: no answer in time, no connection, or the
+    provider's own server failing (5xx). A 4xx means *our* request was refused, and a reply
+    that is not JSON means the model did answer; neither would go better elsewhere, and
+    retrying them would hide a real problem. A cancel is never retried — nobody is waiting.
+    """
+    if isinstance(exc, ModelTimeout | APITimeoutError):
+        return "timeout"
+    if isinstance(exc, APIConnectionError):
+        return "connection error"
+    if isinstance(exc, APIStatusError) and exc.status_code >= 500:
+        return f"HTTP {exc.status_code}"
+    return None
+
+
+@dataclass(frozen=True)
+class Fallback:
+    """Everything :class:`GuardedClient` needs to retry a call on a backup provider."""
+
+    #: The backup provider's name, for the log and the result.
+    provider: str
+    #: Builds the backup client. Called only when a fallback actually happens, so a missing
+    #: Meta key costs nothing until the day Baseten fails.
+    build: Callable[[], SupportsChatJSON]
+    #: How long the first provider gets before the backup is asked.
+    primary_seconds: float
+
+
 class GuardedClient:
     """A client whose every ``chat_json`` call has a time limit and can be cancelled.
 
@@ -178,48 +249,97 @@ class GuardedClient:
     once. Every later call raises it before it starts, which is what stops the correction
     loop before its next round.
 
+    **Fallback.** When given a :class:`Fallback`, the first provider gets only
+    ``primary_seconds``. If it runs out of time or is down (:func:`outage_reason`), the same
+    call is sent once to the backup under the normal ``seconds`` limit. Each call decides
+    this on its own: one round of the correction loop falling back does not move the next
+    round off Baseten. The result says who answered; ``fallback_calls`` counts the extra
+    calls, so the daily budget can be charged for them.
+
     The helper thread is a daemon, so it never holds up the server shutting down.
     """
 
     #: How often a waiting call looks to see whether it has been cancelled.
     POLL_S = 0.05
 
-    def __init__(self, inner: SupportsChatJSON, seconds: float) -> None:
+    def __init__(
+        self,
+        inner: SupportsChatJSON,
+        seconds: float,
+        *,
+        provider: str | None = None,
+        fallback: Fallback | None = None,
+    ) -> None:
         self._inner = inner
         self._seconds = seconds
+        self._provider = provider
+        self._fallback = fallback
+        self._backup: SupportsChatJSON | None = None
+        self._backup_lock = threading.Lock()
         self._cancelled = threading.Event()
+        #: How many calls were sent a second time, to the backup.
+        self.fallback_calls = 0
 
     @property
     def cancelled(self) -> bool:
         return self._cancelled.is_set()
 
     def abort(self) -> None:
-        """Stop the call in flight, if any, and every call after it. Any thread."""
-        self._cancelled.set()
-        abort = getattr(self._inner, "abort", None)
-        if callable(abort):
-            abort()
+        """Stop the call in flight, if any, and every call after it. Any thread.
 
-    def chat_json(self, system: str, user: str, images: list[bytes]) -> JSONChatResult:
+        Both clients are told: whichever one is mid-call — Baseten, or the backup that
+        took over from it — closes its request.
+        """
+        self._cancelled.set()
+        with self._backup_lock:
+            clients = [self._inner, self._backup]
+        for client in clients:
+            abort = getattr(client, "abort", None)
+            if callable(abort):
+                abort()
+
+    def _backup_client(self) -> SupportsChatJSON:
+        """The backup client, built the first time it is needed and reused after that."""
+        assert self._fallback is not None  # noqa: S101 - only called with a fallback set
+        with self._backup_lock:
+            backup = self._backup
+        if backup is None:
+            # Built outside the lock, so an abort() arriving meanwhile is never held up.
+            # Only this request's worker thread builds it, so it is built at most once.
+            backup = self._fallback.build()
+            with self._backup_lock:
+                self._backup = backup
+        # A cancel that arrived while the backup was being built never reached it.
+        if self.cancelled:
+            abort = getattr(backup, "abort", None)
+            if callable(abort):
+                abort()
+            raise ModelCancelled()
+        return backup
+
+    def _run(
+        self, client: SupportsChatJSON, seconds: float, system: str, user: str, images: list[bytes]
+    ) -> JSONChatResult:
+        """One call on ``client`` under a wall-clock limit, abandoned on a cancel."""
         if self.cancelled:
             raise ModelCancelled()
         outcome: dict[str, Any] = {}
 
         def call() -> None:
             try:
-                outcome["result"] = self._inner.chat_json(system, user, images)
+                outcome["result"] = client.chat_json(system, user, images)
             except BaseException as exc:  # noqa: BLE001 - handed back to the caller below
                 outcome["error"] = exc
 
         worker = threading.Thread(target=call, name="model-call", daemon=True)
         worker.start()
-        deadline = time.monotonic() + self._seconds
+        deadline = time.monotonic() + seconds
         while worker.is_alive():
             if self.cancelled:
                 raise ModelCancelled()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                logger.info("model call timed out after %.0f s", self._seconds)
+                logger.info("model call timed out after %.0f s", seconds)
                 raise ModelTimeout()
             worker.join(min(remaining, self.POLL_S))
         # A reply that lands after the cancel is dropped like one that lands after the limit.
@@ -228,6 +348,42 @@ class GuardedClient:
         if "error" in outcome:
             raise outcome["error"]
         return outcome["result"]
+
+    def chat_json(self, system: str, user: str, images: list[bytes]) -> JSONChatResult:
+        fallback = self._fallback
+        if fallback is None:
+            result = self._run(self._inner, self._seconds, system, user, images)
+            return replace(result, provider=self._provider, fell_back=False)
+
+        started = time.monotonic()
+        try:
+            result = self._run(self._inner, fallback.primary_seconds, system, user, images)
+        except Exception as exc:
+            reason = outage_reason(exc)
+            if reason is None:
+                raise
+            try:
+                backup = self._backup_client()
+            except ConfigError:
+                # No usable backup (its key is not set, say). Say so, and report the
+                # original failure exactly as if there had been no fallback.
+                logger.warning(
+                    "fallback: %s -> %s not configured", self._provider, fallback.provider
+                )
+                raise exc from None
+            logger.info(
+                "fallback: %s -> %s after %.0f s (%s)",
+                self._provider,
+                fallback.provider,
+                time.monotonic() - started,
+                reason,
+            )
+            self.fallback_calls += 1
+            result = self._run(backup, self._seconds, system, user, images)
+            return replace(
+                result, provider=fallback.provider, fell_back=True, fallback_reason=reason
+            )
+        return replace(result, provider=self._provider, fell_back=False)
 
 
 def build_client(provider: str | None = None) -> SupportsChatJSON:
@@ -238,6 +394,45 @@ def build_client(provider: str | None = None) -> SupportsChatJSON:
     ``abortable`` lets :meth:`GuardedClient.abort` close a request whose browser has gone.
     """
     return LLMClient(provider=get_provider(provider), timeout_s=model_timeout_s(), abortable=True)
+
+
+def _provider_of(client: object, requested: str | None) -> str:
+    """The provider a request's client talks to: as asked, as built, or the default."""
+    if requested:
+        return requested
+    built = getattr(getattr(client, "provider", None), "name", None)
+    if built:
+        return built
+    return (os.environ.get("LLM_PROVIDER") or DEFAULT_PROVIDER).strip().lower()
+
+
+def guard_for(
+    client: SupportsChatJSON,
+    requested: str | None,
+    client_factory: ClientFactory,
+    timeout_s: float,
+    policy: FallbackPolicy,
+) -> GuardedClient:
+    """The guard one request's model calls go through, with a fallback when one applies.
+
+    Only Baseten falls back, only to a different provider, and only when one is set. The
+    first provider's limit never exceeds the normal one, so a short ``timeout_s`` (as in
+    the tests) is not outlived by a longer Baseten limit.
+    """
+    primary = _provider_of(client, requested)
+    backup = policy.provider
+    if primary != FALLS_BACK_FROM or not backup or backup == primary:
+        return GuardedClient(client, timeout_s, provider=primary)
+    return GuardedClient(
+        client,
+        timeout_s,
+        provider=primary,
+        fallback=Fallback(
+            provider=backup,
+            build=lambda: client_factory(backup),
+            primary_seconds=min(policy.primary_timeout_s, timeout_s),
+        ),
+    )
 
 
 def get_client_factory() -> ClientFactory:
@@ -388,6 +583,7 @@ Limiter = Annotated[UsageLimiter, Depends(get_limiter)]
 Cleanup = Annotated[Cleaner, Depends(get_cleaner)]
 Clients = Annotated[ClientFactory, Depends(get_client_factory)]
 ModelTimeoutS = Annotated[float, Depends(get_model_timeout)]
+FallbackSettings = Annotated[FallbackPolicy, Depends(get_fallback_policy)]
 Disconnects = Annotated[DisconnectProbe, Depends(get_disconnect_probe)]
 DrawingUpload = Annotated[UploadFile, File(description="A .pdf, .png, or .jpg drawing.")]
 ProviderField = Annotated[
@@ -541,6 +737,7 @@ async def create_run(
     limiter: Limiter,
     cleaner: Cleanup,
     timeout_s: ModelTimeoutS,
+    fallback: FallbackSettings,
     disconnected: Disconnects,
     provider: ProviderField = None,
 ) -> dict:
@@ -575,9 +772,10 @@ async def create_run(
         run_dir.rmdir()
         raise
 
+    guard: GuardedClient | None = None
     try:
         client = client_factory(provider_name)
-        guard = GuardedClient(client, timeout_s)
+        guard = guard_for(client, provider_name, client_factory, timeout_s, fallback)
         # This endpoint is async (it streams the upload), so anything slow called directly
         # here would stall the event loop — every other request, /healthz included, would
         # wait for the model. Render restarts an instance whose health check fails for 60 s,
@@ -606,6 +804,13 @@ async def create_run(
         raise HTTPException(
             status_code=502, detail=f"Extraction does not match the drawing schema: {exc}"
         ) from exc
+    except (APIStatusError, APIConnectionError) as exc:
+        raise HTTPException(status_code=502, detail=_provider_error(exc)) from exc
+    finally:
+        # The upload's claim paid for one call. A fallback was a second, whether or not it
+        # answered, so the day's budget is charged for it here on every way out.
+        if guard is not None:
+            limiter.record_model_calls(guard.fallback_calls)
 
     drawing = result.drawing.model_dump(mode="json")
     meta = {
@@ -613,6 +818,7 @@ async def create_run(
         "source": file.filename,
         "provider": provider_name or getattr(getattr(client, "provider", None), "name", None),
         "model": result.model,
+        **_answered_by(result),
         "latency_s": result.latency_s,
         "attempts": result.attempts,
         "created": datetime.now(UTC).isoformat(),
@@ -627,6 +833,7 @@ async def create_run(
         "drawing": drawing,
         "parse_issues": result.drawing.parse_issues,
         "model": result.model,
+        **_answered_by(result),
         "latency_s": result.latency_s,
         "attempts": result.attempts,
         "page_url": f"/api/runs/{run_id}/page.png",
@@ -726,6 +933,10 @@ def _round_summary(record: RoundRecord, names: EditNames) -> dict:
         "resolved": _named_findings(record.findings_before, record.resolved),
         "introduced": _named_findings(record.findings_after, record.introduced),
         "error": record.error,
+        "model": record.model,
+        "provider": record.provider,
+        "fell_back": record.fell_back,
+        "fallback_reason": record.fallback_reason,
     }
 
 
@@ -745,6 +956,43 @@ def _summarize(report: CorrectionReport) -> dict:
     }
 
 
+def _answered_by(result: ExtractionResult) -> dict:
+    """Who read the drawing, for the upload response and ``meta.json``.
+
+    ``model`` (beside this) is the model that answered. ``provider`` in ``meta.json`` stays
+    the one that was asked for, because it is what the fix uses — so a fallback during the
+    upload does not quietly move every later round off Baseten.
+    """
+    return {
+        "answered_provider": result.provider,
+        "fell_back": result.fell_back,
+        "fallback_reason": result.fallback_reason,
+    }
+
+
+def stamp_model_name(meta: dict, report: CorrectionReport) -> str | None:
+    """The model(s) that answered this run, for the redline's stamp.
+
+    The extraction's model and each round's, in order and without repeats, joined with
+    ``+``; ``(fallback)`` is added when any of those calls was answered by the backup.
+    """
+    names: list[str] = []
+    for name in [meta.get("model"), *(record.model for record in report.rounds)]:
+        if name and name not in names:
+            names.append(name)
+    if not names:
+        return None
+    fell_back = bool(meta.get("fell_back")) or any(r.fell_back for r in report.rounds)
+    return " + ".join(names) + (" (fallback)" if fell_back else "")
+
+
+def _provider_error(exc: APIStatusError | APIConnectionError) -> str:
+    """What the page is told when a provider refused the call. No body, no headers."""
+    if isinstance(exc, APIStatusError):
+        return f"The model provider refused the request (HTTP {exc.status_code})."
+    return "Could not reach the model provider."
+
+
 def _save_fix(run_dir: Path, report: CorrectionReport, page_png: bytes, meta: dict) -> None:
     """Write ``corrections.json`` and the two redline files. Slow; runs in a worker thread."""
     _write_json(run_dir / CORRECTIONS_JSON, report.to_dict())
@@ -755,7 +1003,7 @@ def _save_fix(run_dir: Path, report: CorrectionReport, page_png: bytes, meta: di
         page_png,
         report.original_findings,
         report,
-        model_name=meta.get("model"),
+        model_name=stamp_model_name(meta, report),
     )
     save_redline(pages, run_dir / REDLINE_PDF, run_dir / REDLINE_PNG)
 
@@ -771,6 +1019,7 @@ async def fix_run(
     client_factory: Clients,
     limiter: Limiter,
     timeout_s: ModelTimeoutS,
+    fallback: FallbackSettings,
     disconnected: Disconnects,
 ) -> dict:
     """Run the correction loop on the confirmed drawing and write the redline.
@@ -805,13 +1054,16 @@ async def fix_run(
     except ConfigError as exc:
         raise HTTPException(status_code=500, detail=f"Configuration error: {exc}") from exc
 
-    guard = GuardedClient(client, timeout_s)
+    guard = guard_for(client, meta.get("provider"), client_factory, timeout_s, fallback)
     try:
         report = await _unless_disconnected(
             request, disconnected, guard, "fix", correct, drawing, page_png, guard
         )
     except ClientGone:
         raise HTTPException(status_code=CANCELLED_STATUS, detail="Cancelled by client.") from None
+    finally:
+        # Every fallback was one more model call than the rounds alone account for.
+        limiter.record_model_calls(guard.fallback_calls)
 
     # The claim above paid for round one, which is all that could be known before the loop
     # ran. Each further round was another model call, so the day's budget is charged for
@@ -824,6 +1076,9 @@ async def fix_run(
     await run_in_threadpool(_save_fix, run_dir, report, page_png, meta)
 
     summary = _summarize(report)
+    answered = [record for record in report.rounds if record.model]
+    summary["model"] = answered[-1].model if answered else None
+    summary["fell_back"] = any(record.fell_back for record in report.rounds)
     summary["run_id"] = str(run_id)
     summary["redline_pdf_url"] = f"/api/runs/{run_id}/redline.pdf"
     summary["redline_png_url"] = f"/api/runs/{run_id}/redline.png"

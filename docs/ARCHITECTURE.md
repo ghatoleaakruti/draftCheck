@@ -858,6 +858,46 @@ gone, which suits a demo that already throws them away after 24 hours. The in-me
 counters also reset, the trade-off accepted in §4.12. Before a live demo, open the page
 once a minute or two early so it is awake.
 
+### 4.14 Automatic model fallback — BUILT
+
+**Muse Spark Open on Baseten stays the default model.** Some of its calls never return.
+That happens with the plain OpenAI client too, with no DraftCheck code involved. Muse
+Spark on the Meta Model API answers reliably, so the server uses it as a backup, one call
+at a time:
+
+1. When a call's provider is `baseten`, the call gets `DRAFTCHECK_PRIMARY_TIMEOUT_SECONDS`
+   (default 45, and never more than the normal limit).
+2. If that runs out, the connection fails, or Baseten answers with a 5xx, the *same* call
+   is sent once to `DRAFTCHECK_FALLBACK_PROVIDER` (default `meta`) under the normal
+   `DRAFTCHECK_MODEL_TIMEOUT_SECONDS` limit. The log says
+   `fallback: baseten -> meta after 45 s (timeout)`.
+3. A 4xx, a reply that is not JSON, or a cancel is **not** retried. These are not outages:
+   the request was refused, or the model did answer. A 4xx with nothing to fall back to
+   becomes a 502.
+
+The rule is decided per call by `GuardedClient` in `api.py` (`outage_reason` says what
+counts as an outage). Extraction and every round of the correction loop go through it,
+and each round tries Baseten first again. `meta.json` keeps the provider that was
+*asked for*, which is what `/fix` builds its client from, so a fallback during the upload
+does not move the later rounds off Baseten.
+
+**Who answered is recorded everywhere it is shown.** `model` is the model that answered.
+Next to it are `answered_provider`, `fell_back`, and a short `fallback_reason` (`timeout`,
+`connection error`, `HTTP 503`). These appear in the upload response and `meta.json`, and
+on every round in the `/fix` response and `corrections.json`. The redline stamp names each
+model that answered, plus `(fallback)`. The page shows a note beside the model name, and
+each round card says which model answered that round.
+
+**Limits and cancel.** A fallback is one more model call, so the day's budget is charged
+for it. Cancel aborts whichever client is mid-call, Baseten or the backup. A backup built
+after the cancel is refused before it sends anything.
+
+**When there is no fallback.** If the user picks `meta`, nothing falls back. If
+`DRAFTCHECK_FALLBACK_PROVIDER` is empty, Baseten gets the full normal limit and a timeout
+is the same 504 as before. If the backup cannot be built (for example, its key is
+missing), a warning is logged and the original error is returned. The CLI has no
+fallback.
+
 ## 5. Repo layout (what exists today)
 
 ```

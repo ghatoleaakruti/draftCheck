@@ -63,6 +63,7 @@ const fixHint = document.getElementById("fix-hint");
 const fixStatus = document.getElementById("fix-status");
 const cancelReadButton = document.getElementById("cancel-read");
 const readCancelled = document.getElementById("read-cancelled");
+const metaFallback = document.getElementById("meta-fallback");
 const cancelFixButton = document.getElementById("cancel-fix");
 const fixCancelled = document.getElementById("fix-cancelled");
 
@@ -1270,6 +1271,24 @@ function changedFindings(label, findings, className) {
   return block;
 }
 
+/**
+ * Said beside the model name when the server's fallback stepped in: Muse Spark Open on
+ * Baseten did not answer, so the same request went to Muse Spark on the Meta Model API.
+ */
+const FALLBACK_NOTE =
+  "Muse Spark Open didn't respond in time, so Muse Spark (Meta Model API) read this drawing.";
+
+/** "Answered by muse-spark-1.2 (fallback: timeout)", or null when no model answered. */
+function roundModel(round) {
+  if (!round.model) {
+    return null;
+  }
+  const fallback = round.fell_back
+    ? ` (fallback${round.fallback_reason ? `: ${round.fallback_reason}` : ""})`
+    : "";
+  return `Answered by ${round.model}${fallback}`;
+}
+
 /** One round: the edits it proposed, and what the rules said about the result. */
 function roundCard(round) {
   const item = document.createElement("li");
@@ -1289,6 +1308,13 @@ function roundCard(round) {
   head.appendChild(counts);
 
   item.appendChild(head);
+
+  const answered = roundModel(round);
+  if (answered) {
+    const model = paragraph("round-model", answered);
+    model.classList.toggle("is-fallback", Boolean(round.fell_back));
+    item.appendChild(model);
+  }
 
   if (round.error) {
     item.appendChild(paragraph("round-error", `This round could not run: ${round.error}`));
@@ -1401,6 +1427,8 @@ function render(run) {
   setCell("meta-model", text(run.model));
   setCell("meta-latency", seconds(run.latency_s));
   setCell("meta-attempts", text(run.attempts));
+  metaFallback.textContent = run.fell_back ? FALLBACK_NOTE : "";
+  metaFallback.hidden = !run.fell_back;
 
   parseIssuesList.replaceChildren();
   for (const issue of issues) {

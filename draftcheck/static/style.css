@@ -316,6 +316,17 @@ button:disabled {
   color: var(--ink);
 }
 
+/* The fallback note: small and amber, because it is worth noticing but nothing is wrong
+   with the result — the drawing was still read, just by the backup model. */
+.fallback-note {
+  margin: -8px 0 16px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--warn-line);
+  background: var(--warn-bg);
+  font-size: 13px;
+  color: var(--ink);
+}
+
 .columns {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -893,6 +904,17 @@ table.data tbody tr.is-picked td.is-edited {
   font-family: var(--mono);
   font-size: 12px;
   color: var(--ink-soft);
+}
+
+.round-model {
+  margin: 0 0 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.round-model.is-fallback {
+  color: var(--unsure-ink);
 }
 
 .round-empty {
