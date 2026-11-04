@@ -15,24 +15,26 @@ Every engineering drawing is checked by hand before it is released. The checker 
 
 1. **Upload** a drawing (PDF or image), or try the built-in sample.
 2. **Muse Spark reads it.** It turns the sheet into structured data: dimensions, tolerances, feature control frames, datums, units, and the general tolerance.
-3. **The engineer confirms.** Every value is shown in an editable table next to the drawing, with a box around the item on the sheet. Low-confidence readings and cross-check disagreements are marked.
-4. **Six rules check it.** These are deterministic Python checks, and each one reports pass, fail, or not applicable with a sentence that uses the drawing's own values.
-5. **The agent proposes fixes.** For each error, the model suggests the smallest edit, with a one-sentence engineering reason.
-6. **The rules verify the fixes.** Each proposed edit is applied to a copy of the data and the same rules run again. Only that re-run decides whether a fix worked.
-7. **Export** a redlined PDF (marked-up sheet plus a page listing each correction) and a CSV of corrections.
-8. **Learn from it.** For students, "Explain this drawing" asks the model what the part likely is and why each dimension, frame, and datum is there. The notes are labelled as AI explanations, kept only where they name real items, and never used by the rules.
+3. **Cross-check (optional, on by default).** Muse Spark reads the same page in parallel. Python compares the two readings value by value and marks every disagreement in the table and on the sheet ("Both Meta models agree on 43 of 44 values; 1 to double-check").
+4. **The engineer confirms.** Every value is shown in an editable table next to the drawing, with a box around the item on the sheet. Low-confidence readings and cross-check disagreements are marked.
+5. **Six rules check it.** Deterministic Python checks. The **check report** lists all six with pass or fail and a sentence that uses the drawing's own values ("The frames reference A, B, C, but nothing defines C").
+6. **Live agent rounds.** The model proposes the smallest edit for each error, with a one-sentence engineering reason. Rounds are **streamed**: each one appears on the page as soon as the rules have re-checked it, showing what was verified, rolled back, or refused.
+7. **The rules verify, and failed edits are rolled back.** Each edit is applied to a copy of the data and the rules run again. An edit that does not clear the findings it cites is taken back before the next round, so the drawing only ever carries edits the rules confirmed. The check report then shows the drawing **before and after fixes**.
+8. **Export** a redlined PDF (marked-up sheet plus a page listing each correction) and a CSV of corrections.
+9. **About this drawing.** For students, "Explain this drawing" asks the model what the part likely is, which **views** are drawn and what each shows, the **projection** (first-angle, third-angle, or unclear, with the reason), any tables and balloons, and why each dimension, frame, and datum is there. The notes are labelled as AI explanations, kept only where they name real items, and never used by the rules.
+10. **Test results dashboard.** Every eval drawing, its scores per model, and which seeded issues each model caught: **[draftcheck.onrender.com/eval.html](https://draftcheck.onrender.com/eval.html)**.
 
-The screenshots below were captured locally with the **dev fake model** (`DRAFTCHECK_FAKE_MODEL=1`), which returns a saved real reading of the sample drawing so the page can be shown without calling a live model. The rules, the correction loop, and the redline all ran for real.
+The screenshots below were captured with headless Chrome against a local server running the **dev fake model** (`DRAFTCHECK_FAKE_MODEL=1`, with `DRAFTCHECK_FAKE_SCENARIO=reject_then_fix`). It returns a saved real reading of the sample drawing and scripts three correction rounds (one refused, one that fails and is rolled back, one that works), so the page can be shown without calling a live model. The rules, the rollback, the check report, and the redline all ran for real.
 
 | Reading | Confirm |
 | --- | --- |
 | ![The drawing being read, with a scan band across the sheet](docs/images/01-reading.png) | ![Extracted tables next to the drawing, with item boxes and a cross-check disagreement marker on dim_5](docs/images/02-confirm.png) |
-| **Checked** | **Done** |
-| ![Six check results with one failure, and a red revision cloud around the feature control frame](docs/images/03-checked.png) | ![The verified fix shown with a pen label and a CHECKED stamp](docs/images/04-done.png) |
-
-![Corrections tab with a before/after table and download buttons](docs/images/05-corrections.png)
-
-![The "About this drawing" card with a part-type chip, summary, and features, and AI notes under each datum row](docs/images/06-explain.png)
+| **Checked** | **Live rounds** |
+| ![Check report: six checks, five passed and one failed, with a red revision cloud around the feature control frame](docs/images/03-checked.png) | ![Mid-fix: rounds 1 and 2 have arrived (one edit refused, one rolled back) while round 3 is still proposing](docs/images/07-live-rounds.png) |
+| **Done** | **Corrections** |
+| ![Check report after fixes (6 of 6 passed), the verified fix in green, the rolled-back edit struck through, and a CHECKED stamp](docs/images/04-done.png) | ![Corrections tab: one verified edit, one failed and rolled back, and download buttons](docs/images/05-corrections.png) |
+| **About this drawing** | **Test results dashboard** |
+| ![The About this drawing card with part type, summary, features, views, projection, and balloons](docs/images/06-explain.png) | ![The test results dashboard: totals per model and a gallery of the 17 eval drawings](docs/images/08-dashboard.png) |
 
 ## How it uses Meta's models
 
@@ -61,6 +63,7 @@ Safeguards that enforce it:
 - **A fixed edit menu.** The agent can only propose four operations: set a field, add a datum, remove a datum reference from a frame, or add a dimension.
 - **No deletions.** There is no operation that deletes a dimension, frame, or datum, and a backstop check rejects any edit that would make an existing item disappear. Deleting a callout is the cheapest way to make a finding go away, so it is not allowed.
 - **Verdicts only come from re-running the rules.** The model's claim that its fix worked is recorded but never used.
+- **Failed edits are rolled back.** An applied edit that the re-run shows did not work is removed before the next round and reported as "Failed, rolled back", never kept on the drawing.
 - **A 3-round cap** on the correction loop.
 - **Every rule explains itself** from real values: "The frames reference A, B, C, but nothing defines C."
 - **Fixes are proposals.** They are marked for engineer review, and the CLI's exit code always describes the drawing as submitted.
@@ -156,9 +159,10 @@ Each rule is written in my own words and has a `source` field that cites its ref
 
 ## Engineering
 
-- **595 tests** (`pytest`), plus `ruff` linting.
+- **831 tests** (`pytest`), plus `ruff` linting.
 - **CI on every pull request** (GitHub Actions runs ruff and pytest), and **branch protection** on `main` requires CI to pass.
-- **Usage limits** for the free demo: 5 uploads and 10 fix requests per IP per hour, and 100 model calls per day across everyone. Uploaded drawings are deleted after 24 hours.
+- **Live smoke test** (`python -m scripts.smoke_live --explain`): walks the sample through the public site the way the browser does (health, pages, upload with cross-check, check, streamed fix, redline PDF, explanation) and passed **7/7 steps against the live site**. It also flags a stream that a proxy buffered instead of delivering round by round.
+- **Usage limits** for the free demo: 5 uploads, 10 fix requests, and 10 explanations per IP per hour, and 100 model calls per day across everyone. Uploads are capped at 10 MB, and uploaded drawings are deleted after 24 hours.
 - **Cancel** buttons for reading and fixing. Cancel reaches the server and aborts the model call.
 - **Time limits:** each model call has a 90 s limit on the deployed server.
 - **Fallback:** a Baseten call with no answer after 45 s is sent once to the Meta Model API. Who answered is recorded on the page, in the files, and on the redline stamp.
@@ -261,6 +265,9 @@ ruff check .
 - Assembly checks: parts lists, balloons, BOM consistency, fits between parts.
 - More rules.
 - Per-hole diameters for MFG-001.
+- Link each frame to the feature it controls, enabling checks for wrong symbols (e.g. MMC on a flat surface) and inconsistent dimension chains.
+- Stress tests with cluttered, overlapping drawings.
+- Docker image and docker compose.
 - SAM 3.1 for precise regions around each callout.
 - Redlines written back into CAD-native formats.
 - Accounts, saved history, and revision comparison (Rev A vs Rev B).
