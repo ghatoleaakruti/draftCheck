@@ -15,30 +15,40 @@ import pytest
 from reportlab.pdfgen import canvas as rl_canvas
 
 from draftcheck.rules import run_rules
-from draftcheck.schema import parse_drawing
+from draftcheck.schema import finding_key, parse_drawing
 from scripts.drawing_suite import (
+    FLANGE,
     GEAR_SPUR,
+    GRIPPER_CLAW,
     HEX_BOLT,
     HEX_NUT,
+    STEPPED_SHAFT,
     SUITE,
+    AngleDim,
     Callout,
     PartSpec,
     PartView,
     PointDim,
-    bore_with_keyway,
     build_one,
     centre_cross,
+    draw_angle_dim,
     draw_callout,
+    draw_hatch,
     draw_point_dim,
+    draw_point_dim_with_datum,
     hex_face_bows,
     hexagon,
+    keyed_circle,
+    rim_toward,
     spur_gear_outline,
+    surface_datum,
 )
 from scripts.make_sample_drawing import PAGE_H, PAGE_W
 from scripts.run_eval import load_ground_truth
 
 PARTS = (GEAR_SPUR, HEX_NUT, HEX_BOLT)
-PART_STEMS = [spec.stem for spec in PARTS]
+PARTS_B = (FLANGE, STEPPED_SHAFT, GRIPPER_CLAW)
+PART_STEMS = [spec.stem for spec in (*PARTS, *PARTS_B)]
 
 
 def _radius(point: tuple[float, float]) -> float:
@@ -80,8 +90,8 @@ def test_hexagon_across_flats_and_corners() -> None:
     assert max(x for x, _ in pointy) - min(x for x, _ in pointy) == pytest.approx(13.0)
 
 
-def test_bore_with_keyway_reaches_the_keyway_flat() -> None:
-    points = bore_with_keyway(16.0, 5.0, 10.3)
+def test_keyed_circle_reaches_the_keyway_flat() -> None:
+    points = keyed_circle(16.0, 5.0, 10.3)
     assert min(y for _, y in points) == pytest.approx(-8.0, abs=1e-6)
     assert max(y for _, y in points) == pytest.approx(10.3)
     assert {x for x, y in points if y == pytest.approx(10.3)} == {-2.5, 2.5}
@@ -184,10 +194,14 @@ def test_part_sheet_has_title_block_essentials_and_general_notes(stem: str) -> N
     assert spec.notes and spec.revision and spec.material
     truth = load_ground_truth(stem)
     assert truth["units"] == "mm"
-    assert truth["general_tolerance"]["linear_plus_minus"] is not None
+    if stem == "stepped_shaft":
+        # Its missing general tolerance is the seeded DIM-001 error.
+        assert truth["general_tolerance"] is None
+    else:
+        assert truth["general_tolerance"]["linear_plus_minus"] is not None
 
 
-@pytest.mark.parametrize("stem", PART_STEMS)
+@pytest.mark.parametrize("stem", ["gear_spur", "hex_nut", "hex_bolt", "gripper_claw"])
 def test_clean_parts_raise_no_findings(stem: str) -> None:
     truth = load_ground_truth(stem)
     assert truth["seeded_errors"] == []
@@ -233,3 +247,121 @@ def test_rebuilding_a_part_is_byte_identical(tmp_path: Path) -> None:
     assert json.loads(first["ground_truth"].read_text()) == json.loads(
         second["ground_truth"].read_text()
     )
+
+
+# --- Part b helpers ---------------------------------------------------------------------
+
+
+def test_keyed_circle_outlines_a_shaft_keyway_inside_the_circle() -> None:
+    points = keyed_circle(25.0, 8.0, 8.5)
+    assert max(y for _, y in points) == pytest.approx(math.sqrt(12.5**2 - 16))
+    assert {x for x, y in points if y == pytest.approx(8.5)} == {-4.0, 4.0}
+
+
+def test_rim_toward_lands_on_the_rim_facing_the_elbow() -> None:
+    view = PartView("f", "front", 100.0, 100.0, 2.0)
+    u, v = rim_toward(view, (10.0, 0.0), 5.0, (300.0, 100.0))  # elbow straight right
+    assert (u, v) == pytest.approx((15.0, 0.0))
+
+
+def test_hatch_draws_inside_a_clip(tmp_path: Path) -> None:
+    c = _canvas(tmp_path)
+    draw_hatch(c, [(100.0, 100.0), (140.0, 100.0), (140.0, 140.0), (100.0, 140.0)])
+    c.showPage()
+    c.save()  # no error, and the clip is balanced by its restoreState
+
+
+@pytest.mark.parametrize("direction", ["up", "down", "left", "right"])
+def test_surface_datum_box_points_away_from_the_surface(
+    tmp_path: Path, direction: str
+) -> None:
+    box = surface_datum(_canvas(tmp_path), 200.0, 200.0, direction, "A")
+    centre_x, centre_y = (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2
+    expected = {"up": centre_y > 200, "down": centre_y < 200, "left": centre_x < 200,
+                "right": centre_x > 200}
+    assert expected[direction]
+
+
+def test_size_dimension_datum_sits_beyond_its_b_end(tmp_path: Path) -> None:
+    view = PartView("f", "front", 100.0, 300.0, 2.0)
+    dim = PointDim("d", "Ø25", 25, "f", "y", (0, -12.5), (0, 12.5), -8.0, "a", "b",
+                   tol=0.01, datum="A")
+    _, datum_box = draw_point_dim_with_datum(_canvas(tmp_path), view, dim)
+    assert datum_box is not None and datum_box.y0 >= view.y(12.5) - 0.01
+
+
+def test_angle_dimension_text_is_beside_the_arc(tmp_path: Path) -> None:
+    view = PartView("f", "front", 100.0, 100.0, 4.0)
+    dim = AngleDim("a", "15°", 15, "f", (0.0, 0.0), 20.0, 0.0, 15.0, "x", "y")
+    box = draw_angle_dim(_canvas(tmp_path), view, dim)
+    assert box.x0 > view.x(20.0)  # outside the 20 mm arc, to the right
+
+
+def test_inside_dimension_draws_no_extension_lines(tmp_path: Path) -> None:
+    """A diameter dimensioned across the part: points already on the dimension line."""
+    view = PartView("f", "front", 100.0, 300.0, 2.0)
+    dim = PointDim("d", "Ø40", 40, "f", "y", (45, -20), (45, 20), 45.0, "a", "b")
+    box = draw_point_dim(_canvas(tmp_path), view, dim)
+    assert box.x1 <= view.x(45.0)
+
+
+# --- Part b sheets ----------------------------------------------------------------------
+
+
+def test_part_b_views_and_labels() -> None:
+    front, section = FLANGE.view("front"), FLANGE.view("section_a_a")
+    assert section.kind == "section" and section.label == ("SECTION A-A",)
+    assert section.oy == front.oy and section.ox > front.ox  # in projection, to the right
+    assert [plane.label for plane in FLANGE.cutting_planes] == ["A"]
+
+    kinds = {view.name: view.kind for view in STEPPED_SHAFT.views}
+    assert kinds == {"front": "front", "section_b_b": "section", "detail_c": "detail"}
+    detail = STEPPED_SHAFT.view("detail_c")
+    assert detail.scale == pytest.approx(4 * STEPPED_SHAFT.view("front").scale)
+    assert detail.label == ("DETAIL C", "SCALE 4:1")
+    assert [plane.label for plane in STEPPED_SHAFT.cutting_planes] == ["B"]
+
+    claw_front, claw_top = GRIPPER_CLAW.view("front"), GRIPPER_CLAW.view("top")
+    assert claw_top.ox == claw_front.ox and claw_top.oy > claw_front.oy
+
+
+def test_flange_seeds_an_undefined_datum_c_on_the_hole_position() -> None:
+    truth = load_ground_truth("flange")
+    frames = {f["id"]: f for f in truth["fcfs"]}
+    position = frames["fcf_position_holes"]
+    assert [r["label"] for r in position["datum_refs"]] == ["A", "B", "C"]
+    assert sorted(d["label"] for d in truth["datums"]) == ["A", "B"]
+    assert frames["fcf_perpendicularity_bore"]["characteristic"] == "perpendicularity"
+    assert [r["label"] for r in frames["fcf_perpendicularity_bore"]["datum_refs"]] == ["A"]
+    dims = {d["id"]: d for d in truth["dimensions"]}
+    assert dims["dim_bolt_circle"]["is_basic"] is True
+    assert dims["dim_hole_diameter"]["quantity"] == 6
+    findings = run_rules(parse_drawing(truth))
+    assert [finding_key(f) for f in findings] == ["GDT-001@fcf_position_holes"]
+
+
+def test_shaft_has_no_general_tolerance_and_one_bare_dimension() -> None:
+    truth = load_ground_truth("stepped_shaft")
+    assert truth["general_tolerance"] is None
+    bare = [d["id"] for d in truth["dimensions"]
+            if not d["is_basic"] and not d["is_reference"] and d["tol_plus"] is None]
+    assert bare == ["dim_collar_diameter"]
+    (frame,) = truth["fcfs"]
+    assert frame["characteristic"] == "circular_runout"
+    views = {d["id"]: d["view"] for d in truth["dimensions"]}
+    assert views["dim_keyway_width"] == "section_b_b"
+    assert views["dim_fillet_radius"] == "detail_c"
+    findings = run_rules(parse_drawing(truth))
+    assert [finding_key(f) for f in findings] == ["DIM-001@dim_collar_diameter"]
+
+
+def test_claw_profile_and_angle() -> None:
+    truth = load_ground_truth("gripper_claw")
+    (frame,) = truth["fcfs"]
+    assert frame["characteristic"] == "profile_surface"
+    assert [r["label"] for r in frame["datum_refs"]] == ["A", "B"]
+    dims = {d["id"]: d for d in truth["dimensions"]}
+    assert dims["dim_taper_angle"]["feature_type"] == "angular"
+    assert dims["dim_taper_angle"]["value"] == 15.0
+    assert dims["dim_jaw_radius"]["is_basic"] is True
+    assert dims["dim_thickness"]["view"] == "top"

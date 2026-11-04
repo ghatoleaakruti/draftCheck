@@ -40,6 +40,7 @@ from scripts.make_sample_drawing import (
     PAGE_W,
     Box,
     arrowhead,
+    boxed_text,
     centered_text,
     circled_letter,
     dashed_line,
@@ -256,8 +257,17 @@ def circular_runout_symbol(c: rl_canvas.Canvas, cx: float, cy: float) -> None:
     arrowhead(c, x1, y1, 1.0, 1.0)
 
 
+def profile_surface_symbol(c: rl_canvas.Canvas, cx: float, cy: float) -> None:
+    """A closed half circle: an arc standing on a base line."""
+    c.setLineWidth(0.8)
+    r = 6.5
+    c.arc(cx - r, cy - 4.0 - r, cx + r, cy - 4.0 + r, 0, 180)
+    c.line(cx - r, cy - 4.0, cx + r, cy - 4.0)
+
+
 SYMBOLS = {
     "position": position_symbol,
+    "profile_surface": profile_surface_symbol,
     "flatness": flatness_symbol,
     "perpendicularity": perpendicularity_symbol,
     "circular_runout": circular_runout_symbol,
@@ -294,8 +304,11 @@ def draw_frame(c: rl_canvas.Canvas, frame: Frame) -> Box:
         datum_x += width
 
     if frame.leader_to is not None:
-        start_x, start_y = frame.x + total / 2, frame.y + FCF_H
         tip_x, tip_y = frame.leader_to
+        # The leader leaves the frame's top edge, or its bottom edge when the feature it
+        # points at is below the frame, so it never runs back across the frame.
+        start_x = frame.x + total / 2
+        start_y = frame.y if tip_y < frame.y else frame.y + FCF_H
         c.setLineWidth(0.8)
         c.line(start_x, start_y, tip_x, tip_y)
         arrowhead(c, tip_x, tip_y, tip_x - start_x, tip_y - start_y)
@@ -638,6 +651,10 @@ class PartView:
     oy: float
     #: Page points per mm (72 / 25.4 x the drawing scale).
     scale: float
+    #: Lines printed under a section or detail view, e.g. ("SECTION A-A",), centred on
+    #: ``label_at`` (page point of the first line's baseline). The first line is bold.
+    label: tuple[str, ...] = ()
+    label_at: Point | None = None
 
     def x(self, u: float) -> float:
         return self.ox + u * self.scale
@@ -655,8 +672,10 @@ class Shape:
 
     ``kind`` is "path" (``points``, optionally ``closed``), "circle" (``points[0]`` is the
     centre, ``r`` the radius), "arc" (centre, radius, ``start`` and ``extent`` in degrees,
-    counter-clockwise), or "bow" (a smooth curve from ``points[0]`` through ``points[1]``
-    to ``points[2]``, used for the chamfer curves on hex flats).
+    counter-clockwise), "bow" (a smooth curve from ``points[0]`` through ``points[1]``
+    to ``points[2]``, used for the chamfer curves on hex flats), "hatch" (45° section
+    lining clipped to the closed polygon ``points``), or "text" (``text`` centred on
+    ``points[0]``, e.g. the letter beside a detail circle).
     """
 
     view: str
@@ -667,6 +686,15 @@ class Shape:
     r: float = 0.0
     start: float = 0.0
     extent: float = 360.0
+    text: str = ""
+
+
+def hatch(view: str, *points: Point) -> Shape:
+    return Shape(view, "thin", "hatch", tuple(points), closed=True)
+
+
+def label_text(view: str, at: Point, text: str) -> Shape:
+    return Shape(view, "thin", "text", (at,), text=text)
 
 
 def path(view: str, style: str, *points: Point, closed: bool = False) -> Shape:
@@ -719,6 +747,59 @@ class PointDim:
     tol: float | None = None
     feature_type: str = "linear"
     reference: bool = False
+    basic: bool = False
+    #: A datum feature symbol in line with the dimension line, beyond its ``b``-side
+    #: end: that names the feature of size (its axis) as the datum.
+    datum: str | None = None
+
+
+@dataclass(frozen=True)
+class AngleDim:
+    """An angle between two rays from ``vertex``, drawn as an arc of ``radius`` mm.
+
+    ``start`` and ``end`` are the rays' directions in degrees, counter-clockwise from +u.
+    """
+
+    id: str
+    text: str
+    value: float
+    view: str
+    vertex: Point
+    radius: float
+    start: float
+    end: float
+    from_ref: str
+    to_ref: str
+    tol: float | None = None
+
+
+@dataclass(frozen=True)
+class SurfaceDatum:
+    """A datum feature symbol standing on a surface: triangle base on the edge at ``at``.
+
+    ``direction`` is the way the symbol points away from the part: up, down, left, right.
+    """
+
+    id: str
+    label: str
+    view: str
+    at: Point
+    direction: str
+
+
+@dataclass(frozen=True)
+class CuttingPlane:
+    """A section's cutting-plane line, from ``a`` to ``b`` in part coordinates.
+
+    ``sight`` is the direction of sight as a page unit vector, e.g. ``(-1, 0)`` for
+    looking left; both ends turn into arrows that way, each tagged with ``label``.
+    """
+
+    view: str
+    a: Point
+    b: Point
+    label: str
+    sight: Point
 
 
 @dataclass(frozen=True)
@@ -743,6 +824,10 @@ class Callout:
     quantity: int = 1
     reference: bool = False
     datum: str | None = None
+    basic: bool = False
+    #: Page point where the datum symbol's triangle sits, when it should hang from
+    #: something other than the middle of the shoulder (the bottom of a frame, say).
+    datum_at: Point | None = None
 
 
 @dataclass(frozen=True)
@@ -771,6 +856,9 @@ class PartSpec:
     notes: tuple[str, ...] = ()
     notes_at: tuple[float, float] = (40.0, 578.0)
     extra_title_rows: tuple[str, ...] = ()
+    angles: tuple[AngleDim, ...] = ()
+    surface_datums: tuple[SurfaceDatum, ...] = ()
+    cutting_planes: tuple[CuttingPlane, ...] = ()
     projection: str | None = "third"
     notes_heading: str = "GENERAL NOTES:"
 
@@ -845,14 +933,18 @@ def spur_gear_outline(
     return points
 
 
-def bore_with_keyway(bore_dia: float, key_width: float, key_top: float) -> list[Point]:
-    """A round bore with a keyway at the top; ``key_top`` is the keyway's flat, from centre."""
-    r = bore_dia / 2
+def keyed_circle(dia: float, key_width: float, key_flat: float) -> list[Point]:
+    """A circle with a keyway at the top, as one closed outline.
+
+    ``key_flat`` is the keyway's flat, measured up from the centre. For a bore (the flat
+    outside the circle) it outlines the hole; for a shaft (the flat inside) the solid.
+    """
+    r = dia / 2
     half = key_width / 2
     edge = math.degrees(math.atan2(math.sqrt(r * r - half * half), half))
     # Clockwise from the right side of the keyway, round the bottom, to the left side.
     points = arc_points(r, edge, 180.0 - edge - 360.0, steps=40)
-    points += [(-half, key_top), (half, key_top)]
+    points += [(-half, key_flat), (half, key_flat)]
     return points
 
 
@@ -916,8 +1008,39 @@ def draw_shape(c: rl_canvas.Canvas, view: PartView, shape: Shape) -> None:
             x2, y2,
         )
         c.drawPath(p, stroke=1, fill=0)
+    elif shape.kind == "hatch":
+        draw_hatch(c, [view.pt(*point) for point in shape.points])
+    elif shape.kind == "text":
+        x, y = view.pt(*shape.points[0])
+        c.setFont(FONT_BOLD, 11.0)
+        c.drawCentredString(x, y - 4.0, shape.text)
     else:
         raise ValueError(f"unknown shape kind {shape.kind!r}")
+    c.restoreState()
+
+
+#: Gap between section-lining lines, measured square to the lines, in page points.
+HATCH_PITCH = 4.0
+
+
+def draw_hatch(c: rl_canvas.Canvas, points: list[Point]) -> None:
+    """45° section lining inside a closed polygon given in page points."""
+    clip = c.beginPath()
+    clip.moveTo(*points[0])
+    for point in points[1:]:
+        clip.lineTo(*point)
+    clip.close()
+    c.saveState()
+    c.clipPath(clip, stroke=0, fill=0)
+    xs = [x for x, _ in points]
+    ys = [y for _, y in points]
+    lo_y, hi_y = min(ys), max(ys)
+    step = HATCH_PITCH * math.sqrt(2.0)
+    offset = min(xs) - hi_y
+    while offset < max(xs) - lo_y:
+        # The line y = x - offset, across the polygon's whole height.
+        c.line(lo_y + offset, lo_y, hi_y + offset, hi_y)
+        offset += step
     c.restoreState()
 
 
@@ -939,38 +1062,146 @@ def vertical_label(c: rl_canvas.Canvas, x_line: float, y: float, text: str) -> B
 NARROW_RUN = 14.0
 
 
+def _extension(c: rl_canvas.Canvas, x0: float, y0: float, x1: float, y1: float) -> None:
+    """One extension line, skipped when the feature already sits on the dimension line."""
+    if math.hypot(x1 - x0, y1 - y0) > EXT_GAP + EXT_OVER + 1.0:
+        c.line(x0, y0, x1, y1)
+
+
 def draw_point_dim(c: rl_canvas.Canvas, view: PartView, dim: PointDim) -> Box:
+    """Draw one dimension; returns its text box (and records nothing else)."""
+    box, _ = draw_point_dim_with_datum(c, view, dim)
+    return box
+
+
+def draw_point_dim_with_datum(
+    c: rl_canvas.Canvas, view: PartView, dim: PointDim
+) -> tuple[Box, Box | None]:
     (ax, ay), (bx, by) = view.pt(*dim.a), view.pt(*dim.b)
     c.setLineWidth(0.7)
+    datum_box = None
     if dim.axis == "x":
         y_dim = view.y(dim.at)
         for px, py in ((ax, ay), (bx, by)):
             sign = 1.0 if y_dim > py else -1.0
-            c.line(px, py + sign * EXT_GAP, px, y_dim + sign * EXT_OVER)
+            _extension(c, px, py + sign * EXT_GAP, px, y_dim + sign * EXT_OVER)
         lo, hi = sorted((ax, bx))
         width = c.stringWidth(dim.text, FONT, DIM_SIZE)
+        if dim.datum is not None:
+            datum_box = surface_datum(c, bx, y_dim, "right" if bx >= ax else "left", dim.datum)
+            c.setLineWidth(0.7)
         if width + 6.0 <= hi - lo:
             c.line(lo, y_dim, hi, y_dim)
             arrowhead(c, lo, y_dim, -1, 0)
             arrowhead(c, hi, y_dim, 1, 0)
-            return centered_text(c, (lo + hi) / 2, y_dim + 4.0, dim.text, DIM_SIZE)
+            draw = boxed_text if dim.basic else centered_text
+            return draw(c, (lo + hi) / 2, y_dim + 4.0, dim.text, DIM_SIZE), datum_box
         # Too narrow for the text: arrows outside pointing in, text beyond the right one.
         c.line(lo - NARROW_RUN, y_dim, hi + NARROW_RUN, y_dim)
         arrowhead(c, lo, y_dim, 1, 0)
         arrowhead(c, hi, y_dim, -1, 0)
         text_x = hi + NARROW_RUN + 2.0
-        return centered_text(c, text_x + width / 2, y_dim - 3.5, dim.text, DIM_SIZE)
+        draw = boxed_text if dim.basic else centered_text
+        return draw(c, text_x + width / 2, y_dim - 3.5, dim.text, DIM_SIZE), datum_box
     if dim.axis == "y":
         x_dim = view.x(dim.at)
         for px, py in ((ax, ay), (bx, by)):
             sign = 1.0 if x_dim > px else -1.0
-            c.line(px + sign * EXT_GAP, py, x_dim + sign * EXT_OVER, py)
+            _extension(c, px + sign * EXT_GAP, py, x_dim + sign * EXT_OVER, py)
         lo, hi = sorted((ay, by))
         c.line(x_dim, lo, x_dim, hi)
         arrowhead(c, x_dim, lo, 0, -1)
         arrowhead(c, x_dim, hi, 0, 1)
-        return vertical_label(c, x_dim, (lo + hi) / 2, dim.text)
+        if dim.datum is not None:
+            datum_box = surface_datum(c, x_dim, by, "up" if by >= ay else "down", dim.datum)
+        box = vertical_label(c, x_dim, (lo + hi) / 2, dim.text)
+        if dim.basic:
+            c.setLineWidth(0.7)
+            c.rect(box.x0 - 3.0, box.y0 - 4.0, box.x1 - box.x0 + 6.0, box.y1 - box.y0 + 8.0)
+            box = Box(box.x0 - 3.0, box.y0 - 4.0, box.x1 + 3.0, box.y1 + 4.0)
+        return box, datum_box
     raise ValueError(f"{dim.id}: axis must be 'x' or 'y', not {dim.axis!r}")
+
+
+def draw_angle_dim(c: rl_canvas.Canvas, view: PartView, dim: AngleDim) -> Box:
+    """An angle: extension lines along both rays, an arc between them, arrows, text."""
+    vx, vy = view.pt(*dim.vertex)
+    r = dim.radius * view.scale
+    c.setLineWidth(0.7)
+    for angle in (dim.start, dim.end):
+        ux, uy = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+        c.line(vx + ux * EXT_GAP, vy + uy * EXT_GAP, vx + ux * (r + EXT_OVER),
+               vy + uy * (r + EXT_OVER))
+    c.arc(vx - r, vy - r, vx + r, vy + r, dim.start, dim.end - dim.start)
+    a0, a1 = math.radians(dim.start), math.radians(dim.end)
+    arrowhead(c, vx + r * math.cos(a0), vy + r * math.sin(a0), math.sin(a0), -math.cos(a0))
+    arrowhead(c, vx + r * math.cos(a1), vy + r * math.sin(a1), -math.sin(a1), math.cos(a1))
+
+    mid = math.radians((dim.start + dim.end) / 2)
+    tx, ty = vx + (r + 6.0) * math.cos(mid), vy + (r + 6.0) * math.sin(mid) - 3.5
+    c.setFont(FONT, DIM_SIZE)
+    width = c.stringWidth(dim.text, FONT, DIM_SIZE)
+    if math.cos(mid) < 0:
+        tx -= width
+    c.drawString(tx, ty, dim.text)
+    return Box(tx, ty - 0.25 * DIM_SIZE, tx + width, ty + 0.78 * DIM_SIZE)
+
+
+def surface_datum(c: rl_canvas.Canvas, x: float, y: float, direction: str, label: str) -> Box:
+    """A datum feature symbol whose triangle's base sits at (x, y), pointing ``direction``.
+
+    Filled triangle, a short stem, then the lettered box. Returns the whole symbol's box.
+    """
+    if direction == "down":
+        return hanging_datum(c, x, y, label)
+    dx, dy = {"up": (0.0, 1.0), "left": (-1.0, 0.0), "right": (1.0, 0.0)}[direction]
+    px, py = -dy, dx  # along the base
+    tri_h = 8.0
+    c.setLineWidth(0.9)
+    p = c.beginPath()
+    p.moveTo(x - 5.0 * px, y - 5.0 * py)
+    p.lineTo(x + 5.0 * px, y + 5.0 * py)
+    p.lineTo(x + tri_h * dx, y + tri_h * dy)
+    p.close()
+    c.drawPath(p, stroke=1, fill=1)
+    stem = tri_h + 4.0
+    c.line(x + tri_h * dx, y + tri_h * dy, x + stem * dx, y + stem * dy)
+    half = DATUM_BOX / 2
+    cx, cy = x + (stem + half) * dx, y + (stem + half) * dy
+    c.rect(cx - half, cy - half, DATUM_BOX, DATUM_BOX, stroke=1, fill=0)
+    c.setFont(FONT, 10)
+    c.drawCentredString(cx, cy - 3.5, label)
+    xs = (x - 5.0 * abs(px), x + 5.0 * abs(px), cx - half, cx + half)
+    ys = (y - 5.0 * abs(py), y + 5.0 * abs(py), cy - half, cy + half)
+    return Box(min(xs), min(ys), max(xs), max(ys))
+
+
+def draw_cutting_plane(c: rl_canvas.Canvas, view: PartView, plane: CuttingPlane) -> None:
+    """Thick chain line; each end turns 90° into an arrow along the sight, with a letter."""
+    (ax, ay), (bx, by) = view.pt(*plane.a), view.pt(*plane.b)
+    sx, sy = plane.sight
+    c.saveState()
+    c.setLineWidth(1.3)
+    c.setDash([18.0, 3.0, 3.0, 3.0], 0)
+    c.line(ax, ay, bx, by)
+    c.restoreState()
+    arm = 16.0
+    c.setLineWidth(1.3)
+    for ex, ey in ((ax, ay), (bx, by)):
+        tip_x, tip_y = ex + sx * arm, ey + sy * arm
+        c.line(ex, ey, tip_x, tip_y)
+        arrowhead(c, tip_x, tip_y, sx, sy)
+        c.setFont(FONT_BOLD, 11.0)
+        c.drawCentredString(tip_x + sx * 9.0, tip_y + sy * 9.0 - 4.0, plane.label)
+
+
+def draw_view_label(c: rl_canvas.Canvas, view: PartView) -> None:
+    if not view.label or view.label_at is None:
+        return
+    x, y = view.label_at
+    for index, line in enumerate(view.label):
+        c.setFont(FONT_BOLD if index == 0 else FONT, 10.0 if index == 0 else 9.0)
+        c.drawCentredString(x, y - 12.0 * index, line)
 
 
 def hanging_datum(c: rl_canvas.Canvas, x: float, y: float, label: str) -> Box:
@@ -1004,15 +1235,22 @@ def draw_callout(
     arrowhead(c, tx, ty, tx - ex, ty - ey)
 
     c.setFont(FONT, NOTE_SIZE)
-    text_x = min(ex, callout.tail_x) + 2.0
-    text_y = ey + 5.0
+    text_x = min(ex, callout.tail_x) + (6.0 if callout.basic else 2.0)
+    text_y = ey + (8.0 if callout.basic else 5.0)
     c.drawString(text_x, text_y, callout.text)
     width = c.stringWidth(callout.text, FONT, NOTE_SIZE)
     text_box = Box(text_x, text_y - 2.6, text_x + width, text_y + 8.2)
+    if callout.basic:
+        text_box = Box(text_box.x0 - 3.0, text_box.y0 - 1.5, text_box.x1 + 3.0,
+                       text_box.y1 + 1.5)
+        c.setLineWidth(0.7)
+        c.rect(text_box.x0, text_box.y0, text_box.x1 - text_box.x0,
+               text_box.y1 - text_box.y0, stroke=1, fill=0)
 
     datum_box = None
     if callout.datum is not None:
-        datum_box = hanging_datum(c, (ex + callout.tail_x) / 2, ey, callout.datum)
+        dx, dy = callout.datum_at or ((ex + callout.tail_x) / 2, ey)
+        datum_box = hanging_datum(c, dx, dy, callout.datum)
     return text_box, datum_box
 
 
@@ -1026,8 +1264,21 @@ def draw_part_sheet(c: rl_canvas.Canvas, spec: PartSpec) -> dict[str, Box]:
     draw_border(c)
     for shape in spec.shapes:
         draw_shape(c, spec.view(shape.view), shape)
+    for plane in spec.cutting_planes:
+        draw_cutting_plane(c, spec.view(plane.view), plane)
+    for view in spec.views:
+        draw_view_label(c, view)
     for dim in spec.dims:
-        boxes[dim.id] = draw_point_dim(c, spec.view(dim.view), dim)
+        text_box, datum_box = draw_point_dim_with_datum(c, spec.view(dim.view), dim)
+        boxes[dim.id] = text_box
+        if datum_box is not None and dim.datum is not None:
+            boxes[datum_id(dim.datum)] = datum_box
+    for angle in spec.angles:
+        boxes[angle.id] = draw_angle_dim(c, spec.view(angle.view), angle)
+    for symbol in spec.surface_datums:
+        boxes[symbol.id] = surface_datum(
+            c, *spec.view(symbol.view).pt(*symbol.at), symbol.direction, symbol.label
+        )
     for callout in spec.callouts:
         text_box, datum_box = draw_callout(c, spec.view(callout.view), callout)
         boxes[callout.id] = text_box
@@ -1049,6 +1300,7 @@ def _dimension_record(
     quantity: int,
     reference: bool,
     tol: float | None,
+    basic: bool = False,
     from_ref: str | None,
     to_ref: str | None,
     box: Box,
@@ -1061,7 +1313,7 @@ def _dimension_record(
         "unit": None,
         "feature_type": feature_type,
         "quantity": quantity,
-        "is_basic": False,
+        "is_basic": basic,
         "is_reference": reference,
         "tol_plus": tol,
         "tol_minus": tol,
@@ -1086,7 +1338,7 @@ def part_ground_truth(spec: PartSpec, boxes: dict[str, Box]) -> dict:
         _dimension_record(
             id=dim.id, text=dim.text, value=dim.value, feature_type=dim.feature_type,
             quantity=1, reference=dim.reference, tol=dim.tol, from_ref=dim.from_ref,
-            to_ref=dim.to_ref, box=boxes[dim.id], view=dim.view,
+            to_ref=dim.to_ref, box=boxes[dim.id], view=dim.view, basic=dim.basic,
         )
         for dim in spec.dims
     ]
@@ -1094,14 +1346,27 @@ def part_ground_truth(spec: PartSpec, boxes: dict[str, Box]) -> dict:
         _dimension_record(
             id=co.id, text=co.text, value=co.value, feature_type=co.feature_type,
             quantity=co.quantity, reference=co.reference, tol=co.tol, from_ref=None,
-            to_ref=None, box=boxes[co.id], view=co.view,
+            to_ref=None, box=boxes[co.id], view=co.view, basic=co.basic,
         )
         for co in spec.callouts
     ]
+    dimensions += [
+        _dimension_record(
+            id=a.id, text=a.text, value=a.value, feature_type="angular", quantity=1,
+            reference=False, tol=a.tol, from_ref=a.from_ref, to_ref=a.to_ref,
+            box=boxes[a.id], view=a.view,
+        )
+        for a in spec.angles
+    ]
+    labels = [co.datum for co in spec.callouts if co.datum is not None]
+    labels += [dim.datum for dim in spec.dims if dim.datum is not None]
     datums = [
-        {"id": datum_id(co.datum), "label": co.datum, "bbox": norm_bbox(boxes[datum_id(co.datum)])}
-        for co in spec.callouts
-        if co.datum is not None
+        {"id": datum_id(label), "label": label, "bbox": norm_bbox(boxes[datum_id(label)])}
+        for label in labels
+    ]
+    datums += [
+        {"id": symbol.id, "label": symbol.label, "bbox": norm_bbox(boxes[symbol.id])}
+        for symbol in spec.surface_datums
     ]
 
     return {
@@ -1466,7 +1731,7 @@ GEAR_SPUR = PartSpec(
         # Front: teeth, pitch circle as a thin chain line, keyed bore, centrelines.
         path("front", "visible", *spur_gear_outline(24, 2.0), closed=True),
         circle("front", "center", (0.0, 0.0), 24.0),
-        path("front", "visible", *bore_with_keyway(16.0, 5.0, _G_KEY_TOP), closed=True),
+        path("front", "visible", *keyed_circle(16.0, 5.0, _G_KEY_TOP), closed=True),
         *centre_cross("front", (0.0, 0.0), 28.5),
         # Side: gear blank and hub as one outline, pitch line, root, bore and keyway hidden.
         path("side", "visible", (0, -26), (20, -26), (20, -15), (32, -15), (32, 15),
@@ -1647,6 +1912,311 @@ HEX_BOLT = PartSpec(
     ),
 )
 
+
+# --- Part drawings (step 26b): flange, stepped shaft, gripper claw ---------------------
+
+
+def rim_toward(view: PartView, centre: Point, r: float, elbow: Point) -> Point:
+    """The point on a circle's rim (part coords) facing a page point, for a leader tip."""
+    cx, cy = view.pt(*centre)
+    dx, dy = elbow[0] - cx, elbow[1] - cy
+    length = math.hypot(dx, dy)
+    return centre[0] + r * dx / length, centre[1] + r * dy / length
+
+
+def _mirror_v(points: tuple[Point, ...]) -> tuple[Point, ...]:
+    return tuple((u, -v) for u, v in points)
+
+
+# Flange: OD Ø100, raised face Ø56 x 3 high, body 12 thick (15 overall), bore Ø32,
+# 6X Ø9 on a basic Ø76 PCD. The section is cut on the vertical centreline, through two
+# holes, and seen from the right.
+_F_SCALE = _per_mm(1.0)
+_F_FRONT = PartView("front", "front", 190.0, 320.0, _F_SCALE)
+_F_SECTION = PartView("section_a_a", "section", 450.0, 320.0, _F_SCALE,
+                      label=("SECTION A-A",), label_at=(466.0, 138.0))
+_F_HOLE_ANGLES = (90.0, 150.0, 210.0, 270.0, 330.0, 30.0)
+_F_HOLES = tuple(polar(38.0, angle) for angle in _F_HOLE_ANGLES)
+#: Section regions, upper half: raised face and body inside the hole, and outside it.
+_F_INNER = ((0, 16), (0, 28), (3, 28), (3, 33.5), (15, 33.5), (15, 16))
+_F_OUTER = ((3, 42.5), (3, 50), (15, 50), (15, 42.5))
+_F_HOLE_ELBOW = (80.0, 150.0)
+_F_BORE_ELBOW = (300.0, 160.0)
+_F_POSITION = Frame("fcf_position_holes", "position", 0.25, "0.25", True, "MMC",
+                    ("A", "B", "C"), 24.0, 118.0)
+_F_PERP = Frame("fcf_perpendicularity_bore", "perpendicularity", 0.05, "0.05", True, None,
+                ("A",), 302.0, 128.0)
+
+FLANGE = PartSpec(
+    stem="flange",
+    title="FLANGE 6-BOLT",
+    drawing_number="DC-0304",
+    revision="A",
+    material="CARBON STEEL A105",
+    units="mm",
+    units_text="MILLIMETERS",
+    general_tol=0.2,
+    general_tol_text="UNLESS OTHERWISE SPECIFIED: ±0.2",
+    scale_text="1:1",
+    part_type="flange",
+    views=(_F_FRONT, _F_SECTION),
+    shapes=(
+        circle("front", "visible", (0.0, 0.0), 50.0),
+        circle("front", "visible", (0.0, 0.0), 28.0),
+        circle("front", "visible", (0.0, 0.0), 16.0),
+        circle("front", "center", (0.0, 0.0), 38.0),
+        *(circle("front", "visible", hole, 4.5) for hole in _F_HOLES),
+        *(line for hole in _F_HOLES for line in centre_cross("front", hole, 6.5)),
+        *centre_cross("front", (0.0, 0.0), 54.0),
+        *(hatch("section_a_a", *region) for region in
+          (_F_INNER, _F_OUTER, _mirror_v(_F_INNER), _mirror_v(_F_OUTER))),
+        *(path("section_a_a", "visible", *region, closed=True) for region in
+          (_F_INNER, _F_OUTER, _mirror_v(_F_INNER), _mirror_v(_F_OUTER))),
+        path("section_a_a", "center", (-2, 0), (17, 0)),
+        path("section_a_a", "center", (1, 38), (17, 38)),
+        path("section_a_a", "center", (1, -38), (17, -38)),
+    ),
+    cutting_planes=(CuttingPlane("front", (0.0, 56.0), (0.0, -56.0), "A", (-1.0, 0.0)),),
+    dims=(
+        PointDim("dim_outside_diameter", "Ø100 ±0.2", 100, "section_a_a", "y", (3, -50),
+                 (3, 50), -14.0, "outside_diameter", "outside_diameter", tol=0.2,
+                 feature_type="diameter"),
+        PointDim("dim_raised_face_diameter", "Ø56 ±0.1", 56, "section_a_a", "y", (0, -28),
+                 (0, 28), -6.0, "raised_face_diameter", "raised_face_diameter", tol=0.1,
+                 feature_type="diameter"),
+        PointDim("dim_overall_thickness", "15 ±0.1", 15, "section_a_a", "x", (0, 28),
+                 (15, 50), 56.0, "raised_face", "back_face", tol=0.1),
+        PointDim("dim_raised_face_height", "3 ±0.05", 3, "section_a_a", "x", (0, -28),
+                 (3, -50), -56.0, "raised_face", "flange_front_face", tol=0.05),
+    ),
+    callouts=(
+        Callout("dim_hole_diameter", "6X Ø9 ±0.1", 9, "front",
+                rim_toward(_F_FRONT, _F_HOLES[2], 4.5, _F_HOLE_ELBOW), _F_HOLE_ELBOW, 22.0,
+                "diameter", tol=0.1, quantity=6),
+        Callout("dim_bore_diameter", "Ø32 ±0.05", 32, "front",
+                rim_toward(_F_FRONT, (0.0, 0.0), 16.0, _F_BORE_ELBOW), _F_BORE_ELBOW, 390.0,
+                "diameter", tol=0.05, datum="B",
+                datum_at=(_F_PERP.x + 43.0, _F_PERP.y)),
+        Callout("dim_bolt_circle", "Ø76", 76, "front", polar(38.0, 120.0), (75.0, 490.0),
+                30.0, "diameter", basic=True),
+    ),
+    frames=(_F_POSITION, _F_PERP),
+    surface_datums=(SurfaceDatum("datum_a", "A", "section_a_a", (15.0, -25.0), "right"),),
+    notes=(
+        "1. 6 HOLES EQUALLY SPACED ON THE BASIC BOLT CIRCLE.",
+        "2. RAISED FACE FINISH Ra 3.2.",
+        "3. BREAK SHARP EDGES 0.2 MAX.",
+        "4. FINISH: ZINC PLATE.",
+    ),
+    seeded=(
+        SeededError(
+            "GDT-001",
+            "GDT-001@fcf_position_holes",
+            "The hole position frame references datum C, but the drawing defines only A "
+            "(the back face) and B (the bore).",
+            "fcf_position_holes",
+        ),
+    ),
+)
+
+# Stepped shaft: Ø25 x 35 drive end with an 8 mm keyway 25 long, Ø40 x 20 collar,
+# Ø30 x 45 bearing journal; 1 x 45° chamfers, R1 fillet at the Ø25 shoulder.
+_S_FRONT = PartView("front", "front", 60.0, 380.0, _per_mm(1.0))
+_S_SECTION = PartView("section_b_b", "section", 480.0, 380.0, _per_mm(2.0),
+                      label=("SECTION B-B", "SCALE 2:1"), label_at=(480.0, 285.0))
+_S_DETAIL_C = (34.5, 13.0)
+_S_DETAIL_R = 4.5
+_S_DETAIL_SCALE = _per_mm(4.0)
+_S_DETAIL = PartView("detail_c", "detail", 230.0 - _S_DETAIL_C[0] * _S_DETAIL_SCALE,
+                     200.0 - _S_DETAIL_C[1] * _S_DETAIL_SCALE, _S_DETAIL_SCALE,
+                     label=("DETAIL C", "SCALE 4:1"), label_at=(230.0, 133.0))
+_S_KEY_WALL = math.sqrt(12.5**2 - 4.0**2)  # where the keyway walls meet the Ø25
+_S_CHAMFER_ELBOW = (395.0, 240.0)
+#: Where the detail circle crosses the Ø25 surface and the shoulder face.
+_S_DETAIL_SPAN = math.sqrt(_S_DETAIL_R**2 - 0.5**2)
+
+
+def _fillet(centre: Point, start: float, end: float) -> list[Point]:
+    return [polar(1.0, start + (end - start) * i / 6, centre) for i in range(7)]
+
+
+STEPPED_SHAFT = PartSpec(
+    stem="stepped_shaft",
+    title="STEPPED SHAFT",
+    drawing_number="DC-0305",
+    revision="A",
+    material="STEEL 1045",
+    units="mm",
+    units_text="MILLIMETERS",
+    general_tol=None,
+    general_tol_text=None,
+    scale_text="1:1",
+    part_type="stepped_shaft",
+    views=(_S_FRONT, _S_SECTION, _S_DETAIL),
+    shapes=(
+        path("front", "visible",
+             (0, 11.5), (1, 12.5), (5, 12.5), (5, 8.5), (30, 8.5), (30, 12.5),
+             *_fillet((34, 13.5), -90.0, 0.0), (35, 20), (55, 20), (55, 15), (99, 15),
+             (100, 14), (100, -14), (99, -15), (55, -15), (55, -20), (35, -20),
+             *_fillet((34, -13.5), 0.0, 90.0), (1, -12.5), (0, -11.5), closed=True),
+        path("front", "visible", (1, -12.5), (1, 12.5)),
+        path("front", "visible", (35, -13.5), (35, 13.5)),
+        path("front", "visible", (55, -15), (55, 15)),
+        path("front", "visible", (99, -15), (99, 15)),
+        path("front", "visible", (5, _S_KEY_WALL), (30, _S_KEY_WALL)),
+        path("front", "center", (-3, 0), (103, 0)),
+        circle("front", "thin", _S_DETAIL_C, _S_DETAIL_R),
+        label_text("front", (40.0, 24.0), "C"),
+        # Section B-B: the Ø25 cut through the keyway, hatched.
+        hatch("section_b_b", *keyed_circle(25.0, 8.0, 8.5)),
+        path("section_b_b", "visible", *keyed_circle(25.0, 8.0, 8.5), closed=True),
+        *centre_cross("section_b_b", (0.0, 0.0), 15.0),
+        # Detail C: the shoulder fillet, inside its boundary circle.
+        circle("detail_c", "thin", _S_DETAIL_C, _S_DETAIL_R),
+        path("detail_c", "visible", (_S_DETAIL_C[0] - _S_DETAIL_SPAN, 12.5), (34, 12.5)),
+        arc("detail_c", "visible", (34.0, 13.5), 1.0, 270.0, 90.0),
+        path("detail_c", "visible", (35, 13.5), (35, _S_DETAIL_C[1] + _S_DETAIL_SPAN)),
+        path("detail_c", "visible", (35, _S_DETAIL_C[1] - _S_DETAIL_SPAN), (35, 13.5)),
+    ),
+    cutting_planes=(CuttingPlane("front", (17.5, 15.0), (17.5, -15.0), "B", (-1.0, 0.0)),),
+    dims=(
+        PointDim("dim_drive_diameter", "Ø25 ±0.01", 25, "front", "y", (1, -12.5),
+                 (1, 12.5), -8.0, "drive_diameter", "drive_diameter", tol=0.01,
+                 feature_type="diameter", datum="A"),
+        PointDim("dim_collar_diameter", "Ø40", 40, "front", "y", (45, -20), (45, 20), 45.0,
+                 "collar_diameter", "collar_diameter", feature_type="diameter"),
+        PointDim("dim_journal_diameter", "Ø30 ±0.01", 30, "front", "y", (99, -15),
+                 (99, 15), 108.0, "journal_diameter", "journal_diameter", tol=0.01,
+                 feature_type="diameter"),
+        PointDim("dim_drive_length", "35 ±0.1", 35, "front", "x", (0, -11.5), (35, -20),
+                 -26.0, "drive_end_face", "shoulder_face", tol=0.1),
+        PointDim("dim_collar_length", "20 ±0.1", 20, "front", "x", (35, -20), (55, -20),
+                 -26.0, "shoulder_face", "collar_face", tol=0.1),
+        PointDim("dim_overall_length", "100 ±0.2", 100, "front", "x", (0, -11.5),
+                 (100, -14), -33.0, "drive_end_face", "journal_end_face", tol=0.2),
+        PointDim("dim_keyway_length", "25 ±0.2", 25, "front", "x", (5, 12.5), (30, 12.5),
+                 21.0, "keyway_start", "keyway_end", tol=0.2),
+        PointDim("dim_keyway_offset", "5 ±0.1", 5, "front", "x", (0, 11.5), (5, 12.5),
+                 27.0, "drive_end_face", "keyway_start", tol=0.1),
+        PointDim("dim_keyway_width", "8 ±0.02", 8, "section_b_b", "x", (-4, _S_KEY_WALL),
+                 (4, _S_KEY_WALL), 16.0, "keyway_side", "keyway_side", tol=0.02),
+        PointDim("dim_keyway_depth", "21 ±0.1", 21, "section_b_b", "y", (4, 8.5),
+                 (0, -12.5), 17.0, "keyway_floor", "drive_diameter_bottom", tol=0.1),
+    ),
+    callouts=(
+        Callout("dim_chamfer", "2X 1 ±0.2 X 45°", 1, "front", (99.5, -14.5),
+                _S_CHAMFER_ELBOW, 480.0, "chamfer", tol=0.2, quantity=2),
+        Callout("dim_fillet_radius", "R1 ±0.1", 1, "detail_c", polar(1.0, 315.0, (34, 13.5)),
+                (300.0, 165.0), 350.0, "radius", tol=0.1),
+    ),
+    frames=(
+        Frame("fcf_runout_journal", "circular_runout", 0.02, "0.02", False, None, ("A",),
+              265.0, 455.0, leader_to=_S_FRONT.pt(80.0, 15.0)),
+    ),
+    notes=(
+        "1. BREAK SHARP EDGES 0.2 MAX.",
+        "2. HARDEN BEARING JOURNAL 50-55 HRC.",
+        "3. KEY 8 x 7 TO SUIT KEYWAY.",
+    ),
+    seeded=(
+        SeededError(
+            "DIM-001",
+            "DIM-001@dim_collar_diameter",
+            "The title block gives no general tolerance, and the collar diameter Ø40 prints "
+            "no tolerance of its own.",
+            "dim_collar_diameter",
+        ),
+    ),
+)
+
+# Gripper claw: a 40-high base with two Ø6.5 mounting holes, a top edge that slopes down
+# to a jaw whose tip is an R12 arc (centre 72, 22, basic), and a lower edge tapering up
+# at 15° to meet the arc's lowest point. 8 thick, 1 x 45° chamfer on the front-left edge.
+_C_FRONT = PartView("front", "front", 110.0, 200.0, _per_mm(1.5))
+_C_TOP = PartView("top", "top", 110.0, 470.0, _per_mm(1.5))
+_C_JAW = (72.0, 22.0)
+_C_JAW_R = 12.0
+_C_TAPER_START = _C_JAW[0] - (_C_JAW[1] - _C_JAW_R) / math.tan(math.radians(15.0))
+_C_JAW_TOP = polar(_C_JAW_R, 60.0, _C_JAW)
+_C_HOLES = ((12.0, 11.0), (12.0, 29.0))
+_C_HOLE_ELBOW = (95.0, 175.0)
+
+GRIPPER_CLAW = PartSpec(
+    stem="gripper_claw",
+    title="GRIPPER CLAW",
+    drawing_number="DC-0306",
+    revision="A",
+    material="AL 7075-T6",
+    units="mm",
+    units_text="MILLIMETERS",
+    general_tol=0.1,
+    general_tol_text="UNLESS OTHERWISE SPECIFIED: ±0.1",
+    scale_text="1.5:1",
+    part_type="gripper_claw",
+    views=(_C_FRONT, _C_TOP),
+    shapes=(
+        path("front", "visible", (0, 0), (_C_TAPER_START, 0),
+             *(polar(_C_JAW_R, -90.0 + 150.0 * i / 30, _C_JAW) for i in range(31)),
+             (45, 40), (0, 40), closed=True),
+        path("front", "visible", (1, 0), (1, 40)),
+        *(circle("front", "visible", hole, 3.25) for hole in _C_HOLES),
+        *(line for hole in _C_HOLES for line in centre_cross("front", hole, 5.0)),
+        *centre_cross("front", _C_JAW, 3.0),
+        path("top", "visible", (1, 0), (84, 0), (84, 8), (0, 8), (0, 1), closed=True),
+        path("top", "visible", (45, 0), (45, 8)),
+        path("top", "visible", (_C_JAW_TOP[0], 0), (_C_JAW_TOP[0], 8)),
+        path("top", "hidden", (8.75, 0), (8.75, 8)),
+        path("top", "hidden", (15.25, 0), (15.25, 8)),
+        path("top", "center", (12, -1.5), (12, 9.5)),
+    ),
+    dims=(
+        PointDim("dim_overall_height", "40 ±0.1", 40, "front", "y", (0, 0), (0, 40), -12.0,
+                 "bottom_edge", "top_edge", tol=0.1),
+        PointDim("dim_hole1_y", "11 ±0.1", 11, "front", "y", (0, 0), _C_HOLES[0], -6.0,
+                 "bottom_edge", "hole_1_center", tol=0.1),
+        PointDim("dim_hole_pitch", "18 ±0.1", 18, "front", "y", _C_HOLES[0], _C_HOLES[1],
+                 -6.0, "hole_1_center", "hole_2_center", tol=0.1),
+        PointDim("dim_hole_x", "12 ±0.1", 12, "front", "x", (0, 40), _C_HOLES[1], 46.0,
+                 "left_edge", "hole_1_center", tol=0.1),
+        PointDim("dim_top_flat", "45 ±0.2", 45, "front", "x", (0, 40), (45, 40), 52.0,
+                 "left_edge", "slope_start", tol=0.2),
+        PointDim("dim_jaw_center_x", "72", 72, "front", "x", (0, 0), _C_JAW, -10.0,
+                 "left_edge", "jaw_arc_center", basic=True),
+        PointDim("dim_overall_length", "84 ±0.2", 84, "front", "x", (0, 0),
+                 (_C_JAW[0] + _C_JAW_R, _C_JAW[1]), -16.0, "left_edge", "jaw_tip", tol=0.2),
+        PointDim("dim_jaw_center_y", "22", 22, "front", "y", (_C_TAPER_START, 0), _C_JAW,
+                 90.0, "bottom_edge", "jaw_arc_center", basic=True),
+        PointDim("dim_thickness", "8 ±0.1", 8, "top", "y", (84, 0), (84, 8), 92.0,
+                 "front_face", "back_face", tol=0.1),
+    ),
+    angles=(
+        AngleDim("dim_taper_angle", "15° ±0.5°", 15, "front", (_C_TAPER_START, 0.0), 25.0,
+                 0.0, 15.0, "bottom_edge", "taper_edge", tol=0.5),
+    ),
+    callouts=(
+        Callout("dim_hole_diameter", "2X Ø6.5 ±0.1", 6.5, "front",
+                rim_toward(_C_FRONT, _C_HOLES[0], 3.25, _C_HOLE_ELBOW), _C_HOLE_ELBOW, 28.0,
+                "diameter", tol=0.1, quantity=2),
+        Callout("dim_jaw_radius", "R12", 12, "front", polar(_C_JAW_R, 45.0, _C_JAW),
+                (500.0, 380.0), 545.0, "radius", basic=True),
+        Callout("dim_chamfer", "1 X 45°", 1, "top", (0.5, 0.5), (75.0, 445.0), 28.0,
+                "chamfer"),
+    ),
+    frames=(
+        Frame("fcf_profile_jaw", "profile_surface", 0.1, "0.1", False, None, ("A", "B"),
+              520.0, 330.0, leader_to=_C_FRONT.pt(*polar(_C_JAW_R, 20.0, _C_JAW))),
+    ),
+    surface_datums=(
+        SurfaceDatum("datum_a", "A", "top", (60.0, 0.0), "down"),
+        SurfaceDatum("datum_b", "B", "front", (20.0, 0.0), "down"),
+    ),
+    notes=(
+        "1. JAW PROFILE DEFINED BY BASIC DIMENSIONS.",
+        "2. BREAK SHARP EDGES 0.2 MAX.",
+        "3. FINISH: HARD ANODIZE.",
+    ),
+)
+
 #: Every drawing in the suite, by stem, in the order the eval runs them.
 SUITE: dict[str, DrawingSpec | PartSpec] = {
     spec.stem: spec
@@ -1662,6 +2232,9 @@ SUITE: dict[str, DrawingSpec | PartSpec] = {
         GEAR_SPUR,
         HEX_NUT,
         HEX_BOLT,
+        FLANGE,
+        STEPPED_SHAFT,
+        GRIPPER_CLAW,
     )
 }
 

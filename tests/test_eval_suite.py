@@ -52,6 +52,9 @@ def test_suite_has_the_requested_drawings() -> None:
         "gear_spur",
         "hex_nut",
         "hex_bolt",
+        "flange",
+        "stepped_shaft",
+        "gripper_claw",
     }
 
 
