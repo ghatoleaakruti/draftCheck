@@ -3,289 +3,296 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
     <title>DraftCheck</title>
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
-    <header class="masthead">
-      <h1>DraftCheck</h1>
-      <p class="tagline">
-        AI drawing checker: reads engineering drawings, finds GD&amp;T and dimensioning
-        errors, proposes verified fixes.
-      </p>
-    </header>
-
-    <main>
-      <!-- Upload. Submitted by app.js as a POST to /api/runs; no native form navigation. -->
-      <form id="upload-form" class="panel upload">
-        <!-- The drop zone is the file field. The real <input type="file"> is still here,
-             visually hidden: it does the picking, so the browser's own file dialog and
-             its accessibility come for free. The div carries role/tabindex so the zone
-             itself is reachable and operable from the keyboard. -->
-        <div class="field field-drop">
-          <label id="drop-label" for="file">Drawing</label>
-          <div
-            id="dropzone"
-            class="dropzone"
-            role="button"
-            tabindex="0"
-            aria-labelledby="drop-label"
-            aria-describedby="drop-main drop-hint"
-          >
-            <input
-              id="file"
-              name="file"
-              type="file"
-              accept=".pdf,.png,.jpg,.jpeg"
-              class="visually-hidden"
+    <div class="app">
+      <!-- ---- Header: brand, where the run is, and which model is working ---- -->
+      <header class="topbar">
+        <div class="brand">
+          <svg class="brand-mark" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+            <rect x="3.5" y="2.5" width="17" height="19" rx="1.5" class="mark-sheet" />
+            <path d="M12.5 21.5v-5h8" class="mark-sheet" />
+            <path
+              d="M6.5 8.6c.4-1.3 1.9-1.4 2.4-.4.5-1.2 2.1-1.1 2.4.1.6-1 2-.7 2.1.5"
+              class="mark-cloud"
             />
-            <p id="drop-main" class="drop-main">Drop a drawing here, or click to choose a file</p>
-            <p id="drop-hint" class="hint">PDF, PNG, or JPG · up to 10 MB</p>
-          </div>
+          </svg>
+          <span class="brand-name">DraftCheck</span>
         </div>
 
-        <div class="field">
-          <label for="provider">Model</label>
-          <select id="provider" name="provider">
-            <option value="baseten">Muse Spark Open (Baseten)</option>
-            <option value="meta">Muse Spark (Meta Model API)</option>
-          </select>
-        </div>
+        <!-- Driven by app.js from the real state of the run. -->
+        <ol id="stepper" class="stepper" aria-label="Progress">
+          <li class="step" data-step="0"><span class="step-dot">1</span><span class="step-name">Read</span></li>
+          <li class="step" data-step="1"><span class="step-dot">2</span><span class="step-name">Confirm</span></li>
+          <li class="step" data-step="2"><span class="step-dot">3</span><span class="step-name">Check</span></li>
+          <li class="step" data-step="3"><span class="step-dot">4</span><span class="step-name">Fix</span></li>
+          <li class="step" data-step="4"><span class="step-dot">5</span><span class="step-name">Export</span></li>
+        </ol>
 
-        <button id="submit" type="submit">Read drawing</button>
-      </form>
-
-      <!-- One of these three is visible at a time; app.js does the swapping. -->
-      <p id="status" class="status" hidden>
-        <span class="spinner" aria-hidden="true"></span>
-        <span>Muse Spark is reading your drawing… (about 20–30 seconds)</span>
-        <button id="cancel-read" class="btn btn-quiet btn-small" type="button">Cancel</button>
-      </p>
-
-      <!-- Shown after Cancel, and cleared by the next upload. -->
-      <p id="read-cancelled" class="cancelled-note" hidden role="status"></p>
-
-      <div id="error" class="box box-error" hidden role="alert">
-        <strong>Could not read the drawing.</strong>
-        <p id="error-text"></p>
-      </div>
-
-      <section id="result" class="result" hidden>
-        <p class="runmeta">
-          <span>Model <code id="meta-model">—</code></span>
-          <span>Latency <code id="meta-latency">—</code></span>
-          <span>Attempts <code id="meta-attempts">—</code></span>
+        <!-- Says which model is working, or which one actually answered. -->
+        <p id="model-pill" class="model-pill" role="status">
+          <span class="model-dot" aria-hidden="true"></span>
+          <span id="model-pill-text">Ready</span>
+          <!-- Shown only when the server answers with the development fake model. -->
+          <span id="fake-badge" class="fake-badge" hidden>Fake model (dev)</span>
         </p>
-        <!-- Shown only when Baseten failed and the backup read the drawing. -->
-        <p id="meta-fallback" class="fallback-note" hidden></p>
+      </header>
 
-        <div id="parse-issues" class="box box-warn" hidden>
-          <strong>Some items could not be read and were left out:</strong>
-          <ul id="parse-issues-list"></ul>
-        </div>
+      <main class="workspace">
+        <!-- ---- The desk: the drawing, as paper ---- -->
+        <section id="desk" class="desk" aria-label="Drawing">
+          <div class="desk-bar">
+            <div class="file-title">
+              <p id="file-name" class="file-name">No drawing yet</p>
+              <p id="file-sub" class="file-sub">Upload a drawing to begin</p>
+            </div>
+            <div class="desk-actions">
+              <button id="upload-button" class="btn-ghost" type="button">Upload drawing</button>
+              <button class="btn-ghost js-sample" type="button">Try the sample drawing</button>
+              <label class="model-select">
+                <span class="visually-hidden">Model</span>
+                <select id="provider" name="provider" aria-label="Model">
+                  <option value="baseten">Muse Spark Open (Baseten)</option>
+                  <option value="meta">Muse Spark (Meta Model API)</option>
+                </select>
+              </label>
+            </div>
+          </div>
 
-        <div class="columns">
-          <div class="panel page-panel">
-            <h2>Page 1</h2>
+          <!-- The real file input does the picking, so the browser's own dialog and its
+               accessibility come for free. It stays hidden; the drop zone, the Upload
+               button, and the primary button all open it. -->
+          <input
+            id="file"
+            name="file"
+            type="file"
+            accept=".pdf,.png,.jpg,.jpeg"
+            class="visually-hidden"
+            tabindex="-1"
+            aria-hidden="true"
+          />
 
-            <!-- On by default: the boxes are the point of the page, and a reader who
-                 wants the bare drawing can switch them off. -->
+          <div id="stage" class="stage">
+            <!-- Empty state. Shown until a run is on screen. -->
+            <div id="empty" class="empty-state">
+              <div
+                id="dropzone"
+                class="dropzone"
+                role="button"
+                tabindex="0"
+                aria-describedby="drop-main drop-hint"
+              >
+                <svg class="drop-icon" viewBox="0 0 24 24" width="34" height="34" aria-hidden="true">
+                  <path d="M12 15V4m0 0-4 4m4-4 4 4M5 15v4h14v-4" />
+                </svg>
+                <p id="drop-main" class="drop-main">Drop a drawing here, or click to choose a file</p>
+                <p id="drop-hint" class="drop-hint">PDF, PNG, or JPG up to 10 MB</p>
+              </div>
+              <div class="empty-side">
+                <p class="empty-or">No drawing to hand?</p>
+                <button class="btn-ghost js-sample" type="button">Try the sample drawing</button>
+                <p class="usage-note">Demo usage is limited to keep it free for everyone.</p>
+              </div>
+            </div>
+
+            <!-- The page, as paper. app.js sizes #paper to fit the stage; the SVG covers
+                 exactly the image and is in image pixels (viewBox = natural size). -->
+            <div id="paper" class="paper" hidden>
+              <img id="page-image" alt="The uploaded drawing, page 1, as rendered." />
+              <svg id="overlay" class="overlay" aria-hidden="true">
+                <g id="boxes"></g>
+                <g id="markup"></g>
+              </svg>
+            </div>
+          </div>
+
+          <div class="statusbar">
+            <p id="phase" class="phase" aria-live="polite">Drop or choose a drawing to begin.</p>
             <label class="overlay-toggle">
               <input id="show-overlay" type="checkbox" checked />
-              Show what Muse Spark read
+              Show boxes
             </label>
-
-            <!-- The stage is the positioning frame for the overlay: the image sets its
-                 size, and #overlay covers exactly that. app.js fills the overlay with
-                 one box per located item, placed in percentages so the boxes follow the
-                 image when the window resizes. -->
-            <div class="page-stage">
-              <img id="page-image" alt="The uploaded drawing, page 1, as rendered." />
-              <div id="overlay" class="overlay"></div>
-            </div>
+            <ul class="legend" aria-label="Legend">
+              <li><span class="swatch sw-blue" aria-hidden="true"></span>Read by model</li>
+              <li><span class="swatch sw-red" aria-hidden="true"></span>Rule violation</li>
+              <li><span class="swatch sw-green" aria-hidden="true"></span>Verified fix</li>
+              <li><span class="swatch sw-amber" aria-hidden="true"></span>Needs designer</li>
+            </ul>
           </div>
+        </section>
 
-          <div class="panel data-panel">
-            <h2>What Muse Spark read</h2>
-
-            <!-- The editable cells live in the tables below. This bar is the two things
-                 you can do to the whole extraction: put it back the way the model read
-                 it, or send it to the rules. Check is disabled while any cell is
-                 invalid, and #invalid-note says why. -->
-            <div class="edit-bar">
-              <p class="edit-hint">
-                Correct anything the model misread, then check the drawing. Edited cells
-                are marked; hover one to see the model's original value.
-              </p>
-              <div class="edit-actions">
-                <button id="reset" class="btn btn-quiet" type="button">
-                  Reset to what the model read
-                </button>
-                <button id="check" class="btn" type="button">Check drawing</button>
-              </div>
-              <p id="invalid-note" class="invalid-note" hidden>
-                Some cells still need fixing — they are outlined in red.
-              </p>
-            </div>
-
-            <!-- How sure the model was about what it read. app.js writes the text, and
-                 makes it a button that jumps to the first flagged row when there is one
-                 to jump to. -->
-            <p id="confidence-summary" class="confidence-summary"></p>
-
-            <h3>Units and general tolerance</h3>
-            <div class="table-scroll">
-              <table class="data">
-                <tbody>
-                  <tr>
-                    <th scope="row">Units</th>
-                    <td id="v-units" class="mono"></td>
-                  </tr>
-                  <tr>
-                    <th scope="row">General tolerance ±</th>
-                    <td id="v-gentol" class="mono"></td>
-                  </tr>
-                  <tr>
-                    <th scope="row">As printed</th>
-                    <td id="v-gentol-raw" class="mono">—</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-
-            <h3>Datums <span id="count-datums" class="count"></span></h3>
-            <div class="table-scroll">
-              <table class="data">
-                <thead>
-                  <tr>
-                    <th scope="col">Label</th>
-                    <th scope="col"><span class="visually-hidden">Remove</span></th>
-                  </tr>
-                </thead>
-                <tbody id="rows-datums"></tbody>
-              </table>
-            </div>
-            <button id="add-datum" class="btn btn-quiet btn-small" type="button">
-              Add datum
+        <!-- ---- The panel: what was read, what is wrong, what changed ---- -->
+        <section class="panel" aria-label="Review">
+          <div class="tabs" role="tablist" aria-label="Review">
+            <button id="tab-extracted" class="tab" role="tab" type="button"
+              aria-controls="pane-extracted" aria-selected="true">Extracted</button>
+            <button id="tab-issues" class="tab" role="tab" type="button"
+              aria-controls="pane-issues" aria-selected="false" tabindex="-1">
+              Issues <span id="issue-count" class="count-pill" hidden></span>
             </button>
+            <button id="tab-corrections" class="tab" role="tab" type="button"
+              aria-controls="pane-corrections" aria-selected="false" tabindex="-1">Corrections</button>
+          </div>
 
-            <h3>Dimensions <span id="count-dimensions" class="count"></span></h3>
-            <div class="table-scroll">
-              <table class="data">
-                <thead>
-                  <tr>
-                    <th scope="col">Text as printed</th>
-                    <th scope="col">Value</th>
-                    <th scope="col">Tol +</th>
-                    <th scope="col">Tol −</th>
-                    <th scope="col">Basic</th>
-                    <th scope="col">From → to</th>
-                  </tr>
-                </thead>
-                <tbody id="rows-dimensions"></tbody>
-              </table>
+          <div id="panel-body" class="panel-body">
+            <!-- Extracted -->
+            <div id="pane-extracted" class="pane" role="tabpanel" aria-labelledby="tab-extracted">
+              <p class="intro">
+                What the model read off the drawing. Correct anything it misread, then
+                confirm. Edited cells are marked; hover one to see the model's original value.
+              </p>
+
+              <div id="extracted-empty" class="pane-empty">
+                <p>Nothing read yet. Upload a drawing and the model's reading appears here.</p>
+              </div>
+
+              <div id="extracted" hidden>
+                <p class="runmeta">
+                  <span>Model <code id="meta-model">—</code></span>
+                  <span>Latency <code id="meta-latency">—</code></span>
+                  <span>Attempts <code id="meta-attempts">—</code></span>
+                </p>
+                <p id="meta-fallback" class="note note-warn" hidden></p>
+
+                <div id="parse-issues" class="note note-warn" hidden>
+                  <strong>Some items could not be read and were left out:</strong>
+                  <ul id="parse-issues-list"></ul>
+                </div>
+
+                <p id="confidence-summary" class="confidence-summary"></p>
+
+                <div class="table-head">
+                  <h3>Units and general tolerance</h3>
+                </div>
+                <div class="table-scroll">
+                  <table class="data data-kv">
+                    <tbody>
+                      <tr>
+                        <th scope="row">Units</th>
+                        <td id="v-units" class="mono"></td>
+                      </tr>
+                      <tr>
+                        <th scope="row">General tolerance ±</th>
+                        <td id="v-gentol" class="mono"></td>
+                      </tr>
+                      <tr>
+                        <th scope="row">As printed</th>
+                        <td id="v-gentol-raw" class="mono">—</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div class="table-head">
+                  <h3>Datums <span id="count-datums" class="count"></span></h3>
+                  <button id="add-datum" class="btn-quiet btn-small" type="button">Add datum</button>
+                </div>
+                <div class="table-scroll">
+                  <table class="data">
+                    <thead><tr id="head-datums"></tr></thead>
+                    <tbody id="rows-datums"></tbody>
+                  </table>
+                </div>
+
+                <div class="table-head">
+                  <h3>Dimensions <span id="count-dimensions" class="count"></span></h3>
+                </div>
+                <div class="table-scroll">
+                  <table class="data">
+                    <thead><tr id="head-dimensions"></tr></thead>
+                    <tbody id="rows-dimensions"></tbody>
+                  </table>
+                </div>
+
+                <div class="table-head">
+                  <h3>Feature control frames <span id="count-fcfs" class="count"></span></h3>
+                </div>
+                <div class="table-scroll">
+                  <table class="data">
+                    <thead><tr id="head-fcfs"></tr></thead>
+                    <tbody id="rows-fcfs"></tbody>
+                  </table>
+                </div>
+
+                <p class="reset-row">
+                  <button id="reset" class="btn-quiet" type="button">Reset to what the model read</button>
+                </p>
+              </div>
             </div>
 
-            <h3>Feature control frames <span id="count-fcfs" class="count"></span></h3>
-            <div class="table-scroll">
-              <table class="data">
-                <thead>
-                  <tr>
-                    <th scope="col">Characteristic</th>
-                    <th scope="col">Tolerance</th>
-                    <th scope="col">Modifier</th>
-                    <th scope="col">Datum refs</th>
-                  </tr>
-                </thead>
-                <tbody id="rows-fcfs"></tbody>
-              </table>
+            <!-- Issues -->
+            <div id="pane-issues" class="pane" role="tabpanel" aria-labelledby="tab-issues" hidden>
+              <p class="intro">
+                What DraftCheck's rules found in the confirmed tables. Click an issue to see
+                its item on the drawing.
+              </p>
+              <p id="check-status" class="check-status" hidden></p>
+
+              <div id="check-parse-issues" class="note note-warn" hidden>
+                <strong>Some items could not be read and were left out of the check:</strong>
+                <ul id="check-parse-issues-list"></ul>
+              </div>
+
+              <div id="issues-empty" class="pane-empty">
+                <p>No checks run yet. Confirm the extracted tables to run the rules.</p>
+              </div>
+              <p id="findings-none" class="pane-empty is-ok" hidden>No issues found.</p>
+              <ol id="findings-list" class="findings-list"></ol>
+            </div>
+
+            <!-- Corrections -->
+            <div id="pane-corrections" class="pane" role="tabpanel" aria-labelledby="tab-corrections" hidden>
+              <p class="intro">
+                What the agent proposed, round by round, and what the rules said about each
+                edit. Every verdict comes from re-running the rules, not from the model.
+              </p>
+
+              <div id="corrections-empty" class="pane-empty">
+                <p>Corrections appear here once the agent finishes its rounds.</p>
+              </div>
+
+              <div id="agent-panel" class="agent" hidden>
+                <p id="agent-status" class="check-status" hidden></p>
+                <ol id="agent-rounds" class="rounds"></ol>
+
+                <h3>What became of each finding</h3>
+                <ul id="agent-verdicts" class="verdicts"></ul>
+                <p class="verdict-note">Decided by re-running the rules, not by the model.</p>
+
+                <h3>Redline</h3>
+                <figure class="redline">
+                  <img id="redline-image" alt="The drawing with every finding marked in red." />
+                </figure>
+                <p class="redline-actions">
+                  <a id="redline-pdf" class="btn-quiet" href="#" download="redline.pdf">Download redline PDF</a>
+                </p>
+                <p class="redline-note">
+                  Proposed corrections are verified by DraftCheck's rule engine and require
+                  engineer review.
+                </p>
+              </div>
             </div>
           </div>
-        </div>
 
-        <!-- What the rules said about the data above. Hidden until the first check. -->
-        <section id="findings-panel" class="panel findings" hidden>
-          <h2>What the rules found</h2>
-
-          <!-- When the check ran, and whether it still describes what is in the tables.
-               One line in both states, so a check that lands does not shove the findings
-               down the page. app.js writes the text. -->
-          <p id="check-status" class="check-status" hidden></p>
-
-          <div id="check-error" class="box box-error" hidden role="alert">
-            <strong>Could not check the drawing.</strong>
-            <p id="check-error-text"></p>
-          </div>
-
-          <div id="check-parse-issues" class="box box-warn" hidden>
-            <strong>Some items could not be read and were left out of the check:</strong>
-            <ul id="check-parse-issues-list"></ul>
-          </div>
-
-          <p id="findings-none" class="findings-none" hidden>No issues found.</p>
-          <ul id="findings-list" class="findings-list"></ul>
-
-          <!-- Asking the agent for corrections. The button is enabled only when the
-               findings above are current and at least one of them is an error; app.js
-               writes #fix-hint with the reason whenever it is not. -->
-          <div class="fix-bar">
-            <button id="propose-fix" class="btn" type="button" disabled>Propose fixes</button>
-            <p id="fix-hint" class="hint" hidden></p>
-          </div>
-
-          <p id="fix-status" class="status" hidden>
-            <span class="spinner" aria-hidden="true"></span>
-            <span>
-              Muse Spark is proposing fixes… (each round is checked by the rule engine)
-            </span>
-            <button id="cancel-fix" class="btn btn-quiet btn-small" type="button">Cancel</button>
-          </p>
-
-          <p id="fix-cancelled" class="cancelled-note" hidden role="status"></p>
-        </section>
-
-        <!-- What the correction loop did, round by round, and the redline it produced.
-             Hidden until the first fix. -->
-        <section id="agent-panel" class="panel agent" hidden>
-          <h2>Agent rounds</h2>
-
-          <!-- When the fixes were proposed, and whether they still describe the tables.
-               The same one-line treatment the check status gets. -->
-          <p id="agent-status" class="check-status" hidden></p>
-
-          <div id="agent-error" class="box box-error" hidden role="alert">
-            <strong>Could not propose fixes.</strong>
-            <p id="agent-error-text"></p>
-          </div>
-
-          <ol id="agent-rounds" class="rounds"></ol>
-
-          <h3>What became of each finding</h3>
-          <ul id="agent-verdicts" class="verdicts"></ul>
-          <p class="verdict-note">Decided by re-running the rules, not by the model.</p>
-
-          <h3>Redline</h3>
-          <div class="redline">
-            <img id="redline-image" alt="The drawing with every finding marked in red." />
-            <p class="redline-actions">
-              <a id="redline-pdf" class="btn" href="#" download="redline.pdf">
-                Download redline PDF
-              </a>
+          <!-- One primary action, whose label follows the stage. -->
+          <div class="actionbar">
+            <p id="action-hint" class="action-hint">
+              Choose a PDF, PNG, or JPG; the model reads its dimensions, datums, and frames.
             </p>
-            <p class="redline-note">
-              Proposed corrections are verified by DraftCheck's rule engine and require
-              engineer review.
-            </p>
+            <div class="action-buttons">
+              <button id="cancel" class="btn-quiet" type="button" hidden>Cancel</button>
+              <button id="primary" class="btn-primary" type="button">Read drawing</button>
+            </div>
           </div>
         </section>
-      </section>
-    </main>
+      </main>
+    </div>
 
-    <!-- Said before a limit is hit rather than only when one is, so a visitor who gets a
-         429 has already been told it was coming. -->
-    <footer class="site-footer">
-      <p>Demo usage is limited to keep it free for everyone.</p>
-    </footer>
+    <!-- Toasts: errors and short confirmations. -->
+    <div id="toasts" class="toasts" aria-live="polite"></div>
 
     <script src="/app.js"></script>
   </body>
