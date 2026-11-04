@@ -1,6 +1,8 @@
 """Generate a synthetic engineering drawing plus its ground truth.
 
 Run with:  python -m scripts.make_sample_drawing
+     or:  python -m scripts.make_sample_drawing --suite   (the evaluation suite, see
+          scripts/drawing_suite.py; plate_001 is left alone)
 
 Writes three files to ``samples/generated/``:
   plate_001.pdf       the drawing
@@ -638,7 +640,25 @@ def build(out_dir: Path | str = OUT_DIR, *, write_png: bool = True) -> dict[str,
     return paths
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--suite",
+        action="store_true",
+        help="build the evaluation suite (scripts/drawing_suite.py) instead of plate_001",
+    )
+    args = parser.parse_args(argv)
+
+    if args.suite:
+        # Imported here: drawing_suite imports this module's helpers.
+        from scripts.drawing_suite import build_suite
+
+        for stem, paths in build_suite().items():
+            print(f"{stem}: " + ", ".join(str(path) for path in paths.values()))
+        return 0
+
     paths = build()
     for label, path in paths.items():
         print(f"{label:>13}: {path}")
