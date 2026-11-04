@@ -26,7 +26,11 @@ from draftcheck.api import (
     get_limiter,
     get_runs_root,
 )
-from draftcheck.explain import explanation_fingerprint, parse_explanation
+from draftcheck.explain import (
+    EXPLANATION_VERSION,
+    explanation_fingerprint,
+    parse_explanation,
+)
 from draftcheck.fake_model import EXPLAINED_FINDING, SCRIPTED_EXPLANATION, scripted_explanation
 from draftcheck.limits import (
     DEFAULT_EXPLAINS_PER_HOUR,
@@ -39,7 +43,13 @@ from draftcheck.limits import (
 )
 from draftcheck.llm_client import JSONChatResult, ModelCancelled, Usage
 from draftcheck.pipeline import check
-from draftcheck.prompts import EXPLAIN_SYSTEM, EXTRACTION_SYSTEM, explain_user
+from draftcheck.prompts import (
+    EXPLAIN_SYSTEM,
+    EXTRACTION_SYSTEM,
+    TABLE_KINDS,
+    VIEW_NAMES,
+    explain_user,
+)
 from draftcheck.schema import parse_drawing
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -107,6 +117,150 @@ def test_entries_naming_items_that_do_not_exist_are_dropped_and_recorded() -> No
         "datums[1]: unknown datum label 'C'",
         "findings[0]: unknown finding key 'MFG-001@dim_3'",
     ]
+
+
+def test_the_scripted_explanation_describes_plate_001s_one_view() -> None:
+    drawing = fixture_drawing()
+    explanation = parse_explanation(SCRIPTED_EXPLANATION, drawing, check(drawing))
+    assert [(v.name, v.label) for v in explanation.views] == [("front", None)]
+    assert explanation.projection == "unclear"
+    assert explanation.projection_note
+    assert explanation.tables == []
+    assert explanation.balloons
+    assert {d.view for d in explanation.dimensions} == {"front"}
+    assert all(d.also_seen_in == [] for d in explanation.dimensions)
+
+
+def _with_views(**extra) -> dict:
+    """A small valid explanation with front, top, and section views, plus ``extra``."""
+    data = {
+        "views": [
+            {"name": "Front", "label": "", "shows": "The plate face."},
+            {"name": "top", "shows": "The plate edge-on."},
+            {"name": "section", "label": "SECTION A-A", "shows": "A cut through a hole."},
+        ],
+        "dimensions": [
+            {"id": "dim_1", "kind": "location", "purpose": "Locates hole 2.",
+             "view": "front", "also_seen_in": ["top", "Section"]},
+        ],
+    }
+    data.update(extra)
+    return data
+
+
+def test_views_keep_known_names_and_drop_the_rest() -> None:
+    drawing = fixture_drawing()
+    data = _with_views()
+    data["views"].append({"name": "auxiliary", "shows": "A view we have no name for."})
+    data["views"].append({"name": "left"})  # no "shows": malformed
+    explanation = parse_explanation(data, drawing, [])
+    assert [(v.name, v.label) for v in explanation.views] == [
+        ("front", None), ("top", None), ("section", "SECTION A-A")]
+    assert sorted(explanation.parse_issues) == [
+        "views[3]: unknown view name 'auxiliary'",
+        "views[4]: missing shows",
+    ]
+
+
+def test_every_allowed_view_name_is_kept() -> None:
+    drawing = fixture_drawing()
+    data = {"views": [{"name": name, "shows": "x"} for name in VIEW_NAMES]}
+    assert [v.name for v in parse_explanation(data, drawing, []).views] == list(VIEW_NAMES)
+
+
+def test_dimension_views_must_be_views_the_explanation_describes() -> None:
+    drawing = fixture_drawing()
+    data = _with_views()
+    data["dimensions"][0]["also_seen_in"] = ["top", "rear", "front", "top"]
+    data["dimensions"].append(
+        {"id": "dim_2", "kind": "location", "purpose": "Locates hole 1.", "view": "detail"})
+    explanation = parse_explanation(data, drawing, [])
+    first, second = explanation.dimensions
+    # "rear" is not described; "front" repeats its own view; the second "top" is a repeat.
+    assert (first.view, first.also_seen_in) == ("front", ["top"])
+    # The note is kept even though its view is cleared.
+    assert (second.id, second.view, second.purpose) == ("dim_2", None, "Locates hole 1.")
+    assert explanation.parse_issues == [
+        "dimensions[dim_1]: unknown view 'rear' in also_seen_in",
+        "dimensions[dim_2]: unknown view 'detail'",
+    ]
+
+
+def test_dimension_views_are_cleared_when_no_views_are_described() -> None:
+    drawing = fixture_drawing()
+    data = {"dimensions": [
+        {"id": "dim_1", "kind": "location", "purpose": "x", "view": "front"}]}
+    explanation = parse_explanation(data, drawing, [])
+    assert explanation.dimensions[0].view is None
+    assert explanation.parse_issues == ["dimensions[dim_1]: unknown view 'front'"]
+
+
+@pytest.mark.parametrize(
+    ("given", "kept", "issue"),
+    [
+        ("third-angle", "third-angle", False),
+        ("Third Angle", "third-angle", False),
+        ("first_angle", "first-angle", False),
+        ("unclear", "unclear", False),
+        (None, "unclear", False),
+        ("second-angle", "unclear", True),
+        (3, "unclear", True),
+    ],
+)
+def test_projection_is_one_of_three(given, kept, issue) -> None:
+    drawing = fixture_drawing()
+    data = {"projection_note": "  Views line up.  "}
+    if given is not None:
+        data["projection"] = given
+    explanation = parse_explanation(data, drawing, [])
+    assert explanation.projection == kept
+    assert explanation.projection_note == "Views line up."
+    assert bool(explanation.parse_issues) is issue
+
+
+def test_tables_and_balloons() -> None:
+    drawing = fixture_drawing()
+    data = {
+        "tables": [
+            {"kind": "Parts List", "summary": "Five items."},
+            {"kind": "hole-table", "summary": "Four tapped holes."},
+            {"kind": "bill of materials", "summary": "Shown as other."},
+            {"kind": "notes"},  # no summary: dropped
+        ],
+        "balloons": "  Five balloons point at the five items.  ",
+    }
+    explanation = parse_explanation(data, drawing, [])
+    assert [(t.kind, t.summary) for t in explanation.tables] == [
+        ("parts_list", "Five items."), ("hole_table", "Four tapped holes."),
+        ("other", "Shown as other.")]
+    assert explanation.balloons == "Five balloons point at the five items."
+    assert explanation.parse_issues == ["tables[3]: missing summary"]
+    assert {t.kind for t in explanation.tables} <= set(TABLE_KINDS)
+
+
+def test_blank_balloons_and_note_are_none() -> None:
+    explanation = parse_explanation(
+        {"balloons": "   ", "projection_note": 5}, fixture_drawing(), [])
+    assert explanation.balloons is None and explanation.projection_note is None
+
+
+def test_the_fingerprint_carries_the_explanation_version(monkeypatch) -> None:
+    """An explain.json saved under the old shape must not be served from the cache."""
+    drawing = fixture_drawing()
+    now = explanation_fingerprint(drawing, [])
+    monkeypatch.setattr("draftcheck.explain.EXPLANATION_VERSION", EXPLANATION_VERSION + 1)
+    assert explanation_fingerprint(drawing, []) != now
+
+
+def test_the_prompt_asks_for_views_projection_and_tables() -> None:
+    drawing = fixture_drawing()
+    prompt = explain_user(json.dumps(drawing.model_dump(mode="json")), [])
+    for key in ('"views"', '"projection"', '"projection_note"', '"tables"', '"balloons"',
+                '"also_seen_in"'):
+        assert key in prompt
+    for name in VIEW_NAMES:
+        assert f'"{name}"' in prompt
+    assert "unclear" in EXPLAIN_SYSTEM
 
 
 def test_finding_notes_are_dropped_when_no_findings_were_sent() -> None:

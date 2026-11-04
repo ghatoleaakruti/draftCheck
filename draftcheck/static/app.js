@@ -1712,7 +1712,7 @@ function renderDimensions() {
       cells: [
         idCell(id),
         printedWithNote(dimension.text_raw, explainNote("dimensions", id), (note) =>
-          `${capitalize(note.kind)}: ${note.purpose}`),
+          `${capitalize(note.kind)}: ${note.purpose}${whereSeen(note)}`),
         markCrossCheck(
           numberCell(dimension, "value", was.value ?? null, { required: true, label: `Value, ${id}` }),
           id,
@@ -2820,6 +2820,72 @@ function printedWithNote(printed, note, lineOf, className = "mono") {
   return cell;
 }
 
+/** " · in front view, also seen in top view" for a dimension note, or "" with no view. */
+function whereSeen(note) {
+  if (!note.view) return "";
+  const named = (name) => `${name} view`;
+  const also = (note.also_seen_in || []).map(named);
+  const tail = also.length ? `, also seen in ${joinWords(also)}` : "";
+  return ` · in ${named(note.view)}${tail}`;
+}
+
+/** ["a", "b", "c"] -> "a, b and c". */
+function joinWords(words) {
+  if (words.length < 2) return words.join("");
+  return `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
+}
+
+/** How the page names each table kind and projection the explanation can give. */
+const TABLE_LABELS = {
+  parts_list: "Parts list",
+  hole_table: "Hole table",
+  revision: "Revision block",
+  notes: "Notes",
+  other: "Other table",
+};
+const PROJECTION_LABELS = {
+  "first-angle": "First-angle",
+  "third-angle": "Third-angle",
+  unclear: "Projection unclear",
+};
+
+/** One "<strong>Lead:</strong> text" list item. */
+function leadItem(lead, rest) {
+  const item = document.createElement("li");
+  const strong = document.createElement("strong");
+  strong.textContent = `${lead}: `;
+  item.append(strong, rest);
+  return item;
+}
+
+/** The Views, Tables, and Balloons rows of the About card. */
+function renderAboutRows(explanation) {
+  const views = (explanation && explanation.views) || [];
+  const viewItems = document.createDocumentFragment();
+  for (const view of views) {
+    viewItems.appendChild(leadItem(view.label || `${capitalize(view.name)} view`, view.shows));
+  }
+  $("about-views").replaceChildren(viewItems);
+  const projection = (explanation && explanation.projection) || "unclear";
+  const note = explanation && explanation.projection_note;
+  $("about-projection-chip").textContent = PROJECTION_LABELS[projection] || PROJECTION_LABELS.unclear;
+  $("about-projection-note").textContent = note || "";
+  $("about-projection").hidden = !note && projection === "unclear";
+  $("about-views-row").hidden = views.length === 0 && !note;
+
+  const tables = (explanation && explanation.tables) || [];
+  const tableItems = document.createDocumentFragment();
+  for (const table of tables) {
+    tableItems.appendChild(leadItem(TABLE_LABELS[table.kind] || TABLE_LABELS.other, table.summary));
+  }
+  $("about-tables").replaceChildren(tableItems);
+  $("about-tables-row").hidden = tables.length === 0;
+
+  const balloons = explanation && explanation.balloons;
+  $("about-balloons").textContent = balloons || "";
+  $("about-balloons-row").hidden = !balloons;
+}
+
 /** "Why it matters" and "How to think about fixing" on an issue card, when explained. */
 function fillFindingNotes(container, finding) {
   const note = explainNote("findings", finding.key);
@@ -2869,6 +2935,7 @@ function renderAbout(result) {
     }
     $("about-features").replaceChildren(features);
   }
+  renderAboutRows(explanation);
   const issues = (explanation && explanation.parse_issues) || [];
   const lines = document.createDocumentFragment();
   for (const issue of issues) {

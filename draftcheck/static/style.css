@@ -1620,6 +1620,55 @@ td.is-edited::after {
   font-size: 12.5px;
 }
 
+.about-rows {
+  margin: 8px 0 0;
+  display: grid;
+  gap: 6px;
+}
+
+.about-row {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--rule);
+  font-size: 12.5px;
+}
+
+.about-row[hidden] {
+  display: none;
+}
+
+.about-row dt {
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.about-row dd {
+  margin: 0;
+}
+
+.about-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 3px;
+}
+
+.about-list strong {
+  font-weight: 650;
+}
+
+.about-projection {
+  margin-top: 5px;
+  color: var(--ink-2);
+}
+
+.about-projection .part-chip {
+  margin-right: 6px;
+}
+
 .ai-label {
   margin-top: 6px;
   font-size: 11px;

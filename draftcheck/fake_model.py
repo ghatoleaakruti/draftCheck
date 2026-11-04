@@ -16,9 +16,10 @@ and the usage limits all run for real on what it returns:
   after about two seconds. The rule engine decides, as always, whether that edit is
   allowed and whether it cleared anything.
 * **The explanation** ("Explain this drawing") returns :data:`SCRIPTED_EXPLANATION`, a
-  hand-written explanation of plate_001. Its note on the GDT-001 finding is included only
-  when that finding was in the request, as a real model would only explain findings it
-  was given. It is validated against the drawing like any real answer.
+  hand-written explanation of plate_001, including its one front view, an "unclear"
+  projection (one view, no projection symbol), and no tables. Its note on the GDT-001
+  finding is included only when that finding was in the request, as a real model would
+  only explain findings it was given. It is validated against the drawing like any real answer.
 """
 
 from __future__ import annotations
@@ -82,37 +83,58 @@ SCRIPTED_EXPLANATION = {
         ],
         "confidence": 0.8,
     },
+    "views": [
+        {
+            "name": "front",
+            "label": None,
+            "shows": "The face of the plate, with both holes and every dimension on the "
+            "sheet.",
+        }
+    ],
+    "projection": "unclear",
+    "projection_note": "Only one view is drawn and there is no projection symbol, so there "
+    "is nothing to tell first- from third-angle. A flat plate often needs just one view, "
+    "with its thickness given in a note or the title block.",
+    "tables": [],
+    "balloons": "There are no item balloons, so this is likely a single part rather than "
+    "an assembly.",
     "dimensions": [
         {
             "id": "dim_1",
             "kind": "location",
+            "view": "front",
             "purpose": "Locates hole 2 from the left edge (datum B), so the two holes end "
             "up the bolt spacing apart.",
         },
         {
             "id": "dim_2",
             "kind": "location",
+            "view": "front",
             "purpose": "Locates hole 1 from the left edge (datum B).",
         },
         {
             "id": "dim_3",
             "kind": "size",
+            "view": "front",
             "purpose": "Sets the overall height of the plate, likely so it fits the space "
             "it is mounted in.",
         },
         {
             "id": "dim_4",
             "kind": "size",
+            "view": "front",
             "purpose": "Sets the overall width of the plate.",
         },
         {
             "id": "dim_5",
             "kind": "location",
+            "view": "front",
             "purpose": "Locates the holes up from the bottom edge (datum A).",
         },
         {
             "id": "dim_6",
             "kind": "size",
+            "view": "front",
             "purpose": "Sizes both holes at once; Ø8 is likely a clearance hole for an M6 or "
             "similar bolt.",
         },

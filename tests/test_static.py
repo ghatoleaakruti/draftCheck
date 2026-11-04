@@ -323,3 +323,20 @@ def test_explanations_are_requested_and_drawn_as_text() -> None:
 
 def test_cancel_also_stops_an_explanation() -> None:
     assert "if (explainController) explainController.abort();" in read_app_js()
+
+
+def test_the_about_card_has_views_tables_and_balloons_rows() -> None:
+    page = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for element in ("about-views-row", "about-views", "about-projection-note",
+                    "about-tables-row", "about-tables", "about-balloons-row"):
+        assert f'id="{element}"' in page
+    source = read_app_js()
+    assert "function renderAboutRows(" in source
+    assert "renderAboutRows(explanation);" in source
+
+
+def test_dimension_notes_say_which_views_show_them() -> None:
+    source = read_app_js()
+    assert "${whereSeen(note)}" in source
+    assert "also seen in ${joinWords(also)}" in source
+    assert "` · in ${named(note.view)}${tail}`" in source

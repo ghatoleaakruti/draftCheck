@@ -1323,6 +1323,19 @@ each one is and why it is likely there, what each feature control frame controls
 that matters for function, the role of each datum, and, once the drawing has been checked,
 why each finding matters and how a student should think about fixing it.
 
+**Views, projection, tables (step 26d).** The answer also describes the sheet's layout:
+`views` (each `{name, label, shows}`; `name` is one of `prompts.VIEW_NAMES` — front, top,
+right, left, bottom, rear, section, detail, isometric, other — and `label` is the printed
+one, e.g. "SECTION A-A"), `projection` (`first-angle`, `third-angle`, or `unclear`) with a
+one- or two-sentence `projection_note` for a student, `tables` (each `{kind, summary}`;
+`kind` is one of `prompts.TABLE_KINDS` — parts_list, hole_table, revision, notes, other),
+and a `balloons` sentence. Each dimension note may say which view it is placed in (`view`)
+and which other views show the feature (`also_seen_in`). The prompt asks the model to read
+view labels, cutting-plane lines, and the projection symbol, and to say "unclear" rather
+than guess. On the page the About card gains a Views row (each view and what it shows, then
+the projection chip and note), a Tables row, and a Balloons row, each hidden when empty;
+a dimension's note ends "· in front view, also seen in top view".
+
 **A teaching aid, not a check.** The explanation is written by the model and is shown
 labelled "AI explanation · not checked by the rules" once in every section that shows one.
 The rules never read it, the extraction prompt is unchanged, and nothing in it is ever
@@ -1336,15 +1349,21 @@ key (findings) is not on the drawing or among the findings that were sent — an
 entry for the same item. Each drop is a line in the explanation's `parse_issues`, which the
 card lists. Datum notes are accepted only for labels a datum feature symbol on the drawing
 actually carries: a letter cited in a frame but never defined gets no story. An unknown part
-type becomes `other`; a confidence is clamped to 0–1.
+type becomes `other`; a confidence is clamped to 0–1. A view whose name is not in
+`VIEW_NAMES` is dropped. A dimension's `view` and `also_seen_in` may only name views the
+explanation's own `views` list describes: any other name is cleared and recorded (the
+dimension's note itself is kept, since its purpose is about a real dimension), and a repeat
+of its own view is removed. An unknown projection becomes `unclear` (recorded); an unknown
+table kind becomes `other`.
 
 **What it explains.** The confirmed drawing and its findings when a check has run
 (`confirmed.json`, `findings.json`), otherwise the extraction with no findings. The reply
 says which (`based_on`).
 
 **Cached.** The answer is saved in the run folder as `explain.json`, with a fingerprint
-(`explain.explanation_fingerprint`: a hash of the drawing's items and the findings' keys
-and messages). Asking again about the same data returns the saved answer with
+(`explain.explanation_fingerprint`: a hash of `EXPLANATION_VERSION`, the drawing's items,
+and the findings' keys and messages; the version is bumped when the answer's shape changes,
+so an `explain.json` saved under an older shape is explained afresh). Asking again about the same data returns the saved answer with
 `cached: true` and spends no model call and no limit slot. When the confirmed data changes,
 the next request explains afresh. If the student has already asked for an explanation on a
 run, the page asks again after each check, so the issue cards get their notes.
@@ -1357,7 +1376,9 @@ way (`_unless_disconnected`), and nothing is written.
 
 **Fake model.** In fake-model mode (§4.16) the call returns
 `fake_model.SCRIPTED_EXPLANATION`, a hand-written explanation of plate_001, with its note
-on GDT-001 included only when that finding was sent.
+on GDT-001 included only when that finding was sent. It describes plate_001 honestly: one
+front view, projection `unclear` (one view, no projection symbol), no tables, a balloons
+sentence saying there are none, and every dimension in the front view with nothing in `also_seen_in`.
 
 ## 5. Repo layout (what exists today)
 
