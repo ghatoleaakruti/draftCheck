@@ -68,6 +68,13 @@ class JSONChatResult:
     usage: Usage
     model: str
     attempts: int
+    #: Which provider answered (``"baseten"``, ``"meta"``). Set by the server's guard,
+    #: which is the one place that knows whether a backup provider stepped in.
+    provider: str | None = None
+    #: True when the first provider failed and this reply came from the backup.
+    fell_back: bool = False
+    #: Why the first provider was given up on, e.g. ``"timeout"`` or ``"HTTP 503"``.
+    fallback_reason: str | None = None
 
 
 def _read_usage(raw_usage: object) -> Usage:

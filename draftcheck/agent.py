@@ -56,6 +56,12 @@ class RoundRecord:
     error: str | None = None
     #: True when that failure was the model call running out of time.
     timed_out: bool = False
+    #: The model and provider that answered this round. ``None`` when nobody did.
+    model: str | None = None
+    provider: str | None = None
+    #: True when the first provider failed and a backup answered this round instead.
+    fell_back: bool = False
+    fallback_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +113,10 @@ class CorrectionReport:
                     "introduced": record.introduced,
                     "error": record.error,
                     "timed_out": record.timed_out,
+                    "model": record.model,
+                    "provider": record.provider,
+                    "fell_back": record.fell_back,
+                    "fallback_reason": record.fallback_reason,
                 }
                 for record in self.rounds
             ],
@@ -234,6 +244,10 @@ def correct(
             findings_after=after,
             resolved=sorted(before_keys - after_keys),
             introduced=sorted(after_keys - before_keys),
+            model=getattr(reply, "model", None),
+            provider=getattr(reply, "provider", None),
+            fell_back=bool(getattr(reply, "fell_back", False)),
+            fallback_reason=getattr(reply, "fallback_reason", None),
         )
         rounds.append(record)
         history.append(_history_entry(record))
