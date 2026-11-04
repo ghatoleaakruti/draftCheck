@@ -45,7 +45,15 @@ const paper = $("paper");
 const pageImage = $("page-image");
 const overlay = $("overlay");
 const boxLayer = $("boxes");
+const cloudLayer = $("clouds");
+const penLayer = $("pen-notes");
+const stampLayer = $("stamp-layer");
+const scanLayer = $("scan-layer");
 const overlayToggle = $("show-overlay");
+const readingSheet = $("reading-sheet");
+const readingPreview = $("reading-preview");
+const readingLabel = $("reading-label");
+const readingOverlay = $("reading-overlay");
 
 const stepper = $("stepper");
 const modelPill = $("model-pill");
@@ -69,6 +77,7 @@ const addDatumButton = $("add-datum");
 
 const issuesEmpty = $("issues-empty");
 const findingsList = $("findings-list");
+const roundsStrip = $("rounds-strip");
 const findingsNone = $("findings-none");
 const checkStatus = $("check-status");
 const checkIssuesBox = $("check-parse-issues");
@@ -77,10 +86,10 @@ const checkIssuesList = $("check-parse-issues-list");
 const correctionsEmpty = $("corrections-empty");
 const agentPanel = $("agent-panel");
 const agentStatus = $("agent-status");
-const agentRounds = $("agent-rounds");
-const agentVerdicts = $("agent-verdicts");
-const redlineImage = $("redline-image");
+const correctionsIntro = $("corrections-intro");
+const correctionsRows = $("corrections-rows");
 const redlinePdf = $("redline-pdf");
+const exportCsv = $("export-csv");
 
 const actionHint = $("action-hint");
 const primaryButton = $("primary");
@@ -164,6 +173,16 @@ const state = {
   answered: null,
   /** True when the server answered with the development fake model (DRAFTCHECK_FAKE_MODEL). */
   fake: false,
+  /** The last check's findings, in run_rules order: finding N is cloud N and card N. */
+  findings: [],
+  /** How many rules the last check ran, as the server said. */
+  rulesRun: null,
+  /** The last /fix reply, as it came back. */
+  fixResult: null,
+  /** Pixels per sheet unit on this page image (see sheet.js). */
+  unit: 1,
+  /** True from a new run until its boxes have been revealed by the final sweep. */
+  revealPending: false,
 };
 
 let reading = false;
@@ -383,7 +402,7 @@ for (const tab of tabs) {
 function currentStage() {
   if (reading) return "reading";
   if (!state.runId) return "empty";
-  if (fixing) return "fixing";
+  if (fixing || replaying) return "fixing";
   if (checking) return "checking";
   if (!state.checked || state.stale) return "confirm";
   if (state.fixedAt && !state.agentStale) return "done";
@@ -585,7 +604,8 @@ function updateUI() {
   primaryButton.dataset.stage = stage;
   actionHint.textContent = action.hint;
   actionHint.classList.toggle("is-warn", Boolean(action.warn));
-  cancelButton.hidden = !busy;
+  // The replay of a fix that has already come back is not something to cancel.
+  cancelButton.hidden = !busy || replaying;
 
   // Desk: the file, and the drop zone or the paper.
   const file = reading ? state.pendingFile : state.file;
@@ -595,10 +615,16 @@ function updateUI() {
     : "Upload a drawing to begin";
 
   const showPaper = Boolean(state.runId) && !reading && state.imageReady;
-  emptyState.hidden = Boolean(state.runId) && !reading;
+  // While reading, the scanning sheet stands in for both the drop zone and the old page;
+  // the old page comes back untouched if the read is cancelled or fails.
+  emptyState.hidden = reading || Boolean(state.runId);
+  readingSheet.hidden = !reading;
   paper.hidden = !showPaper;
   if (showPaper) {
     fitPaper();
+  }
+  if (reading) {
+    fitReadingSheet();
   }
 
   dropzone.classList.toggle("is-busy", reading);
@@ -634,33 +660,56 @@ function updateUI() {
 
 /* ---- Sizing the paper to the stage --------------------------------------- */
 
+/** Scale a sheet of `w` x `h` to fit the stage, keeping its aspect. */
+function fitSheet(sheet, w, h) {
+  const style = getComputedStyle(stageEl);
+  const width = stageEl.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  const height = stageEl.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+  if (width <= 0 || height <= 0 || !w || !h) {
+    return;
+  }
+  const scale = Math.min(width / w, height / h);
+  sheet.style.width = `${Math.floor(w * scale)}px`;
+  sheet.style.height = `${Math.floor(h * scale)}px`;
+}
+
 /** Scale the page to fit the stage, keeping its aspect; the SVG follows the paper. */
 function fitPaper() {
   if (!state.imageReady || paper.hidden) {
     return;
   }
-  const style = getComputedStyle(stageEl);
-  const width = stageEl.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-  const height = stageEl.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
-  if (width <= 0 || height <= 0) {
-    return;
-  }
-  const scale = Math.min(width / state.imageW, height / state.imageH);
-  paper.style.width = `${Math.floor(state.imageW * scale)}px`;
-  paper.style.height = `${Math.floor(state.imageH * scale)}px`;
+  fitSheet(paper, state.imageW, state.imageH);
 }
 
-new ResizeObserver(fitPaper).observe(stageEl);
+new ResizeObserver(() => {
+  fitPaper();
+  fitReadingSheet();
+}).observe(stageEl);
+
+/** Give an overlay its image-pixel viewBox and its sheet unit (--u, used by style.css). */
+function sizeOverlay(svg, width, height) {
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  const unit = Sheet.unitFor(width);
+  svg.style.setProperty("--u", String(unit));
+  return unit;
+}
 
 pageImage.addEventListener("load", () => {
   state.imageW = pageImage.naturalWidth;
   state.imageH = pageImage.naturalHeight;
   state.imageReady = true;
-  // The overlay is in image pixels, so step 19b can draw at the drawing's own scale.
-  overlay.setAttribute("viewBox", `0 0 ${state.imageW} ${state.imageH}`);
-  overlay.setAttribute("preserveAspectRatio", "none");
+  // The overlay is in image pixels, so everything on it is drawn at the drawing's scale.
+  state.unit = sizeOverlay(overlay, state.imageW, state.imageH);
+  Sheet.ensureRoughFilter(overlay, state.unit);
   layoutBoxes();
+  if (state.checked) {
+    drawClouds();
+  }
   updateUI();
+  if (state.revealPending) {
+    revealBoxes();
+  }
 });
 
 pageImage.addEventListener("error", () => {
@@ -710,7 +759,7 @@ function pick(ids, scrollInto) {
   }
 }
 
-/** Register every item, and draw an SVG box for the ones the model placed. */
+/** Register every item, and draw an SVG box and id tag for the ones the model placed. */
 function buildOverlay(items) {
   linked.clear();
   pickedIds = [];
@@ -724,12 +773,16 @@ function buildOverlay(items) {
       linked.set(item.id, { box: null, row: null, bbox: null });
       continue;
     }
-    const box = document.createElementNS(SVG_NS, "rect");
-    box.setAttribute("class", item.unsure ? "obox is-unsure" : "obox");
+    const box = Sheet.el("g", { class: item.unsure ? "obox is-unsure" : "obox" });
+    // Hidden until the final sweep passes it, on a run that has just been read.
+    box.classList.toggle("is-pending", state.revealPending);
     box.dataset.itemId = item.id;
-    const title = document.createElementNS(SVG_NS, "title");
+    Sheet.el("rect", { class: "obox-frame", rx: 0, ry: 0 }, box);
+    Sheet.el("rect", { class: "obox-tag" }, box);
+    const tag = Sheet.el("text", { class: "obox-id" }, box);
+    tag.textContent = item.id;
+    const title = Sheet.el("title", {}, box);
     title.textContent = `${item.id}: ${item.title}`;
-    box.appendChild(title);
     boxLayer.appendChild(box);
     linked.set(item.id, { box, row: null, bbox: item.bbox });
   }
@@ -741,16 +794,133 @@ function layoutBoxes() {
   if (!state.imageReady) {
     return;
   }
+  const u = state.unit;
   for (const pair of linked.values()) {
     if (!pair.box) {
       continue;
     }
-    const [x0, y0, x1, y1] = pair.bbox;
-    pair.box.setAttribute("x", String(x0 * state.imageW));
-    pair.box.setAttribute("y", String(y0 * state.imageH));
-    pair.box.setAttribute("width", String(Math.max(0, x1 - x0) * state.imageW));
-    pair.box.setAttribute("height", String(Math.max(0, y1 - y0) * state.imageH));
+    const box = Sheet.toPixels(pair.bbox, state.imageW, state.imageH);
+    const frame = pair.box.querySelector(".obox-frame");
+    frame.setAttribute("x", String(box.x0));
+    frame.setAttribute("y", String(box.y0));
+    frame.setAttribute("width", String(Math.max(0, box.x1 - box.x0)));
+    frame.setAttribute("height", String(Math.max(0, box.y1 - box.y0)));
+    frame.setAttribute("rx", String(2 * u));
+
+    // The id tag sits on top of the box's top-left corner, kept on the sheet.
+    const label = pair.box.querySelector(".obox-id");
+    const tagH = 11.5 * u;
+    const tagW = label.textContent.length * 8.5 * u * 0.62 + 6 * u;
+    const tagX = Math.min(box.x0, state.imageW - tagW);
+    const tagY = Math.max(0, box.y0 - tagH);
+    const tag = pair.box.querySelector(".obox-tag");
+    tag.setAttribute("x", String(tagX));
+    tag.setAttribute("y", String(tagY));
+    tag.setAttribute("width", String(tagW));
+    tag.setAttribute("height", String(tagH));
+    tag.setAttribute("rx", String(2 * u));
+    label.setAttribute("x", String(tagX + 3 * u));
+    label.setAttribute("y", String(tagY + tagH - 3 * u));
+    pair.centerY = (box.y0 + box.y1) / 2;
   }
+}
+
+/* ---- The reading scan ---------------------------------------------------- */
+
+/*
+ * While the model reads, a scan band loops down a stand-in sheet: the picked image when
+ * it is one, a blank sheet for a PDF (the server renders the page; until it answers there
+ * is no picture to show). When the reply lands, one last sweep runs over the real page and
+ * each box appears as the line passes its centre.
+ */
+
+/** The stand-in sheet's size in pixels: the picked image's, or A-size landscape. */
+const BLANK_SHEET = { w: 1414, h: 1000 };
+let readingSize = BLANK_SHEET;
+let readingScan = null;
+let readingPreviewUrl = null;
+
+function fitReadingSheet() {
+  if (!readingSheet.hidden) {
+    fitSheet(readingSheet, readingSize.w, readingSize.h);
+  }
+}
+
+function startReadingScan(file) {
+  stopReadingScan();
+  readingSize = BLANK_SHEET;
+  readingLabel.textContent = `Reading ${file.name}…`;
+  readingPreview.hidden = true;
+  readingPreview.removeAttribute("src");
+
+  const draw = () => {
+    const unit = sizeOverlay(readingOverlay, readingSize.w, readingSize.h);
+    readingOverlay.replaceChildren();
+    fitReadingSheet();
+    if (Sheet.reducedMotion()) {
+      return;
+    }
+    const band = Sheet.scanBand(readingOverlay, readingSize.w, readingSize.h, unit);
+    readingOverlay.appendChild(band);
+    if (readingScan) readingScan.stop();
+    readingScan = Sheet.sweep(band, readingSize.h, 2400, { loop: true });
+  };
+
+  if (file.type && file.type.startsWith("image/")) {
+    readingPreviewUrl = URL.createObjectURL(file);
+    readingPreview.onload = () => {
+      readingSize = { w: readingPreview.naturalWidth, h: readingPreview.naturalHeight };
+      readingPreview.hidden = false;
+      readingLabel.textContent = "";
+      draw();
+    };
+    readingPreview.src = readingPreviewUrl;
+  }
+  draw();
+}
+
+function stopReadingScan() {
+  if (readingScan) {
+    readingScan.stop();
+    readingScan = null;
+  }
+  readingOverlay.replaceChildren();
+  if (readingPreviewUrl) {
+    URL.revokeObjectURL(readingPreviewUrl);
+    readingPreviewUrl = null;
+  }
+}
+
+/** The final sweep over the real page, revealing each box as the line passes it. */
+let revealScan = null;
+
+function revealBoxes() {
+  state.revealPending = false;
+  const pending = Array.from(boxLayer.querySelectorAll(".obox.is-pending"));
+  if (revealScan) revealScan.stop();
+  scanLayer.replaceChildren();
+  if (Sheet.reducedMotion()) {
+    for (const box of pending) box.classList.remove("is-pending");
+    return;
+  }
+  const band = Sheet.scanBand(overlay, state.imageW, state.imageH, state.unit);
+  scanLayer.appendChild(band);
+  const scan = Sheet.sweep(band, state.imageH, 1100, {
+    onRow(y) {
+      for (const box of pending) {
+        const pair = linked.get(box.dataset.itemId);
+        if (pair && pair.centerY <= y) box.classList.remove("is-pending");
+      }
+    },
+  });
+  revealScan = scan;
+  scan.done.then(() => {
+    for (const box of pending) box.classList.remove("is-pending");
+    if (revealScan === scan) {
+      scanLayer.replaceChildren();
+      revealScan = null;
+    }
+  });
 }
 
 /** Tie a freshly built row to its box, or mark it as unplaceable. */
@@ -789,7 +959,13 @@ hoverHandlers(overlay);
 hoverHandlers(extracted);
 
 // Clicking a box goes to its row in the Extracted tab; clicking a row lights its box.
+// A cloud goes to its issue card instead (see the Revision clouds section).
 overlay.addEventListener("click", (event) => {
+  const cloud = event.target.closest(".cloud");
+  if (cloud) {
+    openIssue(Number(cloud.dataset.number), { fromCloud: true });
+    return;
+  }
   const box = event.target.closest(".obox");
   if (!box) {
     return;
@@ -807,9 +983,13 @@ extracted.addEventListener("click", (event) => {
   }
 });
 
-overlayToggle.addEventListener("change", () => {
-  boxLayer.style.display = overlayToggle.checked ? "" : "none";
-});
+/** Show or fade the model's boxes. After a check they fade, and this brings them back. */
+function setBoxesShown(shown) {
+  overlayToggle.checked = shown;
+  boxLayer.classList.toggle("is-faded", !shown);
+}
+
+overlayToggle.addEventListener("change", () => setBoxesShown(overlayToggle.checked));
 
 /* ---- The two copies of the drawing --------------------------------------- */
 
@@ -1548,7 +1728,14 @@ function clearFindings() {
   findingsList.replaceChildren();
   findingsNone.hidden = true;
   checkIssuesBox.hidden = true;
+  state.findings = [];
+  issueCards.clear();
+  numberByKey.clear();
+  selectedIssue = null;
   clearAgent();
+  cloudLayer.replaceChildren();
+  clouds.clear();
+  roundsStrip.hidden = true;
 }
 
 /** Where a finding is: its own bbox, or the first of its items that has one. */
@@ -1567,12 +1754,75 @@ function findingZone(finding) {
   return null;
 }
 
-/** One finding card: delta, title, rule and zone, severity, why, and source. */
+/* ---- Issues: cards and revision clouds ----------------------------------- */
+
+/*
+ * Finding N is card N, cloud N, delta N, and marker N on the redline PDF: all numbered in
+ * the order the server's rules returned them. A cloud and its card select each other.
+ */
+
+/** number -> card <li>, and number -> cloud <g>. Rebuilt per check. */
+const issueCards = new Map();
+const clouds = new Map();
+/** finding key ("GDT-001@fcf_1") -> its number. */
+const numberByKey = new Map();
+
+let selectedIssue = null;
+
+function cloudLabel(finding, number) {
+  return `Issue ${number}: ${finding.title || finding.rule_id}. Open its card.`;
+}
+
+/** Select issue `number`: its card, its cloud, and the items it is about. */
+function selectIssue(number) {
+  const card = issueCards.get(number);
+  if (!card) {
+    return;
+  }
+  for (const [other, otherCard] of issueCards) {
+    const on = other === number;
+    otherCard.classList.toggle("is-active", on);
+    if (on) {
+      otherCard.setAttribute("aria-current", "true");
+    } else {
+      otherCard.removeAttribute("aria-current");
+    }
+  }
+  for (const [other, cloud] of clouds) {
+    cloud.classList.toggle("is-selected", other === number);
+  }
+  selectedIssue = number;
+  const finding = state.findings[number - 1];
+  pick(finding && Array.isArray(finding.item_ids) ? finding.item_ids : [], null);
+}
+
+/** Open the Issues tab on issue `number`, as clicking its cloud does. */
+function openIssue(number, { fromCloud = false } = {}) {
+  if (!issueCards.has(number)) {
+    return;
+  }
+  selectTab("issues");
+  selectIssue(number);
+  if (fromCloud) {
+    issueCards.get(number).scrollIntoView({ block: "nearest", behavior: Sheet.reducedMotion() ? "auto" : "smooth" });
+  }
+}
+
+overlay.addEventListener("keydown", (event) => {
+  const cloud = event.target.closest(".cloud");
+  if (cloud && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault();
+    openIssue(Number(cloud.dataset.number), { fromCloud: true });
+  }
+});
+
+/** One finding card: delta, title, rule and zone, severity, why, source, attempts. */
 function findingCard(finding, number) {
   const severity = finding.severity === "error" ? "error" : "warning";
   const item = document.createElement("li");
   item.className = `finding sev-${severity}`;
   item.tabIndex = 0;
+  item.dataset.number = String(number);
 
   const delta = document.createElement("span");
   delta.className = "delta";
@@ -1602,33 +1852,85 @@ function findingCard(finding, number) {
   source.className = "finding-source";
   source.textContent = `Source: ${text(finding.source)}`;
 
-  item.append(delta, title, chip, meta, why, source);
+  // Filled round by round as the correction loop's reply is replayed.
+  const attempts = document.createElement("ol");
+  attempts.className = "attempts";
+  attempts.hidden = true;
+
+  item.append(delta, title, chip, meta, why, source, attempts);
   item.setAttribute("aria-label", `Issue ${number}, ${severity}: ${title.textContent}. ${meta.textContent}`);
 
-  function show() {
-    for (const other of findingsList.children) {
-      other.classList.toggle("is-active", other === item);
-      other.removeAttribute("aria-current");
-    }
-    item.setAttribute("aria-current", "true");
-    pick(ids, null);
-  }
-  item.addEventListener("click", show);
+  item.addEventListener("click", () => selectIssue(number));
   item.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") {
+    if (event.target === item && (event.key === "Enter" || event.key === " ")) {
       event.preventDefault();
-      show();
+      selectIssue(number);
     }
   });
   return item;
+}
+
+/** Draw a revision cloud around every finding the rules could place. */
+function drawClouds() {
+  cloudLayer.replaceChildren();
+  clouds.clear();
+  if (!state.imageReady) {
+    return;
+  }
+  const filter = Sheet.ensureRoughFilter(overlay, state.unit);
+  let order = 0;
+  state.findings.forEach((finding, index) => {
+    const box = Sheet.toPixels(finding.bbox, state.imageW, state.imageH);
+    if (!box) {
+      return;
+    }
+    const number = index + 1;
+    const cloud = Sheet.cloud({
+      box,
+      number,
+      label: cloudLabel(finding, number),
+      unit: state.unit,
+      width: state.imageW,
+      height: state.imageH,
+      order,
+      filter,
+    });
+    cloud.classList.add("st-open");
+    cloud.classList.toggle("is-selected", number === selectedIssue);
+    cloudLayer.appendChild(cloud);
+    clouds.set(number, cloud);
+    order += 1;
+  });
+}
+
+/** Colour each cloud by its finding's outcome: open, verified, held, or unresolved. */
+function colourClouds(outcomes) {
+  for (const [number, cloud] of clouds) {
+    const finding = state.findings[number - 1];
+    const outcome = (finding && outcomes.get(finding.key)) || "open";
+    for (const name of ["st-open", "st-verified", "st-held", "st-unresolved"]) {
+      cloud.classList.toggle(name, name === `st-${outcome}`);
+    }
+  }
 }
 
 function renderFindings(result) {
   const findings = result.findings || [];
   const issues = result.parse_issues || [];
 
+  state.findings = findings;
+  state.rulesRun = typeof result.rules_run === "number" ? result.rules_run : null;
+  issueCards.clear();
+  numberByKey.clear();
+  selectedIssue = null;
+
   const cards = document.createDocumentFragment();
-  findings.forEach((finding, index) => cards.appendChild(findingCard(finding, index + 1)));
+  findings.forEach((finding, index) => {
+    const card = findingCard(finding, index + 1);
+    issueCards.set(index + 1, card);
+    if (finding.key) numberByKey.set(finding.key, index + 1);
+    cards.appendChild(card);
+  });
 
   const lines = document.createDocumentFragment();
   for (const issue of issues) {
@@ -1650,20 +1952,69 @@ function renderFindings(result) {
   state.errorCount = result.error_count || 0;
   state.warningCount = result.warning_count || 0;
   setCheckStatus();
+
+  // The model's boxes give way to the checker's clouds; "Show boxes" brings them back.
+  setBoxesShown(false);
+  drawClouds();
+  resetRoundsStrip();
 }
 
-/* ---- Corrections --------------------------------------------------------- */
+/* ---- The rounds strip ----------------------------------------------------- */
 
-function clearAgent() {
-  state.fixedAt = null;
-  state.agentStale = false;
-  state.fix = null;
-  state.exported = false;
-  agentStatus.hidden = true;
-  agentRounds.replaceChildren();
-  agentVerdicts.replaceChildren();
-  redlineImage.removeAttribute("src");
+const roundCells = Array.from(roundsStrip.querySelectorAll(".round-cell"));
+
+/** Set one cell: `phase` is pending, running, done, or skipped. */
+function setRoundCell(index, { number = "–", sub = "Waiting", phase = "pending", title = "" } = {}) {
+  const cell = roundCells[index];
+  if (!cell) {
+    return;
+  }
+  cell.dataset.phase = phase;
+  cell.querySelector(".strip-number").textContent = String(number);
+  cell.querySelector(".strip-sub").textContent = sub;
+  cell.title = title;
 }
+
+/** After a check: what was found, and every round still to come. */
+function resetRoundsStrip() {
+  roundsStrip.hidden = !state.checked;
+  const ran = state.rulesRun === null ? "Rules ran" : `${plural(state.rulesRun, "rule")} ran`;
+  setRoundCell(0, {
+    number: state.findings.length,
+    sub: ran,
+    phase: "done",
+    title: `${plural(state.findings.length, "finding")} on the confirmed tables`,
+  });
+  for (let index = 1; index <= MAX_ROUNDS; index += 1) {
+    setRoundCell(index);
+  }
+}
+
+/** "1 verified, 1 rejected": what the rule engine made of one round's edits. */
+function roundSummaryText(round) {
+  if (round.error) {
+    return "Could not run";
+  }
+  const edits = [...(round.applied || []), ...(round.rejected || [])];
+  if (edits.length === 0) {
+    return "No edits proposed";
+  }
+  const count = (status) => edits.filter((edit) => edit.status === status).length;
+  const parts = [`${count("verified")} verified`];
+  for (const [status, word] of [["held", "held"], ["failed", "failed"], ["rejected", "rejected"]]) {
+    if (count(status) > 0) parts.push(`${count(status)} ${word}`);
+  }
+  return parts.join(", ");
+}
+
+/* ---- Attempts, in each issue card ----------------------------------------- */
+
+const VERDICT_CHIPS = {
+  verified: "✓ Rule engine: pass",
+  held: "! pass, held for designer",
+  failed: "✕ Rule engine: fail",
+  rejected: "✕ Rule engine: fail",
+};
 
 function paragraph(className, value) {
   const line = document.createElement("p");
@@ -1672,152 +2023,408 @@ function paragraph(className, value) {
   return line;
 }
 
-/** One proposed edit. `applied` is the rule engine's word, not the model's. */
-function editItem(edit, applied) {
+/** One round's proposal for one issue: the diff, the verdict, and Python's note. */
+function attemptItem(round, edit) {
   const item = document.createElement("li");
-  item.className = applied ? "edit is-applied" : "edit is-rejected";
+  item.className = `attempt st-${edit.status}`;
 
   const head = document.createElement("p");
-  head.className = "edit-head";
-  const tag = document.createElement("span");
-  tag.className = "edit-tag";
-  tag.textContent = applied ? "applied" : "rejected";
+  head.className = "attempt-head";
+  const label = document.createElement("span");
+  label.className = "attempt-round";
+  label.textContent = `Round ${round.round} proposal`;
   const sentence = document.createElement("span");
-  sentence.className = "edit-text";
+  sentence.className = "attempt-edit";
   sentence.textContent = edit.edit;
-  head.append(tag, sentence);
+  head.append(label, sentence);
+  if (round.fell_back) {
+    const fallback = document.createElement("span");
+    fallback.className = "attempt-fallback";
+    fallback.textContent = `answered by ${round.model || "the fallback model"} (fallback)`;
+    head.append(fallback);
+  }
   item.appendChild(head);
 
-  if (edit.rationale) {
-    item.appendChild(paragraph("edit-why", `Why: ${edit.rationale}`));
+  if (edit.before !== null && edit.after !== null && edit.before !== undefined) {
+    const diff = document.createElement("div");
+    diff.className = "diff";
+    const before = document.createElement("p");
+    before.className = "diff-line diff-before";
+    const was = document.createElement("del");
+    was.textContent = edit.before;
+    before.append(was);
+    const after = document.createElement("p");
+    after.className = "diff-line diff-after";
+    const now = document.createElement(edit.status === "rejected" ? "del" : "ins");
+    now.textContent = edit.after;
+    after.append(now);
+    diff.append(before, after);
+    diff.setAttribute("aria-label", `Before: ${edit.before}. ${edit.status === "rejected" ? "Proposed, refused" : "After"}: ${edit.after}.`);
+    item.appendChild(diff);
   }
-  if (!applied && edit.reason) {
-    item.appendChild(paragraph("edit-reason", `Rejected: ${edit.reason}`));
+
+  const verdict = document.createElement("p");
+  verdict.className = "attempt-verdict";
+  const chip = document.createElement("span");
+  chip.className = "verdict-chip";
+  chip.textContent = VERDICT_CHIPS[edit.status] || VERDICT_CHIPS.failed;
+  verdict.append(chip);
+  if (edit.note) {
+    const note = document.createElement("span");
+    note.className = "verdict-note";
+    note.textContent = edit.note;
+    verdict.append(note);
   }
+  item.appendChild(verdict);
   return item;
 }
 
-function changedFindings(label, findings, className) {
-  if (!findings || findings.length === 0) {
-    return null;
+/** Proposals that cite no issue on the list still get shown, in a card of their own. */
+function otherProposalsCard() {
+  let card = findingsList.querySelector(".finding.is-other");
+  if (!card) {
+    card = document.createElement("li");
+    card.className = "finding is-other";
+    card.appendChild(paragraph("finding-title", "Proposals not tied to an issue"));
+    const attempts = document.createElement("ol");
+    attempts.className = "attempts";
+    card.appendChild(attempts);
+    findingsList.appendChild(card);
   }
-  const block = document.createElement("div");
-  block.className = `changed ${className}`;
-  block.appendChild(paragraph("changed-label", label));
-  const list = document.createElement("ul");
-  list.className = "changed-list";
-  for (const finding of findings) {
-    const line = document.createElement("li");
-    line.textContent = finding.message || finding.key;
-    list.appendChild(line);
-  }
-  block.appendChild(list);
-  return block;
+  return card;
 }
 
-/** "Answered by muse-spark-1.2 (fallback: timeout)", or null when no model answered. */
-function roundModel(round) {
-  if (!round.model) {
-    return null;
-  }
-  const fallback = round.fell_back
-    ? ` (fallback${round.fallback_reason ? `: ${round.fallback_reason}` : ""})`
-    : "";
-  return `Answered by ${round.model}${fallback}`;
-}
-
-function roundCard(round) {
-  const item = document.createElement("li");
-  item.className = "round";
-
-  const head = document.createElement("p");
-  head.className = "round-head";
-  const number = document.createElement("span");
-  number.textContent = `Round ${round.round}`;
-  const counts = document.createElement("span");
-  counts.className = "round-counts";
-  counts.textContent = `Findings: ${round.findings_before} → ${round.findings_after}`;
-  head.append(number, counts);
-  item.appendChild(head);
-
-  const answered = roundModel(round);
-  if (answered) {
-    const model = paragraph("round-model", answered);
-    model.classList.toggle("is-fallback", Boolean(round.fell_back));
-    item.appendChild(model);
+/** Add one round's edits to the cards of the issues they cite. */
+function showRoundAttempts(round) {
+  const edits = [...(round.applied || []), ...(round.rejected || [])];
+  for (const edit of edits) {
+    const numbers = (edit.finding_ids || []).map((key) => numberByKey.get(key)).filter(Boolean);
+    const cards = numbers.length ? numbers.map((number) => issueCards.get(number)) : [otherProposalsCard()];
+    for (const card of cards) {
+      const list = card.querySelector(".attempts");
+      list.hidden = false;
+      list.appendChild(attemptItem(round, edit));
+    }
   }
   if (round.error) {
-    item.appendChild(paragraph("round-error", `This round could not run: ${round.error}`));
+    const card = otherProposalsCard();
+    card.querySelector(".finding-title").textContent = "Rounds that could not run";
+    const list = card.querySelector(".attempts");
+    list.appendChild(paragraph("round-error", `Round ${round.round} could not run: ${round.error}`));
   }
-
-  const applied = round.applied || [];
-  const rejected = round.rejected || [];
-  if (applied.length === 0 && rejected.length === 0) {
-    item.appendChild(paragraph("round-empty", "The model proposed no edits in this round."));
-  } else {
-    const edits = document.createElement("ul");
-    edits.className = "edits";
-    for (const edit of applied) edits.appendChild(editItem(edit, true));
-    for (const edit of rejected) edits.appendChild(editItem(edit, false));
-    item.appendChild(edits);
-  }
-
-  const cleared = changedFindings("Cleared:", round.resolved, "is-cleared");
-  const introduced = changedFindings("Introduced:", round.introduced, "is-introduced");
-  if (cleared) item.appendChild(cleared);
-  if (introduced) item.appendChild(introduced);
-  if (!cleared && !introduced && !round.error) {
-    item.appendChild(paragraph("round-empty", "No finding changed in this round."));
-  }
-  return item;
 }
 
-function verdictItem(entry) {
-  const item = document.createElement("li");
-  const resolved = entry.status === "resolved";
-  item.className = resolved ? "verdict is-resolved" : "verdict is-unresolved";
+/* ---- Corrections ---------------------------------------------------------- */
 
-  const tag = document.createElement("span");
-  tag.className = "verdict-tag";
-  tag.textContent = resolved ? "verified resolved" : "unresolved";
-  const key = document.createElement("code");
-  key.className = "rule-id";
-  key.textContent = entry.finding;
-  const message = document.createElement("span");
-  message.className = "verdict-message";
-  message.textContent = entry.message;
+/** Bumped whenever a replay should stop: a new check, a new run, or a new fix. */
+let replayToken = 0;
+let replaying = false;
+const ROUND_REPLAY_MS = 600;
 
-  item.append(tag, key, message);
-  return item;
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+function clearSheetMarkup() {
+  penLayer.replaceChildren();
+  stampLayer.replaceChildren();
+  penNotes = [];
+}
+
+function clearAgent() {
+  replayToken += 1;
+  replaying = false;
+  state.fixedAt = null;
+  state.agentStale = false;
+  state.fix = null;
+  state.fixResult = null;
+  state.exported = false;
+  agentStatus.hidden = true;
+  correctionsRows.replaceChildren();
+  correctionsIntro.textContent = "";
+  clearSheetMarkup();
+  colourClouds(new Map());
+  for (const list of findingsList.querySelectorAll(".attempts")) {
+    list.replaceChildren();
+    list.hidden = true;
+  }
+  const other = findingsList.querySelector(".finding.is-other");
+  if (other) other.remove();
+  if (state.checked) resetRoundsStrip();
+}
+
+/** Every edit the loop proposed that has something to write on the sheet, in order. */
+function sheetEdits(result) {
+  const edits = [];
+  for (const round of result.rounds || []) {
+    for (const edit of [...(round.applied || []), ...(round.rejected || [])]) {
+      if (edit.pen) edits.push(edit);
+    }
+  }
+  return edits;
+}
+
+/* Pen notes: one per edit, beside the cloud of the issue it cites. */
+let penNotes = [];
+
+function noteAnchor(edit) {
+  for (const key of edit.finding_ids || []) {
+    const cloud = clouds.get(numberByKey.get(key));
+    if (cloud) return cloud.ring;
+  }
+  const pair = edit.target_id ? linked.get(edit.target_id) : null;
+  return pair && pair.bbox ? Sheet.toPixels(pair.bbox, state.imageW, state.imageH) : null;
+}
+
+const NOTE_STATUS = { verified: "verified", held: "held", failed: "held", rejected: "rejected" };
+
+function drawPenNotes(result) {
+  clearSheetMarkup();
+  const edits = sheetEdits(result);
+  if (edits.length === 0 || !state.imageReady) {
+    return 0;
+  }
+  const font = Sheet.loadPenFont();
+  const filter = Sheet.ensureRoughFilter(overlay, state.unit);
+  const slots = new Map();
+  let order = 0;
+  for (const edit of edits) {
+    const anchor = noteAnchor(edit);
+    if (!anchor) continue;
+    const key = `${anchor.x0},${anchor.y0}`;
+    const slot = slots.get(key) || 0;
+    slots.set(key, slot + 1);
+    const group = Sheet.note({ text: edit.pen, status: NOTE_STATUS[edit.status] || "held", order, filter });
+    penLayer.appendChild(group);
+    penNotes.push({ group, anchor, slot });
+    order += 1;
+  }
+  layoutPenNotes();
+  // The handwriting font arrives after the first note is drawn; measure again when it does.
+  font.then(layoutPenNotes);
+  return order;
+}
+
+function layoutPenNotes() {
+  for (const { group, anchor, slot } of penNotes) {
+    Sheet.placeNote(group, anchor, slot, state.unit, state.imageW, state.imageH);
+  }
+}
+
+/** A local date, as the stamp prints it: 2026-11-03. */
+function stampDate(when) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`;
+}
+
+function outcomeCounts(result) {
+  const statuses = result.status || [];
+  const verified = statuses.filter((entry) => entry.outcome === "verified").length;
+  return { verified, designer: statuses.length - verified };
+}
+
+function drawStamp(result) {
+  stampLayer.replaceChildren();
+  if (!state.imageReady) {
+    return;
+  }
+  const avoid = [
+    ...Array.from(linked.values())
+      .map((pair) => (pair.bbox ? Sheet.toPixels(pair.bbox, state.imageW, state.imageH) : null))
+      .filter(Boolean),
+    ...Array.from(clouds.values()).map((cloud) => cloud.bounds),
+    ...penNotes.map((entry) => entry.group.bounds).filter(Boolean),
+  ];
+  const spot = Sheet.stampSpot({
+    width: state.imageW,
+    height: state.imageH,
+    unit: state.unit,
+    avoid,
+    image: pageImage,
+  });
+  const { verified, designer } = outcomeCounts(result);
+  stampLayer.appendChild(
+    Sheet.stamp({
+      cx: spot.cx,
+      cy: spot.cy,
+      unit: state.unit,
+      date: stampDate(state.fixedAt || new Date()),
+      verified,
+      designer,
+    }),
+  );
+}
+
+const OUTCOME_WORDS = {
+  verified: "Verified",
+  held: "Held for designer",
+  unresolved: "Unresolved",
+  failed: "Not verified",
+};
+
+/** The last applied edit that cites `key`, or null. */
+function lastAppliedFor(result, key) {
+  let found = null;
+  for (const round of result.rounds || []) {
+    for (const edit of round.applied || []) {
+      if ((edit.finding_ids || []).includes(key)) found = edit;
+    }
+  }
+  return found;
+}
+
+/** One row per original finding, plus any applied edit that cites none. */
+function correctionRows(result) {
+  const rows = [];
+  for (const entry of result.status || []) {
+    const number = numberByKey.get(entry.finding) || null;
+    const edit = lastAppliedFor(result, entry.finding);
+    rows.push({
+      number,
+      finding: number ? state.findings[number - 1] : null,
+      before: edit && edit.before !== null ? edit.before : EM_DASH,
+      after: edit && edit.after !== null ? edit.after : EM_DASH,
+      outcome: entry.outcome || (entry.status === "resolved" ? "verified" : "unresolved"),
+    });
+  }
+  for (const round of result.rounds || []) {
+    for (const edit of round.applied || []) {
+      const cited = (edit.finding_ids || []).some((key) => numberByKey.has(key));
+      if (!cited) {
+        rows.push({
+          number: null,
+          finding: null,
+          before: edit.before ?? EM_DASH,
+          after: edit.after ?? EM_DASH,
+          outcome: edit.status,
+        });
+      }
+    }
+  }
+  return rows;
+}
+
+function renderCorrections(result) {
+  const { verified, designer } = outcomeCounts(result);
+  const passed = `${plural(verified, "correction")} passed the rule engine.`;
+  const need = designer === 1 ? "1 needs a designer." : `${designer} need a designer.`;
+  correctionsIntro.textContent = `${passed} ${need}`;
+
+  const body = document.createDocumentFragment();
+  for (const row of correctionRows(result)) {
+    const line = document.createElement("tr");
+    const delta = document.createElement("td");
+    if (row.number) {
+      const mark = document.createElement("span");
+      mark.className = `delta delta-small st-${row.outcome}`;
+      mark.textContent = String(row.number);
+      delta.appendChild(mark);
+    } else {
+      delta.textContent = EM_DASH;
+    }
+    const before = document.createElement("td");
+    before.className = "mono";
+    before.textContent = row.before;
+    const after = document.createElement("td");
+    after.className = "mono";
+    after.textContent = row.after;
+    const status = document.createElement("td");
+    const chip = document.createElement("span");
+    chip.className = `status-chip st-${row.outcome}`;
+    chip.textContent = OUTCOME_WORDS[row.outcome] || row.outcome;
+    status.appendChild(chip);
+    line.append(delta, before, after, status);
+    body.appendChild(line);
+  }
+  correctionsRows.replaceChildren(body);
+}
+
+/* The correction list as CSV, built here from the replies already on the page. */
+
+function csvCell(value) {
+  let cell = value === null || value === undefined ? "" : String(value);
+  // A cell that a spreadsheet would read as a formula is written as text instead: these
+  // strings come from a model reading an uploaded file.
+  if (/^[=+\-@\t\r]/.test(cell)) cell = `'${cell}`;
+  return /[",\n\r]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell;
+}
+
+function correctionsCsv(result) {
+  const lines = [["issue", "rule", "zone", "severity", "before", "after", "status", "source"]];
+  for (const row of correctionRows(result)) {
+    const finding = row.finding;
+    lines.push([
+      row.number || "",
+      finding ? finding.rule_id : "",
+      finding ? findingZone(finding) || "" : "",
+      finding ? finding.severity : "",
+      row.before,
+      row.after,
+      OUTCOME_WORDS[row.outcome] || row.outcome,
+      finding ? finding.source : "",
+    ]);
+  }
+  return `${lines.map((line) => line.map(csvCell).join(",")).join("\r\n")}\r\n`;
+}
+
+exportCsv.addEventListener("click", () => {
+  if (!state.fixResult) {
+    return;
+  }
+  // The byte-order mark tells Excel the file is UTF-8, so ⌖ and Ø survive the trip.
+  const blob = new Blob(["﻿", correctionsCsv(state.fixResult)], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "corrections.csv";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast("Downloading the correction list.");
+});
 
 /**
- * Show one correction run. The redline URLs are fixed per run and rewritten on every fix,
- * so both carry a timestamp to keep the browser from showing a cached one.
+ * Show one correction run. /fix answers with every round at once, so the rounds are
+ * replayed on screen one by one; then the clouds take their final colours, the pen notes
+ * are written, and the stamp goes down. With reduced motion all of it lands at once.
  */
-function renderAgent(result) {
+async function renderAgent(result) {
+  const token = ++replayToken;
   const rounds = result.rounds || [];
-  const statuses = result.status || [];
-
-  const roundNodes = document.createDocumentFragment();
-  for (const round of rounds) roundNodes.appendChild(roundCard(round));
-  if (rounds.length === 0) {
-    const item = document.createElement("li");
-    item.className = "round";
-    item.appendChild(paragraph("round-empty", "The agent was not asked for any edits."));
-    roundNodes.appendChild(item);
-  }
-  const verdictNodes = document.createDocumentFragment();
-  for (const entry of statuses) verdictNodes.appendChild(verdictItem(entry));
-
-  agentRounds.replaceChildren(roundNodes);
-  agentVerdicts.replaceChildren(verdictNodes);
+  const still = Sheet.reducedMotion();
+  replaying = !still;
 
   const stamp = Date.now();
-  redlineImage.src = `${result.redline_png_url}?t=${stamp}`;
   redlinePdf.href = `${result.redline_pdf_url}?t=${stamp}`;
 
+  resetRoundsStrip();
+  for (const list of findingsList.querySelectorAll(".attempts")) {
+    list.replaceChildren();
+    list.hidden = true;
+  }
+  for (let index = 0; index < rounds.length; index += 1) {
+    const round = rounds[index];
+    if (!still) {
+      setRoundCell(index + 1, { number: "–", sub: "Running", phase: "running" });
+      await wait(ROUND_REPLAY_MS);
+      if (token !== replayToken) return;
+    }
+    setRoundCell(index + 1, {
+      number: round.findings_after,
+      sub: roundSummaryText(round),
+      phase: "done",
+      title: round.error ? round.error : `${plural(round.findings_after, "finding")} left after round ${round.round}`,
+    });
+    showRoundAttempts(round);
+  }
+  for (let index = rounds.length + 1; index <= MAX_ROUNDS; index += 1) {
+    setRoundCell(index, { sub: "Not needed", phase: "skipped" });
+  }
+
   const finalFindings = result.final_findings || [];
+  const statuses = result.status || [];
+  state.fixResult = result;
   state.fix = {
     rounds: rounds.length,
     resolved: result.resolved_count || 0,
@@ -1833,7 +2440,20 @@ function renderAgent(result) {
   if (typeof result.fake_model === "boolean") {
     state.fake = result.fake_model;
   }
+  replaying = false;
   setAgentStatus();
+  renderCorrections(result);
+
+  colourClouds(new Map(statuses.map((entry) => [entry.finding, entry.outcome || "unresolved"])));
+  const notes = drawPenNotes(result);
+  updateUI();
+
+  // The stamp lands once the last note has been written (reveal 0.55 s, 260 ms apart).
+  if (!still && notes > 0) {
+    await wait((notes - 1) * 260 + 700);
+    if (token !== replayToken) return;
+  }
+  drawStamp(result);
 }
 
 /* ---- Rendering one run --------------------------------------------------- */
@@ -1850,6 +2470,9 @@ function render(run, file) {
   state.answered = { prefix: "Read by", model: run.model, fellBack: Boolean(run.fell_back) };
   state.fake = Boolean(run.fake_model);
   clearFindings();
+  // A fresh reading: its boxes wait for the final sweep, and they start out shown.
+  state.revealPending = true;
+  setBoxesShown(true);
 
   $("meta-model").textContent = text(run.model);
   $("meta-latency").textContent = seconds(run.latency_s);
@@ -1912,6 +2535,7 @@ async function startRun(file, source) {
   clearErrorToasts();
   state.pendingFile = { name: file.name, source };
   reading = true;
+  startReadingScan(file);
   updateUI();
 
   const body = new FormData();
@@ -1944,6 +2568,7 @@ async function startRun(file, source) {
   } finally {
     readController = null;
     reading = false;
+    stopReadingScan();
     state.pendingFile = null;
     if (signal.aborted) {
       toast(CANCELLED_MESSAGE);
@@ -2000,6 +2625,8 @@ async function runFix() {
   }
   clearErrorToasts();
   fixing = true;
+  clearAgent();
+  setRoundCell(1, { number: "–", sub: "Proposing…", phase: "running" });
   updateUI();
 
   const controller = new AbortController();
@@ -2017,8 +2644,13 @@ async function runFix() {
     }
     const result = await response.json();
     if (!signal.aborted) {
-      renderAgent(result);
-      selectTab("corrections");
+      // The rounds replay in the Issues tab, under the strip, and on the sheet.
+      selectTab("issues");
+      fixController = null;
+      fixing = false;
+      const replay = renderAgent(result);
+      updateUI();
+      await replay;
     }
   } catch (problem) {
     if (!signal.aborted) {
@@ -2029,6 +2661,10 @@ async function runFix() {
     fixing = false;
     if (signal.aborted) {
       toast(CANCELLED_MESSAGE);
+    }
+    if (!state.fixResult && state.checked) {
+      // Cancelled or failed: the rounds are still to come.
+      resetRoundsStrip();
     }
     updateUI();
   }
@@ -2212,6 +2848,7 @@ const LOW_CONFIDENCE_DEMO = "low-confidence";
 async function loadDemo() {
   state.pendingFile = { name: "plate_001.png", source: "demo" };
   reading = true;
+  startReadingScan({ name: "plate_001.png", type: "" });
   updateUI();
   try {
     const response = await fetch(`/api/demo/${LOW_CONFIDENCE_DEMO}`, { method: "POST" });
@@ -2224,6 +2861,7 @@ async function loadDemo() {
     toast(`Could not reach the server: ${problem.message}`, { error: true });
   } finally {
     reading = false;
+    stopReadingScan();
     state.pendingFile = null;
     updateUI();
   }

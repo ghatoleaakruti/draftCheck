@@ -57,6 +57,7 @@ from draftcheck.fake_model import FAKE_MODEL_NAME, fake_client_factory
 from draftcheck.limits import LIMIT_MESSAGE, Cleaner, Limits, UsageLimiter
 from draftcheck.llm_client import MODEL_TIMEOUT_MESSAGE, JSONChatResult, ModelCancelled, Usage
 from draftcheck.prompts import EXTRACTION_SYSTEM
+from draftcheck.rules import RULES
 from draftcheck.schema import Finding
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -263,6 +264,12 @@ def test_fix_reports_each_round_in_plain_english(client: TestClient, fake: FakeC
             "edit": "Remove datum C from the position frame",
             "rationale": "A and B already locate the pattern.",
             "finding_ids": ["GDT-001@fcf_1"],
+            "before": "⌖ Ø0.25 Ⓜ | A | B | C",
+            "after": "⌖ Ø0.25 Ⓜ | A | B",
+            "pen": "drop C",
+            "target_id": "fcf_1",
+            "status": "verified",
+            "note": "The re-run no longer reports GDT-001@fcf_1.",
         }
     ]
 
@@ -272,6 +279,9 @@ def test_fix_reports_each_round_in_plain_english(client: TestClient, fake: FakeC
     assert refused["edit"] == "an edit the model called 'delete_fcf'"
     assert refused["rationale"] == ""
     assert "not an allowed operation" in refused["reason"]
+    # Never understood, so there is no before/after to draw and no pen note to write.
+    assert (refused["before"], refused["after"], refused["pen"]) == (None, None, None)
+    assert refused["status"] == "rejected"
 
     # "Findings: 1 before → 0 after", and which one went.
     assert (first["findings_before"], first["findings_after"]) == (1, 0)
@@ -286,6 +296,7 @@ def test_fix_reports_each_round_in_plain_english(client: TestClient, fake: FakeC
             "status": "resolved",
             "severity": "error",
             "message": body["status"][0]["message"],
+            "outcome": "verified",
         }
     ]
     assert body["applied_count"] == 1
@@ -652,11 +663,13 @@ def test_static_page_and_its_two_files_are_served(client: TestClient):
         assert f'id="{tab}"' in page.text
     assert "Corrections appear here once the agent finishes its rounds." in page.text
 
-    # The agent half: the rounds, the verdicts, and the redline it ends with.
+    # The agent half (step 19b): the rounds strip in Issues, and in Corrections the
+    # before/after table and the two exports. The redline itself is drawn on the sheet.
+    assert 'id="rounds-strip"' in page.text
     assert 'id="agent-panel"' in page.text
-    assert 'id="agent-rounds"' in page.text
-    assert 'id="redline-image"' in page.text
+    assert 'id="corrections-rows"' in page.text
     assert 'id="redline-pdf"' in page.text
+    assert 'id="export-csv"' in page.text
 
     # Said on the page itself rather than built in JavaScript, so it is there whatever
     # the agent returns.
@@ -668,6 +681,12 @@ def test_static_page_and_its_two_files_are_served(client: TestClient):
     assert script.status_code == 200
     assert "/api/runs" in script.text
     assert "/samples/plate_001.pdf" in script.text
+
+    # The drawing primitives load before app.js, which uses them.
+    assert page.text.index('src="/sheet.js"') < page.text.index('src="/app.js"')
+    sheet = client.get("/sheet.js")
+    assert sheet.status_code == 200
+    assert "const Sheet" in sheet.text
 
     stylesheet = client.get("/style.css")
     assert stylesheet.status_code == 200
@@ -1604,3 +1623,132 @@ def test_the_stamp_names_every_model_that_answered() -> None:
 def test_the_stamp_is_unchanged_when_nothing_fell_back() -> None:
     report = SimpleNamespace(rounds=[SimpleNamespace(model=BASETEN_MODEL, fell_back=False)])
     assert stamp_model_name({"model": BASETEN_MODEL}, report) == BASETEN_MODEL
+
+
+# --- what the page draws for each edit (step 19b) ----------------------------------------
+
+
+def checked_run(client: TestClient) -> str:
+    """Upload and check the fixture drawing; returns the run id."""
+    created = upload(client)
+    run_id = created["run_id"]
+    client.post(f"/api/runs/{run_id}/check", json=created["drawing"])
+    return run_id
+
+
+def test_check_names_each_finding_and_counts_the_rules(client: TestClient):
+    """The page matches a cloud to its /fix verdict by key, and says how many rules ran."""
+    created = upload(client)
+    body = client.post(f"/api/runs/{created['run_id']}/check", json=created["drawing"]).json()
+
+    assert [finding["key"] for finding in body["findings"]] == ["GDT-001@fcf_1"]
+    assert body["rules_run"] == len(RULES)
+
+
+def test_an_edit_that_adds_a_feature_is_held_for_the_designer(
+    client: TestClient, fake: FakeClient
+):
+    """Adding datum C clears GDT-001, but only a designer can say where C really is."""
+    run_id = checked_run(client)
+    fake.corrections = [
+        {
+            "edits": [
+                {
+                    "op": "add_datum",
+                    "label": "C",
+                    "location": "the right edge of the plate",
+                    "finding_ids": ["GDT-001@fcf_1"],
+                }
+            ]
+        }
+    ]
+    body = client.post(f"/api/runs/{run_id}/fix").json()
+
+    edit = body["rounds"][0]["applied"][0]
+    assert (edit["before"], edit["after"], edit["pen"]) == ("—", "datum C", "add datum C")
+    assert edit["status"] == "held"
+    assert "designer" in edit["note"]
+    # Resolved by the rules, but still the designer's to finish.
+    assert body["status"][0]["status"] == "resolved"
+    assert body["status"][0]["outcome"] == "held"
+
+
+def test_an_edit_whose_finding_survives_the_rerun_has_failed(
+    client: TestClient, fake: FakeClient
+):
+    """An edit that applies cleanly but leaves its finding in place is not a pass."""
+    run_id = checked_run(client)
+    tightened = {
+        "op": "set_field",
+        "target": "fcf",
+        "id": "fcf_1",
+        "field": "tolerance",
+        "value": 0.2,
+        "finding_ids": ["GDT-001@fcf_1"],
+    }
+    fake.corrections = [{"edits": [tightened]}] * 3
+    body = client.post(f"/api/runs/{run_id}/fix").json()
+
+    edit = body["rounds"][0]["applied"][0]
+    assert edit["status"] == "failed"
+    assert "still reports GDT-001@fcf_1" in edit["note"]
+    assert (edit["before"], edit["after"], edit["pen"]) == (
+        "⌖ Ø0.25 Ⓜ | A | B | C",
+        "⌖ Ø0.2 Ⓜ | A | B | C",
+        "Ø0.2",
+    )
+    assert body["status"][0]["outcome"] == "unresolved"
+
+
+def test_a_refused_but_understood_edit_still_shows_what_it_asked_for(
+    client: TestClient, fake: FakeClient
+):
+    """A proposal the guards refused is drawn struck through, so it needs its 'after'."""
+    run_id = checked_run(client)
+    fake.corrections = [
+        {
+            "edits": [
+                {
+                    "op": "set_field",
+                    "target": "fcf",
+                    "id": "fcf_1",
+                    "field": "datum_refs",
+                    "value": [],
+                    "finding_ids": ["GDT-001@fcf_1"],
+                }
+            ]
+        }
+    ]
+    body = client.post(f"/api/runs/{run_id}/fix").json()
+
+    refused = body["rounds"][0]["rejected"][0]
+    assert refused["status"] == "rejected"
+    assert refused["before"] == "⌖ Ø0.25 Ⓜ | A | B | C"
+    assert refused["after"] == "⌖ Ø0.25 Ⓜ"
+    assert refused["finding_ids"] == ["GDT-001@fcf_1"]
+    assert refused["note"].startswith("Refused before the rules ran: ")
+
+
+def test_each_rounds_before_is_the_drawing_the_round_started_from(
+    client: TestClient, fake: FakeClient
+):
+    """Round 2's 'before' carries round 1's edit, not the drawing as first submitted."""
+    run_id = checked_run(client)
+
+    def tolerance(value: float) -> dict:
+        return {
+            "op": "set_field",
+            "target": "fcf",
+            "id": "fcf_1",
+            "field": "tolerance",
+            "value": value,
+            "finding_ids": ["GDT-001@fcf_1"],
+        }
+
+    fake.corrections = [{"edits": [tolerance(0.2)]}, {"edits": [tolerance(0.15)]}]
+    body = client.post(f"/api/runs/{run_id}/fix").json()
+
+    first, second = (round_["applied"][0] for round_ in body["rounds"][:2])
+    assert first["after"] == "⌖ Ø0.2 Ⓜ | A | B | C"
+    assert second["before"] == "⌖ Ø0.2 Ⓜ | A | B | C"
+    assert second["after"] == "⌖ Ø0.15 Ⓜ | A | B | C"

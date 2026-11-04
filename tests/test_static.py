@@ -6,6 +6,7 @@ number the page's behaviour depends on is written down once, in the place the co
 the docs both say it is — which is exactly the thing that rots when it is not checked.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -112,12 +113,27 @@ def test_each_bundled_font_ships_with_its_licence(folder: str, font: str) -> Non
     assert (FONTS / folder / font).is_file()
     licence = (FONTS / folder / "OFL.txt").read_text(encoding="utf-8")
     assert "SIL Open Font License" in licence
+    # The pen font is loaded by sheet.js when it is first needed; the other two by CSS.
+    loader = "sheet.js" if folder == "nanum-pen-script" else "style.css"
+    assert f"/fonts/{folder}/{font}" in (STATIC_DIR / loader).read_text(encoding="utf-8")
+
+
+def test_the_pen_font_waits_until_a_pen_note_is_drawn() -> None:
+    """3 MB of handwriting is not fetched on first load: no @font-face, no preload."""
     stylesheet = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
-    assert f"/fonts/{folder}/{font}" in stylesheet
+    faces = re.findall(r"@font-face\s*\{[^}]*\}", stylesheet)
+    assert len(faces) == 2
+    assert not any("Nanum" in face for face in faces)
+    assert "preload" not in read_index()
+    sheet = (STATIC_DIR / "sheet.js").read_text(encoding="utf-8")
+    assert 'display: "swap"' in sheet
+    # Asked for from the code that writes the first note, and nowhere else.
+    assert sheet.count("new FontFace(") == 1
+    assert "Sheet.loadPenFont()" in read_app_js()
 
 
 def test_the_page_loads_nothing_from_another_site() -> None:
-    for name in ("index.html", "style.css", "app.js"):
+    for name in ("index.html", "style.css", "app.js", "sheet.js"):
         source = (STATIC_DIR / name).read_text(encoding="utf-8")
         assert "https://" not in source.replace("http://www.w3.org/2000/svg", ""), name
 

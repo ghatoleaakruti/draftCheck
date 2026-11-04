@@ -24,13 +24,9 @@
   font-display: swap;
 }
 
-/* Handwritten pen labels on the drawing (step 19b). Only downloaded once used. */
-@font-face {
-  font-family: "Nanum Pen Script";
-  src: url("/fonts/nanum-pen-script/NanumPenScript-Regular.ttf") format("truetype");
-  font-weight: 400;
-  font-display: swap;
-}
+/* Nanum Pen Script (3 MB) is not declared here. A stylesheet @font-face can be fetched
+   as soon as anything might use it; sheet.js adds it with the FontFace API the first time
+   a pen note is written, so a visit that never reaches a fix never downloads it. */
 
 /* ---- Tokens -------------------------------------------------------------- */
 
@@ -565,41 +561,272 @@ button:disabled {
   height: 100%;
 }
 
-/* The linked-highlight boxes, in image pixels inside the SVG. */
+/* Everything on the overlay is sized in sheet units: --u is image pixels per unit, set by
+   app.js from the image width (sheet.js, SHEET_UNITS). Inside the SVG a CSS px is one
+   image pixel, so calc(var(--u) * 1.2px) is 1.2 units on any drawing. */
+
+/* The model's boxes, linked to the table rows by item id. */
 .obox {
-  fill: rgba(37, 99, 217, 0.06);
-  stroke: var(--blue);
-  stroke-opacity: 0.55;
-  stroke-width: 1.25;
-  vector-effect: non-scaling-stroke;
   cursor: pointer;
-  pointer-events: all;
-  transition: fill var(--fast), stroke-opacity var(--fast), stroke-width var(--fast);
+  transition: opacity 0.25s ease;
 }
 
-.obox.is-unsure {
+.obox-frame {
+  fill: rgba(37, 99, 217, 0.07);
+  stroke: var(--blue);
+  stroke-width: calc(var(--u) * 1.2px);
+  pointer-events: all;
+  transition: fill var(--fast), stroke-width var(--fast);
+}
+
+.obox-tag {
+  fill: var(--blue);
+}
+
+.obox-id {
+  fill: #fff;
+  font-family: var(--font-mono);
+  font-size: calc(var(--u) * 8.5px);
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.obox.is-unsure .obox-frame {
   stroke: var(--pen-amber);
-  stroke-opacity: 0.85;
-  stroke-dasharray: 4 3;
+  stroke-dasharray: calc(var(--u) * 4px) calc(var(--u) * 3px);
   fill: rgba(194, 108, 0, 0.08);
 }
 
-.obox.is-hot {
+.obox.is-unsure .obox-tag {
+  fill: var(--pen-amber);
+}
+
+.obox.is-hot .obox-frame,
+.obox.is-picked .obox-frame {
   fill: rgba(37, 99, 217, 0.16);
-  stroke-opacity: 1;
-  stroke-width: 2;
+  stroke-width: calc(var(--u) * 2.6px);
 }
 
-.obox.is-picked {
-  fill: rgba(37, 99, 217, 0.2);
-  stroke-opacity: 1;
-  stroke-width: 2.5;
+/* Waiting for the final sweep to pass its centre. */
+.obox.is-pending {
+  opacity: 0;
 }
 
-.obox.is-flagged {
+/* After a check the boxes give way to the clouds; "Show boxes" brings them back. */
+#boxes {
+  transition: opacity 0.4s ease;
+}
+
+#boxes.is-faded {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ---- The reading scan ---- */
+
+.reading-sheet {
+  display: grid;
+  place-items: center;
+}
+
+.reading-sheet img {
+  position: absolute;
+  inset: 0;
+}
+
+.reading-label {
+  color: #8a96a3;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+.scan-stop-top {
+  stop-color: var(--blue);
+  stop-opacity: 0;
+}
+
+.scan-stop-bottom {
+  stop-color: var(--blue);
+  stop-opacity: 0.16;
+}
+
+.scan-line {
+  fill: var(--blue);
+}
+
+/* ---- Revision clouds ---- */
+
+.cloud {
+  --c: var(--pen-red);
+  cursor: pointer;
+  outline: none;
+}
+
+.cloud.st-verified {
+  --c: var(--pen-green);
+}
+
+.cloud.st-held,
+.cloud.st-unresolved {
+  --c: var(--pen-amber);
+}
+
+.cloud-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: calc(var(--u) * 10px);
+  pointer-events: stroke;
+}
+
+.cloud-line {
+  fill: none;
+  stroke: var(--c);
+  stroke-width: calc(var(--u) * 2px);
+  stroke-linejoin: round;
+  stroke-dasharray: 100;
+  stroke-dashoffset: 0;
+  pointer-events: none;
+  transition: stroke 0.4s ease, stroke-width var(--fast);
+  animation: cloud-draw 0.7s ease-out both;
+  animation-delay: calc(var(--order) * 160ms);
+}
+
+.cloud.is-selected .cloud-line,
+.cloud:focus-visible .cloud-line {
+  stroke-width: calc(var(--u) * 3.4px);
+}
+
+.cloud:focus-visible .cloud-hit {
+  stroke: rgba(37, 99, 217, 0.18);
+}
+
+.cloud-delta polygon {
+  fill: var(--c);
+  transition: fill 0.4s ease;
+}
+
+.cloud-delta text {
+  fill: #fff;
+  font-family: var(--font-mono);
+  font-size: calc(var(--u) * 9px);
+  font-weight: 700;
+}
+
+.cloud-delta {
+  animation: fade-in 0.25s ease-out both;
+  animation-delay: calc(var(--order) * 160ms + 700ms);
+}
+
+@keyframes cloud-draw {
+  from {
+    stroke-dashoffset: 100;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* ---- Pen notes ---- */
+
+.pen-note {
+  --c: var(--pen-green);
+}
+
+.pen-note.st-held {
+  --c: var(--pen-amber);
+}
+
+.pen-note.st-rejected {
+  --c: var(--pen-red);
+}
+
+.pen-text {
+  fill: var(--c);
+  font-family: var(--font-pen);
+  font-size: calc(var(--u) * 22px);
+  animation: pen-write 0.55s linear both;
+  animation-delay: calc(var(--order) * 260ms);
+}
+
+.pen-strike {
+  fill: none;
   stroke: var(--pen-red);
-  fill: rgba(212, 42, 26, 0.12);
-  stroke-width: 2.5;
+  stroke-width: calc(var(--u) * 2px);
+  stroke-linecap: round;
+  stroke-dasharray: 100;
+  stroke-dashoffset: 0;
+  animation: cloud-draw 0.3s ease-out both;
+  animation-delay: calc(var(--order) * 260ms + 600ms);
+}
+
+@keyframes pen-write {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* ---- The CHECKED stamp ---- */
+
+.stamp-body {
+  opacity: 0.9;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: stamp-land 0.4s cubic-bezier(0.3, 1.4, 0.6, 1) both;
+}
+
+.stamp-ring,
+.stamp-ring-inner {
+  fill: none;
+  stroke: var(--pen-green);
+}
+
+.stamp-ring {
+  stroke-width: calc(var(--u) * 2.4px);
+}
+
+.stamp-ring-inner {
+  stroke-width: calc(var(--u) * 1px);
+}
+
+.stamp-title,
+.stamp-line {
+  fill: var(--pen-green);
+  font-family: var(--font-ui);
+}
+
+.stamp-title {
+  font-size: calc(var(--u) * 24px);
+  font-weight: 800;
+  letter-spacing: 0.28em;
+}
+
+.stamp-line {
+  font-family: var(--font-mono);
+  font-size: calc(var(--u) * 7.5px);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  white-space: pre;
+}
+
+@keyframes stamp-land {
+  from {
+    opacity: 0;
+    transform: scale(1.7);
+  }
+  70% {
+    opacity: 0.9;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 0.9;
+    transform: scale(1);
+  }
 }
 
 /* Status bar */
@@ -1241,43 +1468,206 @@ td.is-edited::after {
   color: var(--ink-2);
 }
 
-/* ---- Corrections (plain until step 19b restyles it) ---------------------- */
+/* ---- Rounds strip ------------------------------------------------------- */
 
-.agent {
+.rounds-strip {
   display: grid;
-  gap: 10px;
-}
-
-.agent h3 {
-  margin-top: 6px;
-}
-
-.round {
-  display: grid;
-  gap: 6px;
-  padding: 10px 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   border: 1px solid var(--rule);
   border-radius: var(--radius);
   background: var(--card);
+  overflow: hidden;
 }
 
-.round-head {
+.round-cell {
+  position: relative;
+  display: grid;
+  gap: 1px;
+  padding: 9px 11px 10px;
+  min-width: 0;
+}
+
+.round-cell + .round-cell {
+  border-left: 1px solid var(--rule);
+}
+
+.strip-label {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.strip-number {
+  font-family: var(--font-mono);
+  font-size: 24px;
+  font-weight: 800;
+  font-stretch: 75%;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+
+.strip-sub {
+  font-size: 11.5px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.round-cell[data-phase="pending"] .strip-number,
+.round-cell[data-phase="skipped"] .strip-number,
+.round-cell[data-phase="running"] .strip-number {
+  color: var(--ink-2);
+  opacity: 0.6;
+}
+
+.round-cell[data-phase="running"]::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: var(--blue);
+  animation: blink 1s ease-in-out infinite;
+}
+
+/* ---- Attempts, inside each issue card ------------------------------------ */
+
+.attempts {
+  grid-column: 2 / span 2;
+  display: grid;
+  gap: 10px;
+  margin: 8px 0 0;
+  padding: 10px 0 0;
+  border-top: 1px dashed var(--rule);
+  list-style: none;
+}
+
+.finding.is-other {
+  grid-template-columns: 0 1fr auto;
+  cursor: default;
+}
+
+.finding.is-other .attempts {
+  grid-column: 1 / span 3;
+}
+
+.attempt {
+  display: grid;
+  gap: 5px;
+  font-size: 12.5px;
+}
+
+.attempt-head {
   display: flex;
-  justify-content: space-between;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  align-items: baseline;
+}
+
+.attempt-round {
   font-weight: 700;
 }
 
-.round-counts,
-.round-model {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  font-weight: 500;
+.attempt-edit,
+.attempt-fallback {
   color: var(--ink-2);
 }
 
-.round-model.is-fallback {
+.attempt-fallback {
   color: var(--warn);
+  font-size: 11.5px;
+}
+
+.diff {
+  display: grid;
+  border-radius: 6px;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.diff-line {
+  padding: 3px 8px;
+  overflow-wrap: anywhere;
+}
+
+.diff-line del,
+.diff-line ins {
+  text-decoration: none;
+}
+
+.diff-before {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.diff-before::before,
+.diff-after::before {
+  display: inline-block;
+  width: 1.4ch;
+}
+
+.diff-before::before {
+  content: "−";
+}
+
+.diff-after::before {
+  content: "+";
+}
+
+.diff-before del {
+  text-decoration: line-through;
+}
+
+.diff-after {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+/* A refused proposal: what it asked for, greyed and struck through. */
+.attempt.st-rejected .diff-after {
+  background: var(--surface);
+  color: var(--ink-2);
+}
+
+.attempt.st-rejected .diff-after del {
+  text-decoration: line-through;
+}
+
+.attempt-verdict {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+}
+
+.verdict-chip {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.st-verified .verdict-chip {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.st-held .verdict-chip {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.verdict-note {
+  color: var(--ink-2);
+  font-size: 12px;
 }
 
 .round-error {
@@ -1285,96 +1675,100 @@ td.is-edited::after {
   font-size: 12.5px;
 }
 
-.round-empty {
-  color: var(--ink-2);
-  font-size: 12.5px;
-}
+/* ---- Corrections ----------------------------------------------------------- */
 
-.edit {
+.agent {
   display: grid;
-  gap: 2px;
-  font-size: 12.5px;
+  gap: 12px;
 }
 
-.edit-head {
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
+.corrections-intro {
+  font-size: 13.5px;
+  font-weight: 650;
 }
 
-.edit-tag,
-.verdict-tag {
-  flex: none;
-  padding: 0 7px;
+.corrections-table td {
+  vertical-align: middle;
+}
+
+.delta-small {
+  display: inline-grid;
+  place-items: end center;
+  width: 20px;
+  height: 18px;
+  padding-bottom: 1px;
+  font-size: 9px;
+}
+
+.delta-small.st-verified {
+  background: var(--pen-green);
+}
+
+.delta-small.st-held,
+.delta-small.st-unresolved,
+.delta-small.st-failed {
+  background: var(--pen-amber);
+}
+
+.status-chip {
+  display: inline-block;
+  padding: 1px 8px;
   border-radius: 999px;
   font-size: 11px;
   font-weight: 700;
-}
-
-.is-applied .edit-tag,
-.is-resolved .verdict-tag {
-  background: var(--ok-soft);
-  color: var(--ok);
-}
-
-.is-rejected .edit-tag,
-.is-unresolved .verdict-tag {
+  white-space: nowrap;
   background: var(--warn-soft);
   color: var(--warn);
 }
 
-.edit-why,
-.edit-reason {
-  padding-left: 4px;
-  color: var(--ink-2);
-}
-
-.changed {
-  font-size: 12.5px;
-}
-
-.changed-label {
-  font-weight: 650;
-}
-
-.is-cleared .changed-label {
+.status-chip.st-verified {
+  background: var(--ok-soft);
   color: var(--ok);
 }
 
-.is-introduced .changed-label {
-  color: var(--red);
+.exports {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px;
 }
 
-.verdict {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 8px;
-  align-items: baseline;
-  font-size: 12.5px;
+.export-card {
+  display: grid;
+  gap: 2px;
+  padding: 11px 13px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color var(--fast), box-shadow var(--fast);
 }
 
-.verdict .rule-id {
-  color: var(--ink-2);
+.export-card:hover {
+  border-color: var(--blue);
 }
 
-.verdict-note,
-.redline-note {
+.export-card:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.export-title {
+  font-weight: 700;
+  font-size: 13.5px;
+}
+
+.export-sub {
   font-size: 12px;
   color: var(--ink-2);
 }
 
-.redline {
-  margin: 0;
-  padding: 8px;
-  border: 1px solid var(--rule);
-  border-radius: var(--radius);
-  background: var(--paper);
-}
-
-.redline img {
-  display: block;
-  width: 100%;
-  height: auto;
+.redline-note {
+  font-size: 12px;
+  color: var(--ink-2);
 }
 
 /* ---- Action bar ---------------------------------------------------------- */
@@ -1623,8 +2017,7 @@ td.is-edited::after {
 
   table.data tr,
   .finding,
-  .round,
-  .edit {
+  .attempt {
     break-inside: avoid;
   }
 }
