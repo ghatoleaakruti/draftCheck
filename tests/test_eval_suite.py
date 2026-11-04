@@ -49,6 +49,9 @@ def test_suite_has_the_requested_drawings() -> None:
         "plate_edge_hole",
         "bracket_01",
         "plate_inch_multi",
+        "gear_spur",
+        "hex_nut",
+        "hex_bolt",
     }
 
 

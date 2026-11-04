@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, replace
+from itertools import pairwise
 from pathlib import Path
 
 from reportlab.pdfgen import canvas as rl_canvas
@@ -29,6 +30,9 @@ from draftcheck.render import load_pages
 from scripts.make_sample_drawing import (
     DATUM_BOX,
     DATUM_TRI_H,
+    DIM_SIZE,
+    EXT_GAP,
+    EXT_OVER,
     FONT,
     FONT_BOLD,
     OUT_DIR,
@@ -36,6 +40,7 @@ from scripts.make_sample_drawing import (
     PAGE_W,
     Box,
     arrowhead,
+    centered_text,
     circled_letter,
     dashed_line,
     draw_border,
@@ -206,6 +211,10 @@ class DrawingSpec:
     notes: tuple[str, ...] = ()
     notes_at: tuple[float, float] = (40.0, 578.0)
     extra_title_rows: tuple[str, ...] = ()
+    #: "third" draws the third-angle projection symbol in the title block; ``None`` leaves
+    #: it out (the original eight sheets predate it and stay byte-identical).
+    projection: str | None = None
+    notes_heading: str = "NOTES:"
 
 
 # --- Drawing primitives ----------------------------------------------------------------
@@ -239,10 +248,19 @@ def perpendicularity_symbol(c: rl_canvas.Canvas, cx: float, cy: float) -> None:
     c.line(cx, cy - 5.0, cx, cy + 6.0)
 
 
+def circular_runout_symbol(c: rl_canvas.Canvas, cx: float, cy: float) -> None:
+    """A single arrow pointing up and to the right."""
+    c.setLineWidth(0.8)
+    x0, y0, x1, y1 = cx - 5.0, cy - 5.0, cx + 5.0, cy + 5.0
+    c.line(x0, y0, x1, y1)
+    arrowhead(c, x1, y1, 1.0, 1.0)
+
+
 SYMBOLS = {
     "position": position_symbol,
     "flatness": flatness_symbol,
     "perpendicularity": perpendicularity_symbol,
+    "circular_runout": circular_runout_symbol,
 }
 
 
@@ -382,18 +400,18 @@ def draw_hole_note(c: rl_canvas.Canvas, view: View, hole: Hole, note: HoleNote) 
     return Box(text_x, text_y - 2.6, text_x + width, text_y + 8.2)
 
 
-def draw_notes(c: rl_canvas.Canvas, spec: DrawingSpec) -> None:
+def draw_notes(c: rl_canvas.Canvas, spec: DrawingSpec | PartSpec) -> None:
     if not spec.notes:
         return
     x, y = spec.notes_at
     c.setFont(FONT_BOLD, 9.0)
-    c.drawString(x, y, "NOTES:")
+    c.drawString(x, y, spec.notes_heading)
     c.setFont(FONT, 9.0)
     for index, note in enumerate(spec.notes, start=1):
         c.drawString(x, y - 12.0 * index, note)
 
 
-def title_rows(spec: DrawingSpec) -> list[tuple[str, bool]]:
+def title_rows(spec: DrawingSpec | PartSpec) -> list[tuple[str, bool]]:
     rows = [
         (f"TITLE: {spec.title}", True),
         (f"DWG NO: {spec.drawing_number}          REV: {spec.revision}", False),
@@ -407,16 +425,56 @@ def title_rows(spec: DrawingSpec) -> list[tuple[str, bool]]:
     return rows
 
 
-def draw_title_block(c: rl_canvas.Canvas, spec: DrawingSpec) -> None:
+#: Width of the title-block cell that holds the projection symbol.
+PROJECTION_CELL_W = 72.0
+
+
+def projection_symbol(c: rl_canvas.Canvas, x0: float, y0: float, x1: float, y1: float) -> None:
+    """The third-angle symbol in a cell: a truncated cone seen from the side and end-on.
+
+    Third angle: the side view (a trapezoid) is on the left with its small end facing the
+    end view (two concentric circles) on the right.
+    """
+    cy = y0 + (y1 - y0) * 0.62
+    left = x0 + 8.0
+    small, large = 5.0, 10.0
+    c.setLineWidth(0.9)
+    path = c.beginPath()
+    path.moveTo(left, cy - large)
+    path.lineTo(left + 24.0, cy - small)
+    path.lineTo(left + 24.0, cy + small)
+    path.lineTo(left, cy + large)
+    path.close()
+    c.drawPath(path, stroke=1, fill=0)
+    circle_x = left + 46.0
+    c.circle(circle_x, cy, large, stroke=1, fill=0)
+    c.circle(circle_x, cy, small, stroke=1, fill=0)
+    dashed_line(c, left - 4.0, cy, circle_x + large + 4.0, cy)
+    dashed_line(c, circle_x, cy - large - 4.0, circle_x, cy + large + 4.0)
+    c.setFont(FONT, 6.5)
+    mid = (x0 + x1) / 2
+    c.drawCentredString(mid, y0 + 16.0, "THIRD ANGLE")
+    c.drawCentredString(mid, y0 + 8.0, "PROJECTION")
+
+
+def draw_title_block(c: rl_canvas.Canvas, spec: DrawingSpec | PartSpec) -> None:
     c.setLineWidth(1.2)
     c.rect(TB_X0, TB_Y0, TB_X1 - TB_X0, TB_Y1 - TB_Y0, stroke=1, fill=0)
+    rows_x1 = TB_X1
+    if spec.projection == "third":
+        rows_x1 = TB_X1 - PROJECTION_CELL_W
+        c.setLineWidth(0.9)
+        c.line(rows_x1, TB_Y0, rows_x1, TB_Y1)
+        projection_symbol(c, rows_x1, TB_Y0, TB_X1, TB_Y1)
+    elif spec.projection is not None:
+        raise ValueError(f"{spec.stem}: unknown projection {spec.projection!r}")
     rows = title_rows(spec)
     row_h = (TB_Y1 - TB_Y0) / len(rows)
     for index, (text, bold) in enumerate(rows):
         top = TB_Y1 - index * row_h
         if index:
             c.setLineWidth(0.6)
-            c.line(TB_X0, top, TB_X1, top)
+            c.line(TB_X0, top, rows_x1, top)
         c.setFont(FONT_BOLD if bold else FONT, 8.5)
         c.drawString(TB_X0 + 6.0, top - row_h + (row_h - 8.5) / 2 + 1.5, text)
 
@@ -521,6 +579,545 @@ def ground_truth(spec: DrawingSpec, boxes: dict[str, Box]) -> dict:
             {"id": symbol.id, "label": symbol.label, "bbox": norm_bbox(boxes[symbol.id])}
             for symbol in spec.datums
         ],
+        "dimensions": dimensions,
+        "fcfs": [
+            {
+                "id": frame.id,
+                "text_raw": _fcf_text(frame),
+                "characteristic": frame.characteristic,
+                "tolerance": frame.tolerance,
+                "diameter_zone": frame.diameter_zone,
+                "material_modifier": frame.modifier,
+                "datum_refs": [{"label": label, "modifier": None} for label in frame.datums],
+                "bbox": norm_bbox(boxes[frame.id]),
+            }
+            for frame in spec.frames
+        ],
+        "notes": list(spec.notes),
+        "seeded_errors": [
+            {
+                "id": f"err_{index}",
+                "rule_id": error.rule_id,
+                "finding_key": error.finding_key,
+                "description": error.description,
+                "bbox": norm_bbox(boxes[error.at_item]),
+            }
+            for index, error in enumerate(spec.seeded, start=1)
+        ],
+    }
+
+
+# --- Part recipes: views, shapes, and point-to-point dimensions -------------------------
+#
+# The plate recipe above knows one shape: a rectangle with round holes. Gears, nuts, and
+# bolts need more, so a :class:`PartSpec` describes a sheet as named orthographic views,
+# a list of shapes drawn in each view's own part coordinates (mm, origin wherever is
+# natural for the part, often the axis), dimensions between any two feature points, and
+# leader callouts. The title block, notes, and frames are shared with the plate recipe.
+
+#: Line weight and dash pattern for each line type. "center" is the thin chain line used
+#: for centrelines and pitch circles; "thin" is for thread roots and chamfer circles.
+LINE_STYLES: dict[str, tuple[float, tuple[float, ...] | None]] = {
+    "visible": (1.4, None),
+    "thin": (0.6, None),
+    "hidden": (0.7, (4.0, 2.5)),
+    "center": (0.5, (12.0, 3.0, 2.0, 3.0)),
+}
+
+Point = tuple[float, float]
+
+
+@dataclass(frozen=True)
+class PartView:
+    """One named orthographic view: where its part-coordinate origin sits on the page."""
+
+    name: str
+    #: What kind of view it is: "front", "top", "right_side", "left_side".
+    kind: str
+    ox: float
+    oy: float
+    #: Page points per mm (72 / 25.4 x the drawing scale).
+    scale: float
+
+    def x(self, u: float) -> float:
+        return self.ox + u * self.scale
+
+    def y(self, v: float) -> float:
+        return self.oy + v * self.scale
+
+    def pt(self, u: float, v: float) -> Point:
+        return self.x(u), self.y(v)
+
+
+@dataclass(frozen=True)
+class Shape:
+    """One piece of part geometry in one view.
+
+    ``kind`` is "path" (``points``, optionally ``closed``), "circle" (``points[0]`` is the
+    centre, ``r`` the radius), "arc" (centre, radius, ``start`` and ``extent`` in degrees,
+    counter-clockwise), or "bow" (a smooth curve from ``points[0]`` through ``points[1]``
+    to ``points[2]``, used for the chamfer curves on hex flats).
+    """
+
+    view: str
+    style: str
+    kind: str
+    points: tuple[Point, ...]
+    closed: bool = False
+    r: float = 0.0
+    start: float = 0.0
+    extent: float = 360.0
+
+
+def path(view: str, style: str, *points: Point, closed: bool = False) -> Shape:
+    return Shape(view, style, "path", tuple(points), closed=closed)
+
+
+def circle(view: str, style: str, centre: Point, r: float) -> Shape:
+    return Shape(view, style, "circle", (centre,), r=r)
+
+
+def arc(view: str, style: str, centre: Point, r: float, start: float, extent: float) -> Shape:
+    return Shape(view, style, "arc", (centre,), r=r, start=start, extent=extent)
+
+
+def bow(view: str, style: str, start: Point, apex: Point, end: Point) -> Shape:
+    return Shape(view, style, "bow", (start, apex, end))
+
+
+def centre_cross(
+    view: str, centre: Point, reach: float, reach_v: float | None = None
+) -> tuple[Shape, Shape]:
+    """Crossed centrelines through ``centre``: ``reach`` mm across, ``reach_v`` up and down."""
+    u, v = centre
+    up = reach if reach_v is None else reach_v
+    return (
+        path(view, "center", (u - reach, v), (u + reach, v)),
+        path(view, "center", (u, v - up), (u, v + up)),
+    )
+
+
+@dataclass(frozen=True)
+class PointDim:
+    """A horizontal ("x") or vertical ("y") dimension between two feature points.
+
+    Each extension line starts at its own feature point, so the two ends may sit on
+    different edges (a bolt's bearing face and its chamfered tip, say). ``at`` is the
+    part coordinate of the dimension line: v for a horizontal one, u for a vertical one.
+    """
+
+    id: str
+    text: str
+    value: float
+    view: str
+    axis: str
+    a: Point
+    b: Point
+    at: float
+    from_ref: str
+    to_ref: str
+    tol: float | None = None
+    feature_type: str = "linear"
+    reference: bool = False
+
+
+@dataclass(frozen=True)
+class Callout:
+    """A leader from a feature to a horizontal shoulder with text on it, e.g. ``M10x1.5``.
+
+    With ``datum`` set, a datum feature symbol hangs from the shoulder: that is how a
+    datum is put on a feature of size (the bore of a gear, say) rather than on a surface.
+    """
+
+    id: str
+    text: str
+    value: float
+    view: str
+    #: Part point the arrow touches.
+    target: Point
+    #: Page point where the leader bends, and where the shoulder ends.
+    elbow: Point
+    tail_x: float
+    feature_type: str
+    tol: float | None = None
+    quantity: int = 1
+    reference: bool = False
+    datum: str | None = None
+
+
+@dataclass(frozen=True)
+class PartSpec:
+    """A sheet for a part that is not a plate: views, shapes, dimensions, callouts."""
+
+    stem: str
+    title: str
+    drawing_number: str
+    revision: str
+    material: str
+    units: str
+    units_text: str
+    general_tol: float | None
+    general_tol_text: str | None
+    scale_text: str
+    #: What the part is, e.g. "spur_gear"; written to the ground truth as
+    #: ``expected_part_type``.
+    part_type: str
+    views: tuple[PartView, ...]
+    shapes: tuple[Shape, ...]
+    dims: tuple[PointDim, ...]
+    callouts: tuple[Callout, ...] = ()
+    frames: tuple[Frame, ...] = ()
+    seeded: tuple[SeededError, ...] = ()
+    notes: tuple[str, ...] = ()
+    notes_at: tuple[float, float] = (40.0, 578.0)
+    extra_title_rows: tuple[str, ...] = ()
+    projection: str | None = "third"
+    notes_heading: str = "GENERAL NOTES:"
+
+    def view(self, name: str) -> PartView:
+        for view in self.views:
+            if view.name == name:
+                return view
+        raise ValueError(f"{self.stem}: no view named {name!r}")
+
+
+# --- Part geometry ---------------------------------------------------------------------
+
+
+def polar(r: float, degrees: float, centre: Point = (0.0, 0.0)) -> Point:
+    angle = math.radians(degrees)
+    return centre[0] + r * math.cos(angle), centre[1] + r * math.sin(angle)
+
+
+def arc_points(r: float, start: float, end: float, steps: int = 24) -> list[Point]:
+    """Points on a circle about the origin from ``start`` to ``end`` degrees (inclusive)."""
+    return [polar(r, start + (end - start) * i / steps) for i in range(steps + 1)]
+
+
+def hexagon(across_flats: float, *, pointy_top: bool) -> list[Point]:
+    """A regular hexagon about the origin, corners first at 0° (flat top) or 90°."""
+    r = across_flats / math.sqrt(3.0)  # the corner radius: across corners / 2
+    first = 90.0 if pointy_top else 0.0
+    return [polar(r, first + 60.0 * k) for k in range(6)]
+
+
+def _involute(alpha: float) -> float:
+    return math.tan(alpha) - alpha
+
+
+def spur_gear_outline(
+    teeth: int, module: float, pressure_deg: float = 20.0, flank_steps: int = 6
+) -> list[Point]:
+    """The tooth outline of a standard spur gear about the origin, as one closed polygon.
+
+    Addendum 1 module, dedendum 1.25 modules, involute flanks above the base circle and
+    radial flanks below it. The first tooth is centred on the +v axis (straight up).
+    """
+    rp = module * teeth / 2
+    ra = rp + module
+    rf = rp - 1.25 * module
+    rb = rp * math.cos(math.radians(pressure_deg))
+    inv_p = _involute(math.radians(pressure_deg))
+
+    def half_thickness(r: float) -> float:
+        """Half the tooth's angular thickness at radius ``r`` (radians)."""
+        r = max(r, rb)
+        return math.pi / (2 * teeth) + inv_p - _involute(math.acos(rb / r))
+
+    flank = [rf + (ra - rf) * i / flank_steps for i in range(flank_steps + 1)]
+    pitch = 2 * math.pi / teeth
+    points: list[Point] = []
+    for k in range(teeth):
+        centre = math.pi / 2 + k * pitch
+        # Up the leading flank (clockwise side), across the tip, down the trailing flank.
+        for r in flank:
+            a = centre - half_thickness(r)
+            points.append((r * math.cos(a), r * math.sin(a)))
+        for r in reversed(flank):
+            a = centre + half_thickness(r)
+            points.append((r * math.cos(a), r * math.sin(a)))
+        # Root arc to the next tooth.
+        gap_start = centre + half_thickness(rf)
+        gap_end = centre + pitch - half_thickness(rf)
+        for i in range(1, 4):
+            a = gap_start + (gap_end - gap_start) * i / 4
+            points.append((rf * math.cos(a), rf * math.sin(a)))
+    return points
+
+
+def bore_with_keyway(bore_dia: float, key_width: float, key_top: float) -> list[Point]:
+    """A round bore with a keyway at the top; ``key_top`` is the keyway's flat, from centre."""
+    r = bore_dia / 2
+    half = key_width / 2
+    edge = math.degrees(math.atan2(math.sqrt(r * r - half * half), half))
+    # Clockwise from the right side of the keyway, round the bottom, to the left side.
+    points = arc_points(r, edge, 180.0 - edge - 360.0, steps=40)
+    points += [(-half, key_top), (half, key_top)]
+    return points
+
+
+def hex_face_bows(
+    view: str,
+    corners: list[float],
+    ends: tuple[tuple[float, float], ...],
+    axis: str,
+) -> list[Shape]:
+    """The chamfer curves on each visible hex face of a nut or bolt head.
+
+    ``corners`` are the face edges across the part, in order. Each of ``ends`` is
+    ``(end, inward)``: the end face's position along the axis, and how far (signed, toward
+    the part) the curve dips at the face edges. ``axis`` is "v" when the part's axis runs
+    up the page, "u" when it runs across.
+    """
+    shapes: list[Shape] = []
+    for a, b in pairwise(corners):
+        mid = (a + b) / 2
+        for end, inward in ends:
+            pts = ((a, end + inward), (mid, end), (b, end + inward))
+            if axis == "u":
+                pts = tuple((v, u) for u, v in pts)
+            shapes.append(bow(view, "visible", *pts))
+    return shapes
+
+
+# --- Part drawing ----------------------------------------------------------------------
+
+
+def draw_shape(c: rl_canvas.Canvas, view: PartView, shape: Shape) -> None:
+    width, dash = LINE_STYLES[shape.style]
+    c.saveState()
+    c.setLineWidth(width)
+    if dash:
+        c.setDash(list(dash), 0)
+    if shape.kind == "path":
+        p = c.beginPath()
+        p.moveTo(*view.pt(*shape.points[0]))
+        for point in shape.points[1:]:
+            p.lineTo(*view.pt(*point))
+        if shape.closed:
+            p.close()
+        c.drawPath(p, stroke=1, fill=0)
+    elif shape.kind in ("circle", "arc"):
+        cx, cy = view.pt(*shape.points[0])
+        r = shape.r * view.scale
+        if shape.kind == "circle":
+            c.circle(cx, cy, r, stroke=1, fill=0)
+        else:
+            c.arc(cx - r, cy - r, cx + r, cy + r, shape.start, shape.extent)
+    elif shape.kind == "bow":
+        # A quadratic through the apex, written as the equivalent cubic.
+        (x0, y0), (xa, ya), (x2, y2) = (view.pt(*p) for p in shape.points)
+        qx, qy = 2 * xa - (x0 + x2) / 2, 2 * ya - (y0 + y2) / 2
+        p = c.beginPath()
+        p.moveTo(x0, y0)
+        p.curveTo(
+            x0 + 2 / 3 * (qx - x0), y0 + 2 / 3 * (qy - y0),
+            x2 + 2 / 3 * (qx - x2), y2 + 2 / 3 * (qy - y2),
+            x2, y2,
+        )
+        c.drawPath(p, stroke=1, fill=0)
+    else:
+        raise ValueError(f"unknown shape kind {shape.kind!r}")
+    c.restoreState()
+
+
+def vertical_label(c: rl_canvas.Canvas, x_line: float, y: float, text: str) -> Box:
+    """Dimension text reading bottom-to-top, just left of a vertical dimension line."""
+    size = DIM_SIZE
+    width = c.stringWidth(text, FONT, size)
+    baseline = x_line - 3.0
+    c.saveState()
+    c.setFont(FONT, size)
+    c.translate(baseline, y)
+    c.rotate(90)
+    c.drawCentredString(0, 0, text)
+    c.restoreState()
+    return Box(baseline - 0.78 * size, y - width / 2, baseline + 0.25 * size, y + width / 2)
+
+
+#: How far the dimension line runs past each arrow on a dimension too narrow for its text.
+NARROW_RUN = 14.0
+
+
+def draw_point_dim(c: rl_canvas.Canvas, view: PartView, dim: PointDim) -> Box:
+    (ax, ay), (bx, by) = view.pt(*dim.a), view.pt(*dim.b)
+    c.setLineWidth(0.7)
+    if dim.axis == "x":
+        y_dim = view.y(dim.at)
+        for px, py in ((ax, ay), (bx, by)):
+            sign = 1.0 if y_dim > py else -1.0
+            c.line(px, py + sign * EXT_GAP, px, y_dim + sign * EXT_OVER)
+        lo, hi = sorted((ax, bx))
+        width = c.stringWidth(dim.text, FONT, DIM_SIZE)
+        if width + 6.0 <= hi - lo:
+            c.line(lo, y_dim, hi, y_dim)
+            arrowhead(c, lo, y_dim, -1, 0)
+            arrowhead(c, hi, y_dim, 1, 0)
+            return centered_text(c, (lo + hi) / 2, y_dim + 4.0, dim.text, DIM_SIZE)
+        # Too narrow for the text: arrows outside pointing in, text beyond the right one.
+        c.line(lo - NARROW_RUN, y_dim, hi + NARROW_RUN, y_dim)
+        arrowhead(c, lo, y_dim, 1, 0)
+        arrowhead(c, hi, y_dim, -1, 0)
+        text_x = hi + NARROW_RUN + 2.0
+        return centered_text(c, text_x + width / 2, y_dim - 3.5, dim.text, DIM_SIZE)
+    if dim.axis == "y":
+        x_dim = view.x(dim.at)
+        for px, py in ((ax, ay), (bx, by)):
+            sign = 1.0 if x_dim > px else -1.0
+            c.line(px + sign * EXT_GAP, py, x_dim + sign * EXT_OVER, py)
+        lo, hi = sorted((ay, by))
+        c.line(x_dim, lo, x_dim, hi)
+        arrowhead(c, x_dim, lo, 0, -1)
+        arrowhead(c, x_dim, hi, 0, 1)
+        return vertical_label(c, x_dim, (lo + hi) / 2, dim.text)
+    raise ValueError(f"{dim.id}: axis must be 'x' or 'y', not {dim.axis!r}")
+
+
+def hanging_datum(c: rl_canvas.Canvas, x: float, y: float, label: str) -> Box:
+    """A datum feature symbol below a leader shoulder: triangle base on the line, box below."""
+    tri_h = 8.0
+    c.setLineWidth(0.9)
+    p = c.beginPath()
+    p.moveTo(x - 5.0, y)
+    p.lineTo(x + 5.0, y)
+    p.lineTo(x, y - tri_h)
+    p.close()
+    c.drawPath(p, stroke=1, fill=1)
+    box_top = y - tri_h - 4.0
+    c.line(x, y - tri_h, x, box_top)
+    half = DATUM_BOX / 2
+    c.rect(x - half, box_top - DATUM_BOX, DATUM_BOX, DATUM_BOX, stroke=1, fill=0)
+    c.setFont(FONT, 10)
+    c.drawCentredString(x, box_top - DATUM_BOX + 5.5, label)
+    return Box(x - half, box_top - DATUM_BOX, x + half, y)
+
+
+def draw_callout(
+    c: rl_canvas.Canvas, view: PartView, callout: Callout
+) -> tuple[Box, Box | None]:
+    """Draw a leader callout; returns its text box and its datum symbol's box (if any)."""
+    tx, ty = view.pt(*callout.target)
+    ex, ey = callout.elbow
+    c.setLineWidth(0.8)
+    c.line(tx, ty, ex, ey)
+    c.line(ex, ey, callout.tail_x, ey)
+    arrowhead(c, tx, ty, tx - ex, ty - ey)
+
+    c.setFont(FONT, NOTE_SIZE)
+    text_x = min(ex, callout.tail_x) + 2.0
+    text_y = ey + 5.0
+    c.drawString(text_x, text_y, callout.text)
+    width = c.stringWidth(callout.text, FONT, NOTE_SIZE)
+    text_box = Box(text_x, text_y - 2.6, text_x + width, text_y + 8.2)
+
+    datum_box = None
+    if callout.datum is not None:
+        datum_box = hanging_datum(c, (ex + callout.tail_x) / 2, ey, callout.datum)
+    return text_box, datum_box
+
+
+def datum_id(label: str) -> str:
+    return f"datum_{label.lower()}"
+
+
+def draw_part_sheet(c: rl_canvas.Canvas, spec: PartSpec) -> dict[str, Box]:
+    """Draw one part sheet and return each item's box, keyed by item id."""
+    boxes: dict[str, Box] = {}
+    draw_border(c)
+    for shape in spec.shapes:
+        draw_shape(c, spec.view(shape.view), shape)
+    for dim in spec.dims:
+        boxes[dim.id] = draw_point_dim(c, spec.view(dim.view), dim)
+    for callout in spec.callouts:
+        text_box, datum_box = draw_callout(c, spec.view(callout.view), callout)
+        boxes[callout.id] = text_box
+        if datum_box is not None and callout.datum is not None:
+            boxes[datum_id(callout.datum)] = datum_box
+    for frame in spec.frames:
+        boxes[frame.id] = draw_frame(c, frame)
+    draw_notes(c, spec)
+    draw_title_block(c, spec)
+    return boxes
+
+
+def _dimension_record(
+    *,
+    id: str,
+    text: str,
+    value: float,
+    feature_type: str,
+    quantity: int,
+    reference: bool,
+    tol: float | None,
+    from_ref: str | None,
+    to_ref: str | None,
+    box: Box,
+    view: str,
+) -> dict:
+    return {
+        "id": id,
+        "text_raw": text,
+        "value": float(value),
+        "unit": None,
+        "feature_type": feature_type,
+        "quantity": quantity,
+        "is_basic": False,
+        "is_reference": reference,
+        "tol_plus": tol,
+        "tol_minus": tol,
+        "from_ref": from_ref,
+        "to_ref": to_ref,
+        "bbox": norm_bbox(box),
+        "view": view,
+    }
+
+
+def part_ground_truth(spec: PartSpec, boxes: dict[str, Box]) -> dict:
+    """What a perfect extraction of a part sheet returns, plus its seeded errors.
+
+    Beyond the schema fields: ``expected_part_type``, ``views`` (name and kind of each),
+    and a ``view`` on every dimension naming the view it is placed in.
+    """
+    general = None
+    if spec.general_tol is not None:
+        general = {"linear_plus_minus": spec.general_tol, "text_raw": spec.general_tol_text}
+
+    dimensions = [
+        _dimension_record(
+            id=dim.id, text=dim.text, value=dim.value, feature_type=dim.feature_type,
+            quantity=1, reference=dim.reference, tol=dim.tol, from_ref=dim.from_ref,
+            to_ref=dim.to_ref, box=boxes[dim.id], view=dim.view,
+        )
+        for dim in spec.dims
+    ]
+    dimensions += [
+        _dimension_record(
+            id=co.id, text=co.text, value=co.value, feature_type=co.feature_type,
+            quantity=co.quantity, reference=co.reference, tol=co.tol, from_ref=None,
+            to_ref=None, box=boxes[co.id], view=co.view,
+        )
+        for co in spec.callouts
+    ]
+    datums = [
+        {"id": datum_id(co.datum), "label": co.datum, "bbox": norm_bbox(boxes[datum_id(co.datum)])}
+        for co in spec.callouts
+        if co.datum is not None
+    ]
+
+    return {
+        "units": spec.units,
+        "general_tolerance": general,
+        "title_block": {
+            "title": spec.title,
+            "drawing_number": spec.drawing_number,
+            "revision": spec.revision,
+            "material": spec.material,
+            "scale": spec.scale_text,
+        },
+        "expected_part_type": spec.part_type,
+        "views": [{"name": view.name, "kind": view.kind} for view in spec.views],
+        "bbox_convention": BBOX_CONVENTION,
+        "datums": datums,
         "dimensions": dimensions,
         "fcfs": [
             {
@@ -834,8 +1431,224 @@ PLATE_INCH_MULTI = DrawingSpec(
     ),
 )
 
+
+# --- Part drawings (step 26a): gear, nut, bolt ----------------------------------------
+
+#: Page points per mm at full size.
+PT_PER_MM_1TO1 = 72.0 / 25.4
+
+
+def _per_mm(scale: float) -> float:
+    return PT_PER_MM_1TO1 * scale
+
+
+# Spur gear: 24 teeth, module 2 -> pitch Ø48, outside Ø52, root Ø43. Bore Ø16 with a
+# 5 mm keyway (18.3 over bore and keyway). Face 20, hub Ø30 projecting 12 behind.
+_G_SCALE = _per_mm(1.5)
+_G_FRONT = PartView("front", "front", 230.0, 330.0, _G_SCALE)
+_G_SIDE = PartView("side", "right_side", 430.0, 330.0, _G_SCALE)
+_G_KEY_TOP = 18.3 - 8.0  # keyway flat above the bore centre
+
+GEAR_SPUR = PartSpec(
+    stem="gear_spur",
+    title="SPUR GEAR 24T M2",
+    drawing_number="DC-0301",
+    revision="A",
+    material="STEEL 4140",
+    units="mm",
+    units_text="MILLIMETERS",
+    general_tol=0.1,
+    general_tol_text="UNLESS OTHERWISE SPECIFIED: ±0.1",
+    scale_text="1.5:1",
+    part_type="spur_gear",
+    views=(_G_FRONT, _G_SIDE),
+    shapes=(
+        # Front: teeth, pitch circle as a thin chain line, keyed bore, centrelines.
+        path("front", "visible", *spur_gear_outline(24, 2.0), closed=True),
+        circle("front", "center", (0.0, 0.0), 24.0),
+        path("front", "visible", *bore_with_keyway(16.0, 5.0, _G_KEY_TOP), closed=True),
+        *centre_cross("front", (0.0, 0.0), 28.5),
+        # Side: gear blank and hub as one outline, pitch line, root, bore and keyway hidden.
+        path("side", "visible", (0, -26), (20, -26), (20, -15), (32, -15), (32, 15),
+             (20, 15), (20, 26), (0, 26), closed=True),
+        path("side", "center", (-1.5, 24), (21.5, 24)),
+        path("side", "center", (-1.5, -24), (21.5, -24)),
+        path("side", "hidden", (0, 21.5), (20, 21.5)),
+        path("side", "hidden", (0, -21.5), (20, -21.5)),
+        path("side", "hidden", (0, 8), (32, 8)),
+        path("side", "hidden", (0, -8), (32, -8)),
+        path("side", "hidden", (0, _G_KEY_TOP), (32, _G_KEY_TOP)),
+        path("side", "center", (-3, 0), (35, 0)),
+    ),
+    dims=(
+        PointDim("dim_keyway_width", "5 ±0.02", 5, "front", "x", (-2.5, _G_KEY_TOP),
+                 (2.5, _G_KEY_TOP), 14.5, "keyway_left_side", "keyway_right_side", tol=0.02),
+        PointDim("dim_keyway_depth", "18.3 ±0.1", 18.3, "front", "y", (-2.5, _G_KEY_TOP),
+                 (0, -8), -12.0, "bore_bottom", "keyway_flat", tol=0.1),
+        PointDim("dim_outside_diameter", "Ø52 ±0.05", 52, "side", "y", (0, -26), (0, 26),
+                 -6.0, "outside_diameter", "outside_diameter", tol=0.05,
+                 feature_type="diameter"),
+        PointDim("dim_hub_diameter", "Ø30 ±0.1", 30, "side", "y", (32, -15), (32, 15),
+                 37.0, "hub_diameter", "hub_diameter", tol=0.1, feature_type="diameter"),
+        PointDim("dim_face_width", "20 ±0.1", 20, "side", "x", (0, 26), (20, 26), 31.0,
+                 "front_face", "rear_face", tol=0.1),
+        PointDim("dim_overall_length", "32 ±0.1", 32, "side", "x", (0, 26), (32, 15), 37.0,
+                 "front_face", "hub_end_face", tol=0.1),
+    ),
+    callouts=(
+        Callout("dim_bore_diameter", "Ø16 ±0.01", 16, "front", polar(8.0, 290.0),
+                (265.0, 192.0), 330.0, "diameter", tol=0.01, datum="A"),
+        Callout("dim_pitch_diameter", "(Ø48)", 48, "front", polar(24.0, 135.0),
+                (110.0, 470.0), 62.0, "diameter", reference=True),
+    ),
+    frames=(
+        Frame("fcf_runout_od", "circular_runout", 0.05, "0.05", False, None, ("A",),
+              415.0, 150.0, leader_to=_G_SIDE.pt(10.0, -26.0)),
+    ),
+    notes=(
+        "1. 24 TEETH, MODULE 2.",
+        "2. PRESSURE ANGLE 20°, STANDARD ADDENDUM.",
+        "3. HEAT TREAT TO 28-32 HRC.",
+        "4. BREAK SHARP EDGES 0.2 MAX.",
+    ),
+)
+
+# Hex nut M10x1.5: across flats 16, across corners 18.48 (theoretical), thickness 8.4.
+_N_SCALE = _per_mm(4.0)
+_N_TOP = PartView("top", "top", 380.0, 410.0, _N_SCALE)
+_N_FRONT = PartView("front", "front", 380.0, 185.0, _N_SCALE)
+_N_R = 16.0 / math.sqrt(3.0)  # corner radius
+_N_T = 8.4
+_N_BOW = 0.6
+_N_MINOR = (10.0 - 1.0825 * 1.5) / 2  # tapped minor radius
+_N_TOP_EDGE = 0.75 * _N_R  # where the chamfer circle meets the outer faces
+
+HEX_NUT = PartSpec(
+    stem="hex_nut",
+    title="HEX NUT M10",
+    drawing_number="DC-0302",
+    revision="A",
+    material="MEDIUM CARBON STEEL",
+    units="mm",
+    units_text="MILLIMETERS",
+    general_tol=0.2,
+    general_tol_text="UNLESS OTHERWISE SPECIFIED: ±0.2",
+    scale_text="4:1",
+    part_type="hex_nut",
+    views=(_N_TOP, _N_FRONT),
+    shapes=(
+        # Top: hexagon (corners left and right), bearing chamfer circle, thread circles
+        # (minor as a full circle, major as a thin three-quarter arc).
+        path("top", "visible", *hexagon(16.0, pointy_top=False), closed=True),
+        circle("top", "visible", (0.0, 0.0), 7.3),
+        circle("top", "visible", (0.0, 0.0), _N_MINOR),
+        arc("top", "thin", (0.0, 0.0), 5.0, 90.0, 270.0),
+        *centre_cross("top", (0.0, 0.0), _N_R + 1.2, 8.0 + 1.2),
+        # Front: three faces, chamfer curves at both ends, thread hidden, centreline.
+        path("front", "visible", (-_N_R, _N_BOW), (-_N_R, _N_T - _N_BOW)),
+        path("front", "visible", (_N_R, _N_BOW), (_N_R, _N_T - _N_BOW)),
+        path("front", "visible", (-_N_R / 2, _N_BOW), (-_N_R / 2, _N_T - _N_BOW)),
+        path("front", "visible", (_N_R / 2, _N_BOW), (_N_R / 2, _N_T - _N_BOW)),
+        path("front", "visible", (-_N_TOP_EDGE, _N_T), (_N_TOP_EDGE, _N_T)),
+        path("front", "visible", (-_N_TOP_EDGE, 0), (_N_TOP_EDGE, 0)),
+        *hex_face_bows("front", [-_N_R, -_N_R / 2, _N_R / 2, _N_R],
+                       ((_N_T, -_N_BOW), (0.0, _N_BOW)), "v"),
+        path("front", "hidden", (-_N_MINOR, 0), (-_N_MINOR, _N_T)),
+        path("front", "hidden", (_N_MINOR, 0), (_N_MINOR, _N_T)),
+        path("front", "center", (0, -1.5), (0, _N_T + 1.5)),
+    ),
+    dims=(
+        PointDim("dim_across_corners", "(18.48)", 18.48, "top", "x", (-_N_R, 0), (_N_R, 0),
+                 10.5, "corner_left", "corner_right", reference=True),
+        PointDim("dim_across_flats", "16", 16, "top", "y", (_N_R / 2, 8), (_N_R / 2, -8),
+                 _N_R + 3.5, "flat_bottom", "flat_top"),
+        PointDim("dim_thickness", "8.4", 8.4, "front", "y", (_N_R, 0), (_N_R, _N_T),
+                 _N_R + 3.5, "bottom_face", "top_face"),
+    ),
+    callouts=(
+        Callout("dim_thread", "M10x1.5", 10, "top", polar(5.0, 225.0), (250.0, 330.0),
+                188.0, "thread"),
+    ),
+    notes=(
+        "1. THREAD TOLERANCE CLASS 6H.",
+        "2. CHAMFER BOTH FACES 30°.",
+        "3. PROPERTY CLASS 8.",
+        "4. FINISH: ZINC PLATE.",
+    ),
+)
+
+# Hex bolt M8x1.25 x 40: across flats 13, head height 5.3, thread length 22, 45° tip
+# chamfer down to the thread minor diameter. Length is under the head, as is standard.
+_B_SCALE = _per_mm(2.0)
+_B_FRONT = PartView("front", "front", 235.0, 330.0, _B_SCALE)
+_B_END = PartView("end", "left_side", 130.0, 330.0, _B_SCALE)
+_B_R = 13.0 / math.sqrt(3.0)
+_B_K = 5.3
+_B_TIP = _B_K + 40.0
+_B_THREAD = _B_TIP - 22.0
+_B_MINOR = (8.0 - 1.226 * 1.25) / 2
+_B_CHAMFER = _B_TIP - (4.0 - _B_MINOR)
+_B_BOW = 0.5
+
+HEX_BOLT = PartSpec(
+    stem="hex_bolt",
+    title="HEX BOLT M8 x 40",
+    drawing_number="DC-0303",
+    revision="A",
+    material="ALLOY STEEL",
+    units="mm",
+    units_text="MILLIMETERS",
+    general_tol=0.2,
+    general_tol_text="UNLESS OTHERWISE SPECIFIED: ±0.2",
+    scale_text="2:1",
+    part_type="hex_bolt",
+    views=(_B_FRONT, _B_END),
+    shapes=(
+        # Front, head: corners top and bottom, two face edges, chamfer curves on top.
+        path("front", "visible", (_B_BOW, _B_R), (_B_K, _B_R)),
+        path("front", "visible", (_B_BOW, -_B_R), (_B_K, -_B_R)),
+        path("front", "visible", (_B_BOW, _B_R / 2), (_B_K, _B_R / 2)),
+        path("front", "visible", (_B_BOW, -_B_R / 2), (_B_K, -_B_R / 2)),
+        path("front", "visible", (_B_K, -_B_R), (_B_K, _B_R)),
+        path("front", "visible", (0, -0.75 * _B_R), (0, 0.75 * _B_R)),
+        *hex_face_bows("front", [-_B_R, -_B_R / 2, _B_R / 2, _B_R], ((0.0, _B_BOW),), "u"),
+        # Front, shank: outline with the chamfered tip, thread end, thread roots.
+        path("front", "visible", (_B_K, 4), (_B_CHAMFER, 4), (_B_TIP, _B_MINOR),
+             (_B_TIP, -_B_MINOR), (_B_CHAMFER, -4), (_B_K, -4)),
+        path("front", "visible", (_B_CHAMFER, -4), (_B_CHAMFER, 4)),
+        path("front", "visible", (_B_THREAD, -4), (_B_THREAD, 4)),
+        path("front", "thin", (_B_THREAD, _B_MINOR), (_B_TIP, _B_MINOR)),
+        path("front", "thin", (_B_THREAD, -_B_MINOR), (_B_TIP, -_B_MINOR)),
+        path("front", "center", (-1.5, 0), (_B_TIP + 2.0, 0)),
+        # End view, looking at the head: hexagon (corners up and down), chamfer circle.
+        path("end", "visible", *hexagon(13.0, pointy_top=True), closed=True),
+        circle("end", "visible", (0.0, 0.0), 6.2),
+        *centre_cross("end", (0.0, 0.0), _B_R + 1.5),
+    ),
+    dims=(
+        PointDim("dim_head_height", "5.3", 5.3, "front", "x", (0, _B_R), (_B_K, _B_R),
+                 _B_R + 4.0, "head_top", "bearing_face"),
+        PointDim("dim_thread_length", "22", 22, "front", "x", (_B_THREAD, 4),
+                 (_B_TIP, _B_MINOR), _B_R + 4.0, "thread_end", "bolt_tip"),
+        PointDim("dim_length", "40", 40, "front", "x", (_B_K, -_B_R), (_B_TIP, -_B_MINOR),
+                 -_B_R - 4.0, "bearing_face", "bolt_tip"),
+        PointDim("dim_across_flats", "13", 13, "end", "x", (-6.5, -_B_R / 2),
+                 (6.5, -_B_R / 2), -_B_R - 4.0, "flat_left", "flat_right"),
+    ),
+    callouts=(
+        Callout("dim_thread", "M8x1.25", 8, "front", (42.0, -4.0), (530.0, 240.0), 592.0,
+                "thread"),
+    ),
+    notes=(
+        "1. THREAD TOLERANCE CLASS 6g.",
+        "2. PROPERTY CLASS 8.8, MARK ON HEAD.",
+        "3. FINISH: ZINC PLATE.",
+        "4. LENGTH IS MEASURED UNDER THE HEAD.",
+    ),
+)
+
 #: Every drawing in the suite, by stem, in the order the eval runs them.
-SUITE: dict[str, DrawingSpec] = {
+SUITE: dict[str, DrawingSpec | PartSpec] = {
     spec.stem: spec
     for spec in (
         PLATE_CLEAN,
@@ -846,6 +1659,9 @@ SUITE: dict[str, DrawingSpec] = {
         PLATE_EDGE_HOLE,
         BRACKET_01,
         PLATE_INCH_MULTI,
+        GEAR_SPUR,
+        HEX_NUT,
+        HEX_BOLT,
     )
 }
 
@@ -853,7 +1669,9 @@ SUITE: dict[str, DrawingSpec] = {
 # --- Build -----------------------------------------------------------------------------
 
 
-def build_one(spec: DrawingSpec, out_dir: Path, *, write_png: bool = True) -> dict[str, Path]:
+def build_one(
+    spec: DrawingSpec | PartSpec, out_dir: Path, *, write_png: bool = True
+) -> dict[str, Path]:
     """Draw one spec to ``<stem>.pdf`` and write ``<stem>.gt.json`` (and ``<stem>.png``)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / f"{spec.stem}.pdf"
@@ -863,11 +1681,16 @@ def build_one(spec: DrawingSpec, out_dir: Path, *, write_png: bool = True) -> di
     # byte-identical PDF and git shows no change.
     c = rl_canvas.Canvas(str(pdf_path), pagesize=(PAGE_W, PAGE_H), invariant=1)
     c.setTitle(f"{spec.title} {spec.drawing_number}")
-    boxes = draw_sheet(c, spec)
+    if isinstance(spec, PartSpec):
+        boxes = draw_part_sheet(c, spec)
+    else:
+        boxes = draw_sheet(c, spec)
     c.showPage()
     c.save()
 
-    truth = ground_truth(spec, boxes)
+    truth = part_ground_truth(spec, boxes) if isinstance(spec, PartSpec) else ground_truth(
+        spec, boxes
+    )
     json_path.write_text(json.dumps(truth, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     paths = {"pdf": pdf_path, "ground_truth": json_path}
 
@@ -879,8 +1702,12 @@ def build_one(spec: DrawingSpec, out_dir: Path, *, write_png: bool = True) -> di
 
 
 def build_suite(
-    out_dir: Path | str = OUT_DIR, *, write_png: bool = True
+    out_dir: Path | str = OUT_DIR,
+    *,
+    write_png: bool = True,
+    stems: list[str] | None = None,
 ) -> dict[str, dict[str, Path]]:
-    """Build every drawing in :data:`SUITE`. Returns the written paths per stem."""
+    """Build the drawings in :data:`SUITE` (or just ``stems``). Returns paths per stem."""
     out_dir = Path(out_dir)
-    return {stem: build_one(spec, out_dir, write_png=write_png) for stem, spec in SUITE.items()}
+    chosen = SUITE if stems is None else {stem: SUITE[stem] for stem in stems}
+    return {stem: build_one(spec, out_dir, write_png=write_png) for stem, spec in chosen.items()}

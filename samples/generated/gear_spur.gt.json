@@ -1,0 +1,237 @@
+{
+  "units": "mm",
+  "general_tolerance": {
+    "linear_plus_minus": 0.1,
+    "text_raw": "UNLESS OTHERWISE SPECIFIED: ±0.1"
+  },
+  "title_block": {
+    "title": "SPUR GEAR 24T M2",
+    "drawing_number": "DC-0301",
+    "revision": "A",
+    "material": "STEEL 4140",
+    "scale": "1.5:1"
+  },
+  "expected_part_type": "spur_gear",
+  "views": [
+    {
+      "name": "front",
+      "kind": "front"
+    },
+    {
+      "name": "side",
+      "kind": "right_side"
+    }
+  ],
+  "bbox_convention": "[x0, y0, x1, y1] normalized 0..1, origin top-left, covering the annotation's text or symbol",
+  "datums": [
+    {
+      "id": "datum_a",
+      "label": "A",
+      "bbox": [
+        0.3643,
+        0.6863,
+        0.387,
+        0.7353
+      ]
+    }
+  ],
+  "dimensions": [
+    {
+      "id": "dim_keyway_width",
+      "text_raw": "5 ±0.02",
+      "value": 5.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.02,
+      "tol_minus": 0.02,
+      "from_ref": "keyway_left_side",
+      "to_ref": "keyway_right_side",
+      "bbox": [
+        0.324,
+        0.353,
+        0.3665,
+        0.3698
+      ],
+      "view": "front"
+    },
+    {
+      "id": "dim_keyway_depth",
+      "text_raw": "18.3 ±0.1",
+      "value": 18.3,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.1,
+      "tol_minus": 0.1,
+      "from_ref": "bore_bottom",
+      "to_ref": "keyway_flat",
+      "bbox": [
+        0.2123,
+        0.4185,
+        0.2253,
+        0.4871
+      ],
+      "view": "front"
+    },
+    {
+      "id": "dim_outside_diameter",
+      "text_raw": "Ø52 ±0.05",
+      "value": 52.0,
+      "unit": null,
+      "feature_type": "diameter",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.05,
+      "tol_minus": 0.05,
+      "from_ref": "outside_diameter",
+      "to_ref": "outside_diameter",
+      "bbox": [
+        0.4971,
+        0.4224,
+        0.5101,
+        0.4992
+      ],
+      "view": "side"
+    },
+    {
+      "id": "dim_hub_diameter",
+      "text_raw": "Ø30 ±0.1",
+      "value": 30.0,
+      "unit": null,
+      "feature_type": "diameter",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.1,
+      "tol_minus": 0.1,
+      "from_ref": "hub_diameter",
+      "to_ref": "hub_diameter",
+      "bbox": [
+        0.7279,
+        0.4269,
+        0.7409,
+        0.4946
+      ],
+      "view": "side"
+    },
+    {
+      "id": "dim_face_width",
+      "text_raw": "20 ±0.1",
+      "value": 20.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.1,
+      "tol_minus": 0.1,
+      "from_ref": "front_face",
+      "to_ref": "rear_face",
+      "bbox": [
+        0.5754,
+        0.2261,
+        0.6179,
+        0.243
+      ],
+      "view": "side"
+    },
+    {
+      "id": "dim_overall_length",
+      "text_raw": "32 ±0.1",
+      "value": 32.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.1,
+      "tol_minus": 0.1,
+      "from_ref": "front_face",
+      "to_ref": "hub_end_face",
+      "bbox": [
+        0.6076,
+        0.1844,
+        0.6501,
+        0.2013
+      ],
+      "view": "side"
+    },
+    {
+      "id": "dim_bore_diameter",
+      "text_raw": "Ø16 ±0.01",
+      "value": 16.0,
+      "unit": null,
+      "feature_type": "diameter",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.01,
+      "tol_minus": 0.01,
+      "from_ref": null,
+      "to_ref": null,
+      "bbox": [
+        0.3371,
+        0.6647,
+        0.3994,
+        0.6824
+      ],
+      "view": "front"
+    },
+    {
+      "id": "dim_pitch_diameter",
+      "text_raw": "(Ø48)",
+      "value": 48.0,
+      "unit": null,
+      "feature_type": "diameter",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": true,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": null,
+      "to_ref": null,
+      "bbox": [
+        0.0808,
+        0.2105,
+        0.1147,
+        0.2281
+      ],
+      "view": "front"
+    }
+  ],
+  "fcfs": [
+    {
+      "id": "fcf_runout_od",
+      "text_raw": "circular_runout | 0.05 | A",
+      "characteristic": "circular_runout",
+      "tolerance": 0.05,
+      "diameter_zone": false,
+      "material_modifier": null,
+      "datum_refs": [
+        {
+          "label": "A",
+          "modifier": null
+        }
+      ],
+      "bbox": [
+        0.524,
+        0.7124,
+        0.6326,
+        0.7549
+      ]
+    }
+  ],
+  "notes": [
+    "1. 24 TEETH, MODULE 2.",
+    "2. PRESSURE ANGLE 20°, STANDARD ADDENDUM.",
+    "3. HEAT TREAT TO 28-32 HRC.",
+    "4. BREAK SHARP EDGES 0.2 MAX."
+  ],
+  "seeded_errors": []
+}

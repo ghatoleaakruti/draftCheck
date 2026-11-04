@@ -77,7 +77,7 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/limits.py` | What one demo deployment is willing to spend, and on whom. `Limits.from_env()` holds every number (per-IP uploads and fixes per hour, model calls per day, run retention, sweep interval, `TRUST_PROXY`); `UsageLimiter` counts them in memory over sliding windows and raises `LimitExceeded`, which `api.py` turns into a `429`; `client_ip(...)` decides which address a request is counted against; `sweep_runs(root, max_age_hours)` deletes stale run folders and `Cleaner` keeps that to once an hour — see §4.12 | **BUILT** |
 | `draftcheck/static/` | The browser page, served at `/`: `index.html`, `style.css`, `app.js`, `sheet.js` (the drawing primitives for the sheet: scan band, revision clouds, pen notes, stamp — §4.17), and `fonts/` (Archivo, JetBrains Mono, Nanum Pen Script, each with its OFL licence). Plain HTML, CSS, and JavaScript — no framework, no build step, nothing loaded from a CDN. Laid out as "the checker's desk" (§4.15): a header with a five-stage stepper and a model pill, the drawing as paper on a dark desk with an SVG overlay in image pixels, and a tabbed review panel (Extracted, Issues, Corrections) with one primary button whose label follows the stage. The tables are editable (§4.9), linked to the drawing by item id, and checked and fixed through the same endpoints as before. Cells are written with `textContent` or as an input's `value`, so model output is never treated as markup | **BUILT** (upload + view + edit + check + fix + redline) |
 | `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch. The ground truth is written in `schema.py`'s field names — plus `bbox_convention` and `seeded_errors` — so it parses as a `Drawing` and doubles as the target an extraction is scored against. `--suite` builds the evaluation suite instead (below) and leaves plate_001 alone | **BUILT** |
-| `scripts/drawing_suite.py` | The evaluation suite: eight drawings described as `DrawingSpec` data and drawn by one renderer, so each sheet and its ground truth come from the same spec. Every seeded error names its `rule_id` and exact `finding_key` — see §4.18 | **BUILT** |
+| `scripts/drawing_suite.py` | The evaluation suite: eleven drawings described as data — `DrawingSpec` for plates (a rectangle with holes) and `PartSpec` for other parts (named orthographic views, a shape list per view, point-to-point dimensions, leader callouts) — so each sheet and its ground truth come from the same spec. Every seeded error names its `rule_id` and exact `finding_key` — see §4.18 | **BUILT** |
 | `scripts/run_eval.py` | Runs each suite drawing × provider through render → extract → rules → correction loop, one call at a time, scores it against the ground truth in plain Python, caches each finished run in `outputs/eval/results.json`, and writes `docs/EVAL.md` — see §4.18 | **BUILT** |
 | `scripts/smoke_test.py` | One-shot check that the configured model answers over the network; `--provider baseten\|meta` picks which one | **BUILT** |
 | `scripts/extract_spike.py` | One extraction pass on a drawing: renders it, calls `chat_json`, and writes `outputs/spike/<name>.raw.txt`, `.json`, and `.overlay.png` (red boxes = model bboxes, green = ground truth from `--gt`). A look-at-it tool; it decides nothing | **BUILT** |
@@ -1176,7 +1176,7 @@ the first time a note is written, and the notes are measured again once it arriv
 
 ### 4.18 Evaluation suite — BUILT (step 22)
 
-**Drawings.** `python -m scripts.make_sample_drawing --suite` writes eight sheets to
+**Drawings.** `python -m scripts.make_sample_drawing --suite` writes eleven sheets to
 `samples/generated/` (PDF, `.gt.json`, PNG preview), next to the unchanged plate_001:
 
 | Drawing | What is seeded | Expected findings |
@@ -1189,6 +1189,21 @@ the first time a note is written, and the notes are measured again once it arriv
 | plate_edge_hole | A Ø6 hole centred 5 mm from the right edge | MFG-001 |
 | bracket_01 | Front + side view (hidden lines), 30/60/30 chain under an overall 120, notes, full title block; position frame A\|B\|D with D undefined, flatness to A, Ø6 hole 5 from the edge | GDT-001, GDT-003, MFG-001 |
 | plate_inch_multi | Inches, 4 holes, position + perpendicularity frames; datum B placed twice | GDT-002 |
+| gear_spur | Spur gear, 24 teeth module 2: front (involute teeth, pitch circle as a chain line, keyed bore) + right side (face, hub); circular runout on the OD to datum A on the bore | none |
+| hex_nut | M10x1.5 nut: top (hexagon, thread circles) + front (faces, chamfer curves, hidden thread); across flats, across corners (reference), thickness | none |
+| hex_bolt | M8x1.25 x 40 bolt: front (head, shank, thread, chamfered tip) + left-side end view (hexagon); head height, across flats, length under head, thread length | none |
+
+**Part sheets (step 26).** The last three use `PartSpec`, the second recipe. Each view is a
+`PartView` (name, kind, page origin, scale) placed third-angle and aligned with the others;
+geometry is a list of `Shape`s (path, circle, arc, or the "bow" chamfer curve) in line
+styles visible / thin / hidden / center. `PointDim` runs between any two feature points,
+so each extension line starts at its own feature; a span too narrow for its text gets
+arrows outside and the text beside it. A `Callout` is a leader and shoulder, and can hang a
+datum feature symbol from the shoulder (datum A on the gear bore). Every part sheet has a
+title block with a third-angle projection symbol and a GENERAL NOTES block. Their ground
+truth adds `expected_part_type`, `views` (`{name, kind}`), and a `view` on every dimension;
+the schema ignores these keys. The new fields on `DrawingSpec` (`projection`,
+`notes_heading`) default to off, so the first eight sheets are byte-identical.
 
 **Sanity test.** `tests/test_eval_suite.py` runs the rules on every ground truth and requires
 exactly the seeded findings — by `finding_key`, so the right items too — and nothing else.
@@ -1360,7 +1375,7 @@ draftCheck/
 │       ├── plate_001.pdf       # the drawing
 │       ├── plate_001.gt.json   # ground truth in schema.py field names, parses as a Drawing
 │       ├── plate_001.png       # rendered preview
-│       └── <suite stem>.{pdf,gt.json,png}  # the eight eval drawings (§4.18)
+│       └── <suite stem>.{pdf,gt.json,png}  # the eleven eval drawings (§4.18)
 ├── outputs/                    # git-ignored; spike dumps, overlays, redlines, eval/results.json
 ├── scripts/
 │   ├── __init__.py
@@ -1380,6 +1395,7 @@ draftCheck/
 │   ├── test_edit_display.py    # short before/after strings and pen labels
 │   ├── test_edits.py
 │   ├── test_eval_suite.py      # generator, ground-truth sanity, eval scoring (no network)
+│   ├── test_drawing_parts.py   # part recipes (gear, nut, bolt): geometry, views, ground truth
 │   ├── test_explain.py         # explanation validation, fingerprint, endpoint, cache, limit
 │   ├── test_limits.py
 │   ├── test_memory.py
