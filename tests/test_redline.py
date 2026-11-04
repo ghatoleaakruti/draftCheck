@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 from datetime import date
 from pathlib import Path
 
@@ -18,10 +19,17 @@ from PIL import Image
 from draftcheck.agent import CorrectionReport, correct
 from draftcheck.edits import AddDatum, AddDimension, RemoveDatumRef, SetField
 from draftcheck.redline import (
-    BALLOON_WIDTH_RATIO,
-    BOX_PAD_RATIO,
+    ARCHIVO_FONT,
+    CLOUD_PAD_RATIO,
+    DELTA_WIDTH_RATIO,
     FOOTER,
+    PEN_AMBER,
+    PEN_FONT,
+    PEN_GREEN,
+    PEN_RED,
     EditNames,
+    _cloud_arcs,
+    _pen_font_for,
     ascii_safe,
     findings_text,
     plain_edit,
@@ -84,110 +92,166 @@ def text_of(lines) -> str:
 # --- page 1 -----------------------------------------------------------------
 
 
-def box_edges(bbox: list[float], size=PAGE_SIZE) -> dict[str, tuple[int, int]]:
-    """A point on the middle of each edge of the rectangle drawn around ``bbox``."""
-    pad = size[0] * BOX_PAD_RATIO
-    x0, y0 = bbox[0] * size[0] - pad, bbox[1] * size[1] - pad
-    x1, y1 = bbox[2] * size[0] + pad, bbox[3] * size[1] + pad
-    mid_x, mid_y = round((x0 + x1) / 2), round((y0 + y1) / 2)
+def near(pixel, colour, tolerance: int = 40) -> bool:
+    """True when ``pixel`` is within ``tolerance`` of ``colour`` on every channel."""
+    return all(abs(a - b) <= tolerance for a, b in zip(pixel[:3], colour, strict=True))
+
+
+def colour_count(image: Image.Image, colour, region=None) -> int:
+    """How many pixels in ``region`` (default: the whole page) are ``colour``."""
+    area = image.crop(region) if region else image
+    return sum(1 for pixel in pixels(area) if near(tuple(pixel), colour))
+
+
+def ring_of(bbox: list[float], size=PAGE_SIZE) -> tuple[float, float, float, float]:
+    """The padded rectangle a cloud is drawn around."""
+    pad = size[0] * CLOUD_PAD_RATIO
+    return (
+        bbox[0] * size[0] - pad,
+        bbox[1] * size[1] - pad,
+        bbox[2] * size[0] + pad,
+        bbox[3] * size[1] + pad,
+    )
+
+
+def box_edges(bbox: list[float], size=PAGE_SIZE) -> dict[str, tuple[int, int, int, int]]:
+    """A small window straddling the middle of each side of the cloud around ``bbox``.
+
+    A cloud's arcs wander a few pixels either side of the ring, so each edge is checked
+    over a window rather than at one pixel.
+    """
+    x0, y0, x1, y1 = ring_of(bbox, size)
+    mid_x, mid_y = (x0 + x1) / 2, (y0 + y1) / 2
+    reach, along = size[0] * 0.008, size[0] * 0.02
+
+    def window(cx, cy, wide, tall):
+        return (round(cx - wide), round(cy - tall), round(cx + wide), round(cy + tall))
+
     return {
-        "left": (round(x0), mid_y),
-        "right": (round(x1), mid_y),
-        "top": (mid_x, round(y0)),
-        "bottom": (mid_x, round(y1)),
+        "left": window(x0, mid_y, reach, along),
+        "right": window(x1, mid_y, reach, along),
+        "top": window(mid_x, y0, along, reach),
+        "bottom": window(mid_x, y1, along, reach),
     }
 
 
-def test_the_rectangle_is_drawn_on_all_four_edges_of_the_bbox():
+def assert_cloud(image: Image.Image, bbox: list[float], colour, label: str = "") -> None:
+    for name, region in box_edges(bbox, image.size).items():
+        assert colour_count(image, colour, region) > 0, f"{label}: no cloud on the {name} edge"
+
+
+def pen_strip(bbox: list[float], size=PAGE_SIZE) -> tuple[int, int, int, int]:
+    """Where a pen note goes: just right of the cloud, level with its middle."""
+    x0, y0, x1, y1 = ring_of(bbox, size)
+    gap = size[0] * 0.006
+    mid = (y0 + y1) / 2
+    half = size[0] * 0.012
+    return (round(x1 + gap), round(mid - half), round(x1 + 120), round(mid + half))
+
+
+def test_without_a_report_the_cloud_is_red_on_all_four_edges():
     bbox = [0.40, 0.50, 0.60, 0.70]
 
     page1, _ = render_redline(blank_page_png(), [make_finding("GDT-001", bbox)])
 
-    for name, point in box_edges(bbox).items():
-        assert is_red(page1.getpixel(point)), f"no red line on the {name} edge"
+    assert_cloud(page1, bbox, PEN_RED)
 
 
-def test_the_rectangle_encloses_the_bbox_rather_than_covering_it():
-    """The callout inside the box has to stay readable, so the middle is left alone."""
+def test_the_cloud_encloses_the_bbox_rather_than_covering_it():
+    """The callout inside the cloud has to stay readable, so the middle is left alone."""
     bbox = [0.40, 0.50, 0.60, 0.70]
 
     page1, _ = render_redline(blank_page_png(), [make_finding("GDT-001", bbox)])
 
-    center = (round(0.50 * PAGE_SIZE[0]), round(0.60 * PAGE_SIZE[1]))
-    assert page1.getpixel(center) == (255, 255, 255), "the mark covered the bbox interior"
+    inside = (
+        round(0.45 * PAGE_SIZE[0]),
+        round(0.56 * PAGE_SIZE[1]),
+        round(0.55 * PAGE_SIZE[0]),
+        round(0.64 * PAGE_SIZE[1]),
+    )
+    assert ink_pixel_count(page1.crop(inside)) == 0, "the mark covered the bbox interior"
 
 
-def test_the_rectangle_follows_the_size_of_the_bbox():
+def test_the_cloud_follows_the_size_of_the_bbox():
     small = render_redline(blank_page_png(), [make_finding("A", [0.45, 0.45, 0.55, 0.55])])[0]
     large = render_redline(blank_page_png(), [make_finding("A", [0.20, 0.20, 0.80, 0.80])])[0]
 
-    assert red_pixel_count(large) > red_pixel_count(small)
+    assert colour_count(large, PEN_RED) > colour_count(small, PEN_RED)
 
 
-def balloon_center(bbox: list[float], size=PAGE_SIZE) -> tuple[int, int]:
-    """Where the balloon sits by default: diagonally off the rectangle's top-right."""
-    pad = size[0] * BOX_PAD_RATIO
-    radius = size[0] * BALLOON_WIDTH_RATIO / 2
-    x1, y0 = bbox[2] * size[0] + pad, bbox[1] * size[1] - pad
-    return (round(x1 + radius * 0.9), round(y0 - radius * 0.9))
+def test_every_cloud_arc_bulges_outward():
+    box = (100.0, 100.0, 300.0, 200.0)
+    for (bx0, by0, bx1, by1), start, end in _cloud_arcs(box, 5.4):
+        cx, cy, radius = (bx0 + bx1) / 2, (by0 + by1) / 2, (bx1 - bx0) / 2
+        middle = math.radians((start + end) / 2)
+        px, py = cx + radius * math.cos(middle), cy + radius * math.sin(middle)
+        # An arc that turns a corner can end up a pixel inside it; no more than that.
+        inside = box[0] + 1.5 < px < box[2] - 1.5 and box[1] + 1.5 < py < box[3] - 1.5
+        assert not inside, "an arc bulges into the box"
+        assert 0 < end - start < 180
 
 
-def test_a_balloon_is_drawn_outside_the_rectangles_top_right_corner():
+def delta_region(bbox: list[float], size=PAGE_SIZE) -> tuple[int, int, int, int]:
+    """The delta's bounding square, just outside the cloud's top-left corner."""
+    x0, y0, _, _ = ring_of(bbox, size)
+    side = size[0] * DELTA_WIDTH_RATIO
+    margin = size[0] * 0.002
+    right, base = x0 + margin, y0 + margin / 2
+    return (round(right - side), round(base - side * 0.88), round(right), round(base))
+
+
+def test_a_filled_delta_sits_outside_the_clouds_top_left_corner():
     bbox = [0.40, 0.50, 0.60, 0.70]
 
     page1, _ = render_redline(blank_page_png(), [make_finding("GDT-001", bbox)])
 
-    center = balloon_center(bbox)
-    radius = PAGE_SIZE[0] * BALLOON_WIDTH_RATIO / 2
-    # Filled, so a ring of samples inside it is solid red; the number is white, so the
-    # samples are taken off-centre.
-    for offset in (-radius * 0.6, radius * 0.6):
-        assert is_red(page1.getpixel((center[0], round(center[1] + offset))))
+    region = delta_region(bbox)
+    area = (region[2] - region[0]) * (region[3] - region[1])
+    # A filled triangle covers about half its square, less the white digit.
+    assert colour_count(page1, PEN_RED, region) > area * 0.3
+    assert any(pixel == b"\xff\xff\xff" for pixel in pixels(page1.crop(region))), "no digit"
 
 
-def test_the_balloon_carries_a_white_number():
+def test_two_findings_on_one_box_show_both_deltas():
     bbox = [0.40, 0.50, 0.60, 0.70]
+    findings = [make_finding("A-001", bbox), make_finding("A-002", bbox, item_ids=["F2"])]
 
-    page1, _ = render_redline(blank_page_png(), [make_finding("GDT-001", bbox)])
+    page1, _ = render_redline(blank_page_png(), findings)
 
-    center = balloon_center(bbox)
-    radius = round(PAGE_SIZE[0] * BALLOON_WIDTH_RATIO / 2)
-    disc = page1.crop(
-        (center[0] - radius, center[1] - radius, center[0] + radius, center[1] + radius)
-    )
-    assert any(pixel == b"\xff\xff\xff" for pixel in pixels(disc)), "no white digit"
-
-
-def test_a_balloon_near_the_top_right_corner_stays_on_the_page():
-    """Top-right is the convention, but it loses to staying on the sheet."""
-    page1, _ = render_redline(blank_page_png(), [make_finding("GDT-001", [0.90, 0.02, 0.99, 0.08])])
-
-    radius = round(PAGE_SIZE[0] * BALLOON_WIDTH_RATIO / 2)
-    # Every red pixel must be inside the page, and a balloon's worth of them must exist
-    # somewhere other than the default corner, which is off the sheet here.
-    assert red_pixel_count(page1) > 0
-    strip = page1.crop((PAGE_SIZE[0] - 2, 0, PAGE_SIZE[0], PAGE_SIZE[1]))
-    assert red_pixel_count(strip) < 2 * radius, "the mark ran off the right edge"
+    first = delta_region(bbox)
+    shift = round(PAGE_SIZE[0] * DELTA_WIDTH_RATIO * 1.1)
+    second = (first[0] + shift, first[1], first[2] + shift, first[3])
+    area = (first[2] - first[0]) * (first[3] - first[1])
+    assert colour_count(page1, PEN_RED, first) > area * 0.3
+    assert colour_count(page1, PEN_RED, second) > area * 0.3
 
 
-def test_a_marker_is_drawn_for_every_finding_with_a_bbox():
-    one = render_redline(blank_page_png(), [make_finding("GDT-001", [0.1, 0.1, 0.2, 0.2])])[0]
+def test_a_delta_at_the_corner_of_the_sheet_is_kept_on_it():
+    page1, _ = render_redline(blank_page_png(), [make_finding("GDT-001", [0.0, 0.3, 0.05, 0.35])])
+
+    side = round(PAGE_SIZE[0] * DELTA_WIDTH_RATIO)
+    strip = (0, round(0.3 * PAGE_SIZE[1]) - side * 2, side * 2, round(0.3 * PAGE_SIZE[1]))
+    assert colour_count(page1, PEN_RED, strip) > side * side * 0.3
+
+
+def test_a_cloud_is_drawn_for_every_finding_with_a_bbox():
+    one = render_redline(blank_page_png(), [make_finding("GDT-001", [0.1, 0.3, 0.2, 0.4])])[0]
     two = render_redline(
         blank_page_png(),
         [
-            make_finding("GDT-001", [0.1, 0.1, 0.2, 0.2]),
+            make_finding("GDT-001", [0.1, 0.3, 0.2, 0.4]),
             make_finding("GDT-002", [0.7, 0.7, 0.8, 0.8], item_ids=["F2"]),
         ],
     )[0]
 
-    assert red_pixel_count(two) > red_pixel_count(one)
+    assert colour_count(two, PEN_RED) > colour_count(one, PEN_RED)
 
 
 def test_a_finding_without_a_bbox_leaves_the_drawing_unmarked():
     marked = render_redline(blank_page_png(), [make_finding("GDT-001", [0.4, 0.4, 0.6, 0.6])])[0]
     unmarked = render_redline(blank_page_png(), [make_finding("GDT-001", None)])[0]
 
-    # Both pages carry the stamp; only the first carries a marker.
+    # Both pages carry the review stamp; only the first carries a cloud.
     assert red_pixel_count(unmarked) < red_pixel_count(marked)
 
 
@@ -198,6 +262,126 @@ def test_the_stamp_counts_every_finding_including_unlocated_ones(tmp_path):
 
     # The stamp sits in the top-left; the body of the page has nothing else on it.
     assert red_pixel_count(page1.crop((0, 0, 500, 120))) > 0
+
+
+FRAME_BBOX = [0.60, 0.40, 0.70, 0.45]
+
+
+def test_a_verified_finding_gets_a_green_cloud(plate_drawing: Drawing, scripted_client):
+    report = correct(plate_drawing, blank_page_png(), scripted_client)
+    # GDT-004 shares the frame and stays open, so only the cleared finding is drawn here.
+    cleared = [finding for finding in run_rules(plate_drawing) if finding.rule_id == "GDT-001"]
+
+    page1, _ = render_redline(blank_page_png(), cleared, report)
+
+    assert_cloud(page1, FRAME_BBOX, PEN_GREEN, "verified")
+    assert colour_count(page1, PEN_RED, ring_of(FRAME_BBOX)) == 0
+
+
+def test_an_unresolved_finding_gets_an_amber_cloud(plate_drawing: Drawing):
+    report = correct(plate_drawing, blank_page_png(), _EditsClient([]))
+
+    page1, _ = render_redline(blank_page_png(), run_rules(plate_drawing), report)
+
+    assert_cloud(page1, FRAME_BBOX, PEN_AMBER, "unresolved")
+
+
+def test_a_pen_label_is_written_beside_the_cloud_when_an_edit_was_applied(
+    plate_drawing: Drawing, scripted_client
+):
+    findings = run_rules(plate_drawing)
+    fixed = correct(plate_drawing, blank_page_png(), scripted_client)
+    nothing = correct(plate_drawing, blank_page_png(), _EditsClient([]))
+
+    with_edit = render_redline(blank_page_png(), findings, fixed)[0]
+    without_edit = render_redline(blank_page_png(), findings, nothing)[0]
+    no_report = render_redline(blank_page_png(), findings)[0]
+
+    strip = pen_strip(FRAME_BBOX)
+    assert colour_count(with_edit, PEN_GREEN, strip) > 20, "no green 'drop C' beside the cloud"
+    assert ink_pixel_count(without_edit.crop(strip)) == 0
+    assert ink_pixel_count(no_report.crop(strip)) == 0
+
+
+def test_a_refused_edit_is_written_in_red_and_struck_through(plate_drawing: Drawing):
+    refused = {
+        "op": "set_field",
+        "target": "fcf",
+        "id": "F99",
+        "field": "tolerance",
+        "value": 0.5,
+        "rationale": "Names a frame that is not there.",
+        "finding_ids": ["GDT-001@F1"],
+    }
+    report = correct(plate_drawing, blank_page_png(), _EditsClient([refused]))
+    assert report.rounds and report.rounds[0].rejected, "the guards should refuse this edit"
+
+    page1, _ = render_redline(blank_page_png(), run_rules(plate_drawing), report)
+
+    strip = pen_strip(FRAME_BBOX)
+    assert colour_count(page1, PEN_RED, strip) > 20
+    # The strike is a near-horizontal line across the label: a run of red as wide as it.
+    rows = [page1.crop((strip[0], y, strip[2], y + 1)) for y in range(strip[1], strip[3])]
+    assert max(colour_count(row, PEN_RED) for row in rows) > 15, "no strike line"
+
+
+def test_the_pen_font_falls_back_to_archivo_for_a_missing_character():
+    assert Path(_pen_font_for("drop C", 30).path) == PEN_FONT
+    assert Path(_pen_font_for("Ø0.25", 30).path) == ARCHIVO_FONT
+
+
+def stamp_ink(image: Image.Image) -> int:
+    """Green pixels outside any cloud: the CHECKED stamp is the only green left."""
+    return colour_count(image, PEN_GREEN)
+
+
+def test_the_checked_stamp_appears_only_with_a_report(plate_drawing: Drawing):
+    findings = run_rules(plate_drawing)
+    report = correct(plate_drawing, blank_page_png(), _EditsClient([]))
+
+    stamped = render_redline(blank_page_png(), findings, report)[0]
+    plain = render_redline(blank_page_png(), findings)[0]
+
+    # With nothing verified every cloud is amber, so any green is the stamp.
+    assert stamp_ink(stamped) > 500
+    assert stamp_ink(plain) == 0
+
+
+def test_the_stamp_keeps_off_the_findings(plate_drawing: Drawing):
+    """Lower middle is the stamp's favourite spot; a finding there pushes it aside."""
+    bbox = [0.35, 0.68, 0.65, 0.88]
+    finding = make_finding("GDT-001", bbox, item_ids=["F1"])
+    report = correct(plate_drawing, blank_page_png(), _EditsClient([]))
+
+    page1, _ = render_redline(blank_page_png(), [finding], report)
+
+    assert stamp_ink(page1) > 500
+    assert colour_count(page1, PEN_GREEN, ring_of(bbox)) == 0
+
+
+def test_the_stamp_on_a_crowded_sheet_falls_back_to_the_lower_middle(plate_drawing: Drawing):
+    report = correct(plate_drawing, blank_page_png(), _EditsClient([]))
+    black = Image.new("RGB", PAGE_SIZE, (0, 0, 0))
+    buffer = io.BytesIO()
+    black.save(buffer, format="PNG")
+
+    page1, _ = render_redline(buffer.getvalue(), [], report)
+
+    lower_middle = (
+        round(PAGE_SIZE[0] * 0.4),
+        round(PAGE_SIZE[1] * 0.7),
+        round(PAGE_SIZE[0] * 0.6),
+        round(PAGE_SIZE[1] * 0.86),
+    )
+    assert colour_count(page1, PEN_GREEN, lower_middle) > 100
+
+
+def test_a_report_with_unlocated_findings_still_renders(plate_drawing: Drawing, scripted_client):
+    report = correct(plate_drawing, blank_page_png(), scripted_client)
+
+    pages = render_redline(blank_page_png(), [make_finding("DIM-001", None)], report)
+
+    assert all(page.size == PAGE_SIZE for page in pages)
 
 
 # --- numbering --------------------------------------------------------------
@@ -228,8 +412,7 @@ def test_each_located_finding_is_marked_at_its_own_bbox(plate_drawing: Drawing):
     located = [finding for finding in findings if finding.bbox]
     assert located, "this test needs at least one finding with a bbox"
     for finding in located:
-        for name, point in box_edges(finding.bbox).items():
-            assert is_red(page1.getpixel(point)), f"{finding.rule_id}: no {name} edge"
+        assert_cloud(page1, finding.bbox, PEN_RED, finding.rule_id)
 
 
 def test_markers_are_numbered_differently_for_each_finding():
@@ -247,6 +430,66 @@ def test_markers_are_numbered_differently_for_each_finding():
 
 
 # --- page 2 -----------------------------------------------------------------
+
+
+def table_rows(lines) -> list[list[str]]:
+    """The Corrections table's body rows, as cells."""
+    return [line.text.split("\t") for line in lines if line.style == "table_row"]
+
+
+def test_page_two_has_a_corrections_row_for_each_edit(plate_drawing: Drawing, scripted_client):
+    findings = run_rules(plate_drawing)
+    report = correct(plate_drawing, blank_page_png(), scripted_client)
+    number = next(
+        index for index, finding in enumerate(findings, 1) if finding.rule_id == "GDT-001"
+    )
+
+    lines = findings_text(findings, report)
+
+    assert "Corrections" in [line.text for line in lines]
+    rows = table_rows(lines)
+    assert rows[0] == [str(number), "⌖ 0.25 | A | C", "⌖ 0.25 | A", "Verified"]
+    # The scripted model asks for the same edit in later rounds; C is gone by then, so the
+    # guards refuse it, and the table says so just as /fix does.
+    assert all(row[-1] == "Rejected" for row in rows[1:])
+
+
+def test_the_corrections_table_uses_the_same_strings_as_fix(
+    plate_drawing: Drawing, scripted_client
+):
+    from draftcheck.api import _summarize
+
+    report = correct(plate_drawing, blank_page_png(), scripted_client)
+    on_screen = [
+        (edit["before"], edit["after"])
+        for round_ in _summarize(report)["rounds"]
+        for edit in round_["applied"] + round_["rejected"]
+    ]
+
+    rows = table_rows(findings_text(run_rules(plate_drawing), report))
+
+    assert [(row[1], row[2]) for row in rows] == on_screen
+
+
+def test_a_refused_edit_is_listed_as_rejected(plate_drawing: Drawing):
+    refused = {
+        "op": "remove_datum_ref",
+        "fcf_id": "F99",
+        "label": "C",
+        "finding_ids": ["GDT-001@F1"],
+    }
+    report = correct(plate_drawing, blank_page_png(), _EditsClient([refused]))
+
+    rows = table_rows(findings_text(run_rules(plate_drawing), report))
+
+    assert rows and rows[0][-1] == "Rejected"
+
+
+def test_without_a_report_there_is_no_corrections_table(plate_drawing: Drawing):
+    lines = findings_text(run_rules(plate_drawing))
+
+    assert "Corrections" not in [line.text for line in lines]
+    assert not table_rows(lines)
 
 
 def test_page_two_is_a_clean_white_sheet_the_size_of_page_one():
@@ -521,8 +764,7 @@ def test_the_saved_pdf_still_carries_the_marker(tmp_path):
     finally:
         pdf.close()
 
-    for name, point in box_edges(bbox, rendered.size).items():
-        assert is_red(rendered.getpixel(point)), f"the {name} edge did not survive the PDF"
+    assert_cloud(rendered, bbox, PEN_RED, "after the PDF")
 
 
 # --- ASCII safety -----------------------------------------------------------
@@ -578,6 +820,25 @@ def plate_drawing() -> Drawing:
             ],
         }
     )
+
+
+class _EditsClient:
+    """A stand-in model that proposes the same edits every round."""
+
+    def __init__(self, edits: list[dict]):
+        self.edits = edits
+
+    def chat_json(self, system, user, images):
+        from draftcheck.llm_client import JSONChatResult, Usage
+
+        return JSONChatResult(
+            data={"edits": self.edits},
+            text="{}",
+            latency_s=0.0,
+            usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            model="scripted",
+            attempts=1,
+        )
 
 
 class _ScriptedClient:
