@@ -70,8 +70,9 @@ def test_one_cancel_button_sits_beside_the_primary_action() -> None:
 
 def test_cancel_aborts_the_request_and_says_so() -> None:
     source = read_app_js()
-    assert source.count("new AbortController()") == 2
-    assert source.count("signal })") == 2  # both model fetches carry the signal
+    # Reading, fixing, and explaining: each model request can be cancelled.
+    assert source.count("new AbortController()") == 3
+    assert source.count("signal })") == 3  # every model fetch carries the signal
     assert (
         '"Cancelled. Muse Spark may still be finishing the previous request, '
         'so your next read can take up to a minute."'
@@ -282,3 +283,43 @@ def test_the_summary_line_jumps_to_the_first_disagreement() -> None:
     source = read_app_js()
     assert '$("crosscheck-summary")' in source
     assert 'button.addEventListener("click", goToFirstDisagreement);' in source
+
+
+# ---- AI explanations (step 25) -------------------------------------------------------
+
+AI_LABEL = "AI explanation · not checked by the rules"
+
+
+def test_the_extracted_tab_opens_with_the_about_card() -> None:
+    """The card sits at the top of the Extracted content, before the run's metadata."""
+    index = read_index()
+    extracted = index.index('id="extracted"')
+    assert index.index('id="about"') > extracted
+    assert index.index('id="about"') < index.index('id="meta-model"')
+    assert "About this drawing" in index
+    assert 'id="explain-button"' in index
+    assert ">Explain this drawing<" in index
+
+
+def test_every_section_with_explanations_carries_the_label_once() -> None:
+    """One label each: the card, the three tables, and the issue cards."""
+    index = read_index()
+    assert index.count(AI_LABEL) == 5
+    for section in ("datums", "dimensions", "fcfs", "issues"):
+        assert index.count(f'id="ai-label-{section}"') == 1
+        assert f'$("ai-label-{section}")' in read_app_js()
+
+
+def test_explanations_are_requested_and_drawn_as_text() -> None:
+    source = read_app_js()
+    assert "/explain`" in source
+    assert '"Why it matters"' in source
+    assert '"How to think about fixing"' in source
+    # Model text is written as text, never parsed as HTML.
+    body = source[source.index("/* ---- AI explanations for learners") :]
+    body = body[: body.index("/* ---- Rendering one run")]
+    assert "innerHTML" not in body
+
+
+def test_cancel_also_stops_an_explanation() -> None:
+    assert "if (explainController) explainController.abort();" in read_app_js()

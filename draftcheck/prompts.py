@@ -1,10 +1,14 @@
-"""Prompt text for the two passes that involve a model: extraction and correction.
+"""Prompt text for the passes that involve a model: extraction, correction, explanation.
 
 The extraction prompts ask only for a transcription of what is printed. The correction
 prompts ask for proposed edits. Neither asks the model whether a rule passes — the
 findings it is shown were computed in Python, and whether a proposed edit clears one is
 computed in Python afterwards. The model's job is to read the drawing and suggest a fix;
 it never gets a vote on the verdict.
+
+The explanation prompts (step 25) are a teaching aid for students: what the part likely
+is and why each item is there. They are a separate call; their answer is shown on the
+page and is never read by the rules.
 """
 
 from __future__ import annotations
@@ -258,4 +262,112 @@ either fix the proposal or take a different approach. If a previous round introd
 finding, fix that too.
 
 Output one JSON object: {{"edits": [...]}}. Nothing else.\
+"""
+
+
+EXPLAIN_SYSTEM = """\
+You are a senior mechanical drafting instructor. A student has uploaded an engineering \
+drawing and wants to learn from it. You are given the drawing image and the structured \
+data that was read from it and confirmed. Explain what the part is and why each \
+dimension, feature control frame, and datum is there.
+
+Rules:
+- Speak cautiously. You are reading someone else's design: say "likely", "appears to", \
+"probably". Never state a guess as a fact.
+- Refer to items only by their exact ids from the data (e.g. "dim_3", "fcf_1") and to \
+datums only by their exact labels. Do not explain an item that is not in the data.
+- Never invent a feature that is not in the image or the data. If you cannot tell what \
+something is for, say so briefly.
+- Never contradict the data. If the image seems to disagree with it, explain the data.
+- Never say whether anything passes, fails, is correct, or is wrong. A separate rule \
+engine decides that. If findings are listed, they are already decided; explain why they \
+matter to a student, not whether they are right.
+- Keep every sentence short and plain, for a student in their first drafting course.
+
+Output exactly one JSON object. No prose, no explanation outside the JSON, no markdown \
+code fences.\
+"""
+
+#: The part types the page knows how to label. Anything else the model says becomes "other".
+PART_TYPES = (
+    "plate",
+    "bracket",
+    "flange",
+    "shaft",
+    "gear",
+    "housing",
+    "cover",
+    "spacer",
+    "block",
+    "other",
+)
+
+
+def _explain_findings_block(findings: list[Finding]) -> str:
+    """The findings the explanation may talk about, with the keys it must cite."""
+    if not findings:
+        return "No findings were given. Return an empty findings list."
+    lines = []
+    for finding in findings:
+        items = ", ".join(finding.item_ids) or "the drawing as a whole"
+        lines.append(
+            f"- {finding_key(finding)}  [{finding.severity}]  on {items}\n  {finding.message}"
+        )
+    return "\n".join(lines)
+
+
+def explain_user(drawing_json: str, findings: list[Finding]) -> str:
+    """Build the explanation request.
+
+    Args:
+        drawing_json: The drawing being explained, as JSON, including every item's id.
+        findings: What the rules said about it, or an empty list if no check has run.
+    """
+    types = " | ".join(PART_TYPES)
+    return f"""\
+Here is the drawing and the data read from it.
+
+=== DRAWING DATA ===
+{drawing_json}
+
+=== FINDINGS FROM THE RULE ENGINE ===
+{_explain_findings_block(findings)}
+
+=== YOUR ANSWER ===
+Return one JSON object with exactly these keys:
+
+{{
+  "part": {{
+    "type": "{types}",
+    "name_guess": string,
+    "summary": "2-3 sentences: what the part likely is and what it likely does",
+    "features": ["short strings, e.g. \\"2 through holes, Ø8\\""],
+    "confidence": number from 0 to 1
+  }},
+  "dimensions": [
+    {{"id": "<dimension id>", "kind": "size" | "location" | "form" | "reference",
+      "purpose": "one sentence: why this dimension is likely there"}}
+  ],
+  "fcfs": [
+    {{"id": "<frame id>",
+      "meaning": "one plain sentence: what is controlled, relative to what, and why that \
+matters for how the part works"}}
+  ],
+  "datums": [
+    {{"label": "<datum letter>", "role": "primary" | "secondary" | "tertiary" | "unclear",
+      "why": "one sentence: why this surface or feature was likely chosen"}}
+  ],
+  "findings": [
+    {{"key": "<finding key exactly as listed above>",
+      "why_it_matters": "one sentence for a student",
+      "how_to_think_about_fixing": "one sentence"}}
+  ]
+}}
+
+Kinds: "size" gives the size of a feature (a diameter, a thickness); "location" places a \
+feature relative to an edge, a datum, or another feature; "form" describes shape (a \
+radius, an angle, a chamfer); "reference" is information only, printed in parentheses.
+
+Explain every dimension, frame, and datum in the data, using its exact id or label. Only \
+include findings that are listed above. Output only the JSON object.\
 """

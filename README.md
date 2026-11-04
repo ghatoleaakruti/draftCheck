@@ -20,6 +20,7 @@ Every engineering drawing is checked by hand before it is released. The checker 
 5. **The agent proposes fixes.** For each error, the model suggests the smallest edit, with a one-sentence engineering reason.
 6. **The rules verify the fixes.** Each proposed edit is applied to a copy of the data and the same rules run again. Only that re-run decides whether a fix worked.
 7. **Export** a redlined PDF (marked-up sheet plus a page listing each correction) and a CSV of corrections.
+8. **Learn from it.** For students, "Explain this drawing" asks the model what the part likely is and why each dimension, frame, and datum is there. The notes are labelled as AI explanations, kept only where they name real items, and never used by the rules.
 
 The screenshots below were captured locally with the **dev fake model** (`DRAFTCHECK_FAKE_MODEL=1`), which returns a saved real reading of the sample drawing so the page can be shown without calling a live model. The rules, the correction loop, and the redline all ran for real.
 
@@ -30,6 +31,8 @@ The screenshots below were captured locally with the **dev fake model** (`DRAFTC
 | ![Six check results with one failure, and a red revision cloud around the feature control frame](docs/images/03-checked.png) | ![The verified fix shown with a pen label and a CHECKED stamp](docs/images/04-done.png) |
 
 ![Corrections tab with a before/after table and download buttons](docs/images/05-corrections.png)
+
+![The "About this drawing" card with a part-type chip, summary, and features, and AI notes under each datum row](docs/images/06-explain.png)
 
 ## How it uses Meta's models
 
@@ -45,6 +48,7 @@ The screenshots below were captured locally with the **dev fake model** (`DRAFTC
 - Give a confidence for each item they read.
 - Propose edits to fix rule violations, each with an engineering reason.
 - Revise their proposals after the code rejects an edit, using the rejection reason.
+- Explain the drawing for students ("About this drawing"): what the part likely is and why each dimension, frame, and datum is there. A separate call, labelled as unchecked AI text, kept only where it names real items, and never used by the rules.
 
 **What the models never do:** decide whether a rule passes or fails.
 
@@ -220,6 +224,7 @@ ruff check .
 - Per-hole diameters for MFG-001.
 - SAM 3.1 for precise regions around each callout.
 - Redlines written back into CAD-native formats.
+- Accounts, saved history, and revision comparison (Rev A vs Rev B).
 
 ## Built during the hackathon
 

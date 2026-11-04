@@ -1567,6 +1567,96 @@ td.is-edited::after {
   color: var(--ink-2);
 }
 
+/* ---- AI explanations for learners (step 25) ------------------------------
+   Muted and labelled, so they never read as a rule's verdict. */
+
+.about {
+  padding: 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--card);
+}
+
+.about-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.about-intro {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+.about-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13.5px;
+}
+
+.part-chip {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.about-summary {
+  margin-top: 6px;
+  font-size: 13px;
+}
+
+.about-features {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+}
+
+.ai-label {
+  margin-top: 6px;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--ink-2);
+}
+
+table.data .ai-line {
+  display: block;
+  min-width: 26ch;
+  max-width: 40ch;
+  margin-top: 2px;
+  text-align: left;
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--ink-2);
+  white-space: normal;
+}
+
+.finding-ai {
+  grid-column: 2 / span 2;
+  margin-top: 4px;
+  padding-left: 8px;
+  border-left: 2px solid var(--rule);
+}
+
+.finding-ai-line {
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+.finding-ai-line strong {
+  color: var(--ink);
+  font-weight: 650;
+}
+
 /* ---- Rounds strip ------------------------------------------------------- */
 
 .rounds-strip {
