@@ -307,8 +307,24 @@ One round:
 2. Take back `{"edits": [...]}` and hand it to `edits.apply_edits`, which applies what it
    allows to a copy and refuses the rest with a reason (§4.6).
 3. Run `rules.run_rules` on the result.
-4. Diff the finding keys before against after. What disappeared is `resolved`; what
-   appeared is `introduced`.
+4. **Roll back what failed.** An applied edit has failed when not every finding it cites
+   is gone on the re-run — or it cites none, so there is nothing to confirm
+   (`agent.failure_reason`). Failed edits are taken out, the round's remaining edits are
+   applied again from the drawing the round started from, and the rules re-run on that.
+   This repeats until every kept edit stands on its own (taking one out can stop another
+   clearing its finding, or applying at all), so it ends. Undone edits go into the
+   round's `rolled_back` with the reason; `applied` holds only the kept ones.
+5. Diff the finding keys before against the re-run of the reverted drawing. What
+   disappeared is `resolved`; what appeared is `introduced`. The next round starts from
+   this drawing.
+
+**Only verified or held edits are ever kept.** So the final drawing, the after-fixes
+checks, every "after" string, and the redline — all rebuilt from `applied` — carry no edit
+the rules did not confirm. A failed edit is still reported everywhere a person looks: in
+the next round's history (`rolled_back_because`, so the model does not try it again), in
+`corrections.json`, on its issue card, in the Corrections table as *Failed, rolled back*,
+and on the sheet as a red pen label struck through. An edit that cites no finding is rolled
+back too, even if it happened to help: nothing ties it to what cleared.
 
 The loop stops when no **error**-severity finding is left, or after `max_rounds`. Warnings
 do not keep it running: MFG-001's edge-distance threshold is shop practice we chose
@@ -550,7 +566,7 @@ looking.
 | `POST` | `/api/runs` | Multipart upload of a PDF/PNG/JPG, plus an optional `provider` field. Creates the run folder, saves the file, renders page 1, and extracts. Returns `run_id`, the drawing, `parse_issues`, `model`, `latency_s` | `415` unsupported type, `413` over 10 MB, `400` unreadable or empty, `422` unknown provider, `429` over a demo limit (§4.12), `502` the model failed or returned something unusable, `500` missing configuration |
 | `GET` | `/api/runs/{run_id}/page.png` | The rendered page, for the review screen to draw on | `404` |
 | `POST` | `/api/runs/{run_id}/check` | Body is the confirmed (possibly edited) drawing JSON. Validates it with `parse_drawing`, saves `confirmed.json`, runs the rules. Returns the findings (each with its rule's short `title`, for the Issues card, and its `key`, the `finding_key` name `/fix` reports verdicts under), `parse_issues`, the error/warning counts, and `rules_run` (how many rules ran) | `404` unknown run, `422` not a drawing object |
-| `POST` | `/api/runs/{run_id}/fix` | Runs the correction loop on `confirmed.json` with the page image, writes `corrections.json` and the redline. Returns the rounds in plain English (see below), each edit's short before/after and pen note with its verdict (§4.17), the per-finding status and `outcome`, the final findings, and the corrected drawing | `404` unknown run, `409` `/check` has not run, `429` over a demo limit (§4.12) |
+| `POST` | `/api/runs/{run_id}/fix` | Runs the correction loop on `confirmed.json` with the page image, writes `corrections.json` and the redline. Returns the rounds in plain English (see below), each edit's short before/after and pen note with its verdict (§4.17), the per-finding status and `outcome`, the final findings, and the corrected drawing. With `?stream=1`, the same work reported live as newline-delimited JSON, ending with this reply as its `done` event (§4.22) | `404` unknown run, `409` `/check` has not run, `429` over a demo limit (§4.12) |
 | `POST` | `/api/runs/{run_id}/explain` | An AI explanation for learners of the confirmed drawing (or the extraction, before a check) and its findings, validated against the real ids and cached in `explain.json`; never read by the rules (§4.20) | `404` unknown run, `429` over a demo limit, `502` / `504` the model failed or timed out |
 | `GET` | `/api/runs/{run_id}/redline.pdf` | The two-page redline | `404` |
 | `GET` | `/api/runs/{run_id}/redline.png` | Page 1 of the redline | `404` |
@@ -1056,9 +1072,9 @@ they cannot disagree.
 bottom, columns 1–6 left to right. A finding's zone is its own `bbox`'s, else its first
 located item's.
 
-**"Up to 3", not "Round N of 3".** `/fix` answers once, when every round is done, so while it
-runs the page cannot know which round it is on. The button says what is true — the loop
-is running and will stop after three — and the round count appears once the reply lands.
+**"Up to 3", not "Round N of 3".** The button says what is true — the loop is running and
+will stop after three. Which round it is on is said by the stream (§4.22): the strip's
+running cell and the model pill ("Round 2 · proposing with …") follow the real round.
 
 ### 4.16 Development fake model — BUILT
 
@@ -1071,6 +1087,11 @@ real one. The fake replaces the model call and nothing else:
   sample drawing) after about 2 s.
 - **Each correction round** returns one scripted edit — remove datum C from `fcf_1` —
   after about 2 s.
+- **`DRAFTCHECK_FAKE_SCENARIO=reject_then_fix`** scripts three rounds instead, to watch the
+  live rounds fail before they succeed: round 1 asks to delete the frame (refused by
+  `apply_edits`), round 2 tightens its tolerance (applied, but the rules still report
+  GDT-001), round 3 removes datum C (the re-run clears it). Unset or any other value keeps
+  the default. It only chooses what the fake *proposes*; every verdict is still Python's.
 
 The rules, the correction loop, the redline, and the usage limits all run for real on
 what it returns, so a fake run exercises everything the page depends on. It answers as
@@ -1103,7 +1124,7 @@ same on a 1,200 px render and a 2,400 px one.
 | Reply lands | One last sweep over the real page; each model box appears as the line passes its centre |
 | Confirm | Model boxes: 7 % blue fill, 1.2-unit stroke, 2-unit corners, the item id in a blue tag above the top-left corner. Hover or a linked highlight: 2.6-unit stroke, 16 % fill |
 | After Check | The boxes fade out ("Show boxes" brings them back). Every finding with a `bbox` gets a revision cloud, padded 5 units, one outward arc per ~4.5 units of perimeter, 2-unit pen-red, roughened by an `feTurbulence` + `feDisplacementMap` filter, drawn with a dash-offset animation (0.7 s, 160 ms apart), and a numbered delta triangle outside its top-left corner |
-| After Fix | The rounds replay (below); then each cloud takes its finding's `outcome` colour (green verified, amber held or unresolved), a pen note is written beside it in Nanum Pen Script (revealed left to right, 260 ms apart; rejected notes are struck through), and the CHECKED stamp lands on the clearest spot |
+| After Fix | As each round's verdict streams in (§4.22), its clouds take their colour so far and its pen notes are written (rejected ones struck through); on `done` each cloud takes its finding's `outcome` colour (green verified, amber held or unresolved), a pen note is written beside it in Nanum Pen Script (revealed left to right, 260 ms apart; rejected notes are struck through), and the CHECKED stamp lands on the clearest spot |
 
 Clouds are focusable buttons: a click or Enter opens the Issues tab on that card, and
 selecting a card thickens its cloud to 3.4 units. Cloud N, card N, delta N, and marker N on
@@ -1129,6 +1150,11 @@ edit, and every refused edit that `parse_edit` can read, the server sends:
 edit cites is gone after the round; `held` when that is so but the edit is an `add_datum` or
 `add_dimension` (`HELD_OPS`) — it passes the rules, but only the designer can say where
 the new feature really goes on the part; `failed` otherwise. Refused edits are `rejected`.
+Since the loop rolls back every failed edit (§4.5), `applied` is only ever verified or held,
+and `failed` is what each round's `rolled_back` entries carry (with `rolled_back: true` and a
+note ending "Rolled back before the next round."). Their before/after is read against the
+drawing the round started from, and their pen label is drawn red and struck through, like
+a refused one — neither is on the drawing.
 As on the redline, the edit's `finding_ids` (the model's claim) only says *which* finding an
 edit is about; whether that finding cleared is `record.resolved`. Each `status` entry also
 carries `outcome` — `verified`, `held`, or `unresolved` — which is what the clouds, the
@@ -1136,9 +1162,10 @@ stamp, and the Corrections tab count.
 
 **Issues tab.** Above the cards, a strip of four cells — Found, Round 1, Round 2, Round 3 —
 each a label, a big number (findings found; findings left after the round), and one line
-("6 rules ran", "1 verified, 1 rejected", "Waiting"). `/fix` returns every round at once, so
-the page replays them about 600 ms apart, with a blinking blue underline on the cell that is
-"running". Each card then lists its rounds' attempts: "Round N proposal", a diff (before in
+("6 rules ran", "1 verified, 1 rejected", "Waiting"). The cells fill in as the stream's
+events arrive (§4.22), with a blinking blue underline on the cell of the round really
+running. Only if the stream fails does the page fall back to the one-shot reply and replay
+its rounds about 600 ms apart. Each card then lists its rounds' attempts: "Round N proposal", a diff (before in
 red, struck through; after in green, or grey and struck through when refused), the verdict
 chip ("✓ Rule engine: pass", "! pass, held for designer", "✕ Rule engine: fail"), and
 Python's note. Proposals that cite no finding get a card of their own.
@@ -1445,6 +1472,57 @@ so a reload does not repeat it, fetches `/eval/pdfs/<stem>.pdf`, and hands it to
 `offerFile` exactly as a picked file — the normal upload flow, limits and all. The desk
 labels it "test drawing".
 
+### 4.22 Live agent rounds: `/fix?stream=1` — BUILT (step 27)
+
+**Why.** A fix is up to three model calls and 20–60 seconds. Answering once at the end and
+replaying the rounds 600 ms apart showed something that had already happened, at a speed
+that had nothing to do with it. The stream shows each round when it really happens.
+
+**The loop is unchanged.** `agent.correct` takes three optional callbacks —
+`on_round_start(number, findings)`, `on_proposal(number, proposed, answered)`, and
+`on_round_end(record)` — each given data the final `CorrectionReport` also holds (the very
+`RoundRecord` it appends). None of them can change what the loop does; without them it runs
+exactly as before, which is how the CLI calls it.
+
+**The events.** `POST /api/runs/{id}/fix?stream=1` answers `application/x-ndjson`, one JSON
+object per line, written as it happens:
+
+| Event | When | Carries |
+| --- | --- | --- |
+| `round_started` | Before a round's model call | `round`, `model` (the one being asked; after round 1, whoever answered last), `findings` (keys it starts from) |
+| `proposal` | The model answered | `round`, `model`/`provider`/`fell_back`/`fallback_reason` (who really answered), `edits`: each as `edit` (plain sentence), `rationale`, `pen`, `before`, `after`, `finding_ids`, `target_id`. No status: nothing has been checked yet |
+| `verdict` | The rules were re-run on the round's result, and its failed edits rolled back | Everything the final reply's round has (`applied` — kept only, `rolled_back`, `rejected`, `findings_before`/`after` — after the rollback, `resolved`, `introduced`, `error`, …), plus `edits` (applied, rolled back, then rejected, each with `status` and `note`) and `cleared` |
+| `done` | Saved | Exactly the plain `/fix` reply |
+| `error` | Instead of `done` | `status` and `detail` — the status the plain reply would have had (504 when round 1 timed out, 500 otherwise) |
+
+**Verdicts still come only from re-running the rules.** A `verdict` event is built from the
+round's `RoundRecord` after `run_rules` ran on the edited drawing, by the same
+`_round_summary` and `edit_verdict` the final reply uses — a test checks every verdict
+equals its round in `done`. The proposal event deliberately has no status; the page shows it
+as "re-checking" until the verdict arrives.
+
+**Plumbing.** The loop runs on a worker thread (`run_in_threadpool`). Its callbacks build
+each event there (`LiveRounds`, which keeps the drawing between rounds exactly as
+`_summarize` rebuilds it) and pass it to the event loop through an `asyncio.Queue`
+(`call_soon_threadsafe`); `StreamingResponse` writes each line as it is taken off. The
+headers `Cache-Control: no-cache` and `X-Accel-Buffering: no` ask proxies not to hold lines
+back. Refusals before the loop starts (409, 429, a configuration error) are ordinary HTTP
+errors, since no stream has begun. **Cancel** works as before: the disconnect probe is
+checked whenever the queue is quiet, and if the server stops the generator itself (a real
+disconnect), its `finally` aborts the guard. Either way the model call is closed, the loop
+ends with `ModelCancelled`, and nothing is saved. Without `?stream=1` the reply is
+byte-for-byte the old one.
+
+**The page.** `runFix` reads the body with `response.body.getReader()` and a `TextDecoder`,
+buffering until each newline. `round_started` sets the strip cell running, the pill to
+"Round N · proposing with <model>", and "Round N: proposing…" on the open error cards;
+`proposal` swaps that for the proposal and rationale with a pending chip; `verdict` puts the
+rule engine's chip in its place, colours the clouds as the rounds so far leave them, and
+writes that round's pen notes; `done` settles everything on the final reply and lands the
+CHECKED stamp. Cancel aborts the same `AbortController`. If the stream breaks (no `done` or
+`error`, a dropped connection, or a reply that is not NDJSON), the fix is asked for once
+more without `?stream=1` and replayed the old way.
+
 ## 5. Repo layout (what exists today)
 
 ```
@@ -1579,6 +1657,8 @@ draftCheck/
 | 2026-11-03 | The cross-check compares two Meta models' readings in Python and only marks cells; the rules never use it | Two models agreeing is not proof and disagreeing is not an error — either could be the one that is right. A disagreement is worth a reviewer's glance, which is what it gets; letting it move a verdict would hand the decision back to the models |
 | 2026-11-03 | The redline PDF draws the on-screen sheet's markup — revision clouds coloured by outcome, numbered deltas, pen labels, a CHECKED stamp — replacing the 2026-10-29 rectangle and balloon; the per-edit verdict is reused from `api.edit_verdict` rather than worked out again | The PDF is what leaves the building, and a reviewer who has just seen green clouds and "drop C" on screen should see the same thing on paper, not a different vocabulary. Clouds still enclose rather than cover, for the reason the rectangle did. Reusing the API's verdict (imported inside the function, since `api` imports `redline`) means the screen and the PDF cannot disagree about whether an edit was verified or held. Symbols no bundled font can draw are written as short words (`pos`, `(M)`) in the table, because a blank box would read as part of the markup |
 | 2026-11-03 | Explanations for learners are a separate model call whose entries are dropped unless they name a real id, label, or finding key, and nothing in them reaches the rules | A student should learn from the drawing, not from a hole the model imagined. Checking names against the data is the one thing Python can verify about free text; the sentences themselves stay unverified, which is why every section says so. Keeping them out of the rules and out of the extraction prompt means a teaching feature cannot move a verdict or the eval |
+| 2026-11-04 | An applied edit that does not clear what it cites is rolled back before the next round, and the rules re-run on the reverted drawing | A "failed" edit left on the drawing changed the part for no verified reason, and the redline and the after-fixes checks then showed a correction nobody could stand behind — with reject_then_fix, the final frame read Ø0.2 though only removing C was verified. Rolling back keeps the corrected drawing to edits the rule engine confirmed; reporting the undone ones keeps the attempt visible, and telling the next round why stops it trying again. An uncited edit counts as failed, as it already did in `edit_verdict`, because nothing ties it to what cleared |
+| 2026-11-04 | `/fix?stream=1` streams each round as NDJSON from callbacks on `agent.correct`; the plain reply is kept, and the page falls back to it once if the stream fails | Watching the real rounds shows what the agent does, where a replay of a finished reply only pretends to. Callbacks that receive only what the report already records keep the loop's behaviour, and the CLI, untouched. NDJSON over a plain `fetch` rather than server-sent events keeps it a POST, keeps Cancel on the same `AbortController`, and needs no new library. Keeping the one-shot reply means a proxy that buffers the stream costs a replay rather than the fix |
 | 2026-10-30 | `render.load_pages` translates pypdfium2's and pillow's own errors into `RenderError`, rather than each caller catching the dependency's error class | Every caller — the CLI's exit code, the API's status code — catches `RenderError` and nothing else, so an error leaking from a dependency is an exit code or a status code that never happens: a corrupt upload came out as a traceback and a 500 instead of a 400. Translating once at the boundary means the file-reading contract is stated in one place, and swapping the PDF library later does not touch any caller |
 
 ## 8. Status

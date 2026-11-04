@@ -49,13 +49,19 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from draftcheck.agent import CorrectionReport, RoundRecord, correct
+from draftcheck.agent import (
+    CorrectionReport,
+    RolledBackEdit,
+    RoundRecord,
+    correct,
+    failure_reason,
+)
 from draftcheck.config import DEFAULT_PROVIDER, SUPPORTED_PROVIDERS, ConfigError, get_provider
 from draftcheck.crosscheck import (
     SKIP_PRIMARY_FELL_BACK,
@@ -87,6 +93,7 @@ from draftcheck.redline import (
     edit_display,
     plain_edit,
     render_redline,
+    rolled_back_display,
     save_redline,
 )
 from draftcheck.render import RenderError, load_pages
@@ -1167,16 +1174,16 @@ def _display_fields(display: EditDisplay | None) -> dict:
     }
 
 
-def _rejected_summary(item: RejectedEdit, names: EditNames, drawing: Drawing) -> dict:
-    """A refused proposal as the page shows it, in the same words as an applied one.
+def _proposal_words(raw: Any, names: EditNames, drawing: Drawing) -> dict:
+    """One proposal in the page's words, read against the drawing the round started from.
 
     A proposal can be refused before it is understood (``{"op": "delete_fcf"}``) or after
     (an edit that names an id the drawing does not have), so the sentence is only available
     when ``parse_edit`` can make an ``Edit`` out of it. When it cannot, the page says what
     the model called the operation rather than inventing a description of it, and there is
-    no before/after to show.
+    no before/after to show. The "after" is what the edit asked for: whether it took is not
+    known yet, and is not this function's to say.
     """
-    raw = item.edit
     edit, _ = parse_edit(raw)
     display = None
     finding_ids: list[str] = []
@@ -1191,9 +1198,16 @@ def _rejected_summary(item: RejectedEdit, names: EditNames, drawing: Drawing) ->
     return {
         "edit": sentence,
         "rationale": rationale,
-        "reason": item.reason,
         "finding_ids": finding_ids,
         **_display_fields(display),
+    }
+
+
+def _rejected_summary(item: RejectedEdit, names: EditNames, drawing: Drawing) -> dict:
+    """A refused proposal as the page shows it, in the same words as an applied one."""
+    return {
+        **_proposal_words(item.edit, names, drawing),
+        "reason": item.reason,
         "status": "rejected",
         "note": f"Refused before the rules ran: {item.reason}",
     }
@@ -1213,14 +1227,15 @@ def edit_verdict(edit: Edit, record: RoundRecord) -> tuple[str, str]:
     (:data:`HELD_OPS`), and ``"failed"`` otherwise. The citation is the model's claim and
     is used only to say *which* finding an edit is about; whether that finding cleared is
     ``record.resolved``, computed by re-running the rules.
+
+    The loop rolls back every failed edit (``agent.failure_reason``, the same test), so an
+    edit in ``record.applied`` is always verified or held; ``"failed"`` is what the
+    rolled-back ones in ``record.rolled_back`` are reported as.
     """
-    cited = list(edit.finding_ids)
-    if not cited:
-        return "failed", "It cites no finding, so the re-run has nothing to confirm."
-    still = [key for key in cited if key not in record.resolved]
-    if still:
-        return "failed", f"The re-run still reports {', '.join(still)}."
-    cleared = ", ".join(cited)
+    reason = failure_reason(edit, set(record.resolved))
+    if reason is not None:
+        return "failed", reason
+    cleared = ", ".join(edit.finding_ids)
     if edit.op in HELD_OPS:
         return "held", f"The re-run no longer reports {cleared}; a designer has to place it."
     return "verified", f"The re-run no longer reports {cleared}."
@@ -1238,6 +1253,24 @@ def _applied_summary(
         **_display_fields(edit_display(edit, before, after)),
         "status": status,
         "note": note,
+    }
+
+
+#: Said after a rolled-back edit's reason, on the card and in the stream.
+ROLLED_BACK_NOTE = "Rolled back before the next round."
+
+
+def _rolled_back_summary(item: RolledBackEdit, names: EditNames, start: Drawing) -> dict:
+    """An edit the loop undid: what it did, read against the round's starting drawing."""
+    edit = item.edit
+    return {
+        "edit": plain_edit(edit, names),
+        "rationale": edit.rationale,
+        "finding_ids": edit.finding_ids,
+        **_display_fields(rolled_back_display(item, start)),
+        "status": "failed",
+        "rolled_back": True,
+        "note": f"{item.reason} {ROLLED_BACK_NOTE}",
     }
 
 
@@ -1270,8 +1303,12 @@ def _round_summary(record: RoundRecord, names: EditNames, start: Drawing) -> tup
     summary = {
         "round": record.number,
         "applied": applied,
-        # Refused edits are shown against the drawing as the round found it.
+        # Refused and rolled-back edits are shown against the drawing as the round found
+        # it; neither is on the drawing the next round starts from.
         "rejected": [_rejected_summary(item, names, start) for item in record.rejected],
+        "rolled_back": [
+            _rolled_back_summary(item, names, start) for item in record.rolled_back
+        ],
         "findings_before": len(record.findings_before),
         "findings_after": len(record.findings_after),
         # Resolved findings are gone by the end of the round, so their wording comes from
@@ -1328,6 +1365,7 @@ def _summarize(report: CorrectionReport) -> dict:
         "final_drawing": payload["final_drawing"],
         "applied_count": sum(len(record.applied) for record in report.rounds),
         "rejected_count": sum(len(record.rejected) for record in report.rounds),
+        "rolled_back_count": sum(len(record.rolled_back) for record in report.rounds),
         "resolved_count": report.resolved_count,
         "unresolved_count": report.unresolved_count,
     }
@@ -1397,10 +1435,217 @@ def _save_fix(run_dir: Path, report: CorrectionReport, page_png: bytes, meta: di
     save_redline(pages, run_dir / REDLINE_PDF, run_dir / REDLINE_PNG)
 
 
+async def _finish_fix(
+    run_id: uuid.UUID,
+    run_dir: Path,
+    report: CorrectionReport,
+    page_png: bytes,
+    meta: dict,
+    client: SupportsChatJSON,
+    limiter: UsageLimiter,
+) -> dict:
+    """Charge for the rounds, save the redline, and build ``/fix``'s reply.
+
+    Shared by the plain reply and the stream's ``done`` event, so the two are the same
+    object. Raises a 504 ``HTTPException`` when round one timed out: nothing to report.
+    """
+    # The claim paid for round one, which is all that could be known before the loop
+    # ran. Each further round was another model call, so the day's budget is charged for
+    # them now that the report says how many there were.
+    limiter.record_model_calls(len(report.rounds) - 1)
+
+    if report.rounds and report.rounds[0].timed_out:
+        raise HTTPException(status_code=504, detail=MODEL_TIMEOUT_MESSAGE)
+
+    await run_in_threadpool(_save_fix, run_dir, report, page_png, meta)
+
+    summary = _summarize(report)
+    after = final_rule_results(report)
+    summary["final_rule_results"] = [result.model_dump(mode="json") for result in after]
+    summary["final_checks_summary"] = checks_summary(after)
+    answered = [record for record in report.rounds if record.model]
+    summary["model"] = answered[-1].model if answered else None
+    summary["fell_back"] = any(record.fell_back for record in report.rounds)
+    summary["run_id"] = str(run_id)
+    summary["fake_model"] = is_fake(client)
+    summary["redline_pdf_url"] = f"/api/runs/{run_id}/redline.pdf"
+    summary["redline_png_url"] = f"/api/runs/{run_id}/redline.png"
+    return summary
+
+
+# ---- The live stream of a fix -----------------------------------------------------
+#
+# ``/fix?stream=1`` reports the loop while it runs, one JSON object per line. The loop
+# runs on a worker thread; its callbacks build each event there and hand it to the event
+# loop through a queue, and the response writes each one out as it arrives. Every event is
+# built from what the loop already recorded — the model's proposal, then the round's
+# record after the rules were re-run — so a verdict on the stream is the rule engine's,
+# exactly as in the final reply.
+
+#: The stream's content type: newline-delimited JSON.
+NDJSON_MEDIA_TYPE = "application/x-ndjson"
+
+#: Asks proxies (nginx, Render's) to pass each line on at once instead of buffering them.
+STREAM_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+def expected_model(client: object) -> str | None:
+    """The model a round will be sent to, for the page to name before it answers."""
+    provider = getattr(client, "provider", None)
+    return getattr(provider, "model", None) or getattr(client, "model", None)
+
+
+class LiveRounds:
+    """Turns :func:`agent.correct`'s callbacks into stream events, on the worker thread.
+
+    Keeps the drawing as it stands between rounds, rebuilt from each round's applied
+    edits exactly as :func:`_summarize` rebuilds it afterwards, so an edit's before and
+    after on the stream are read off the same drawing as in the final reply.
+    """
+
+    def __init__(self, original: Drawing, emit: Callable[[dict], None], model: str | None):
+        self._original = original
+        self._current = original
+        self._emit = emit
+        self._model = model
+
+    def round_started(self, number: int, findings: list[Finding]) -> None:
+        self._emit(
+            {
+                "type": "round_started",
+                "round": number,
+                "model": self._model,
+                "findings": [finding_key(finding) for finding in findings],
+            }
+        )
+
+    def proposal(self, number: int, proposed: list[Any], answered: dict[str, Any]) -> None:
+        names = EditNames.for_drawings(self._original, self._current)
+        # The next round is sent to whoever answered this one, as far as the page can tell.
+        self._model = answered.get("model") or self._model
+        self._emit(
+            {
+                "type": "proposal",
+                "round": number,
+                **answered,
+                "edits": [_proposal_words(raw, names, self._current) for raw in proposed],
+            }
+        )
+
+    def round_ended(self, record: RoundRecord) -> None:
+        after, _, _ = apply_edits(self._current, record.applied)
+        names = EditNames.for_drawings(self._original, after)
+        summary, self._current = _round_summary(record, names, self._current)
+        self._emit(
+            {
+                "type": "verdict",
+                **summary,
+                # Every edit of the round with the rule engine's status and note, in one list.
+                "edits": summary["applied"] + summary["rolled_back"] + summary["rejected"],
+                "cleared": summary["resolved"],
+            }
+        )
+
+
+def _ndjson_line(event: dict) -> bytes:
+    return (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _error_event(status: int, detail: str) -> dict:
+    return {"type": "error", "status": status, "detail": detail}
+
+
+async def _fix_events(
+    request: Request,
+    probe: DisconnectProbe,
+    guard: GuardedClient,
+    drawing: Drawing,
+    page_png: bytes,
+    model: str | None,
+    finish: Callable[[CorrectionReport], Awaitable[dict]],
+    limiter: UsageLimiter,
+) -> AsyncIterator[bytes]:
+    """The body of ``/fix?stream=1``: each round's events, then ``done`` or ``error``.
+
+    If the browser leaves — seen by ``probe`` while waiting, or by the server cancelling
+    this generator — the model call in flight is aborted and nothing is saved, as for the
+    plain reply.
+    """
+    loop = asyncio.get_running_loop()
+    events: asyncio.Queue[dict | None] = asyncio.Queue()
+
+    def emit(event: dict | None) -> None:
+        try:
+            loop.call_soon_threadsafe(events.put_nowait, event)
+        except RuntimeError:
+            pass  # the event loop has shut down; nobody is reading any more
+
+    live = LiveRounds(drawing, emit, model)
+
+    def run() -> CorrectionReport:
+        try:
+            return correct(
+                drawing,
+                page_png,
+                guard,
+                on_round_start=live.round_started,
+                on_proposal=live.proposal,
+                on_round_end=live.round_ended,
+            )
+        finally:
+            emit(None)  # the loop is over, however it ended
+
+    work = asyncio.ensure_future(run_in_threadpool(run))
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(events.get(), DISCONNECT_POLL_S)
+            except TimeoutError:
+                if await probe(request):
+                    logger.info("fix cancelled by client")
+                    guard.abort()
+                    try:
+                        await work
+                    except Exception:  # noqa: BLE001, S110 - nobody is waiting for it
+                        pass
+                    return
+                continue
+            if event is None:
+                break
+            yield _ndjson_line(event)
+
+        try:
+            report = await work
+        except Exception:
+            logger.exception("fix stream: the correction loop failed")
+            yield _ndjson_line(_error_event(500, "The correction loop failed on the server."))
+            return
+        try:
+            summary = await finish(report)
+        except HTTPException as exc:
+            yield _ndjson_line(_error_event(exc.status_code, str(exc.detail)))
+            return
+        except Exception:
+            logger.exception("fix stream: could not save the redline")
+            yield _ndjson_line(_error_event(500, "The fixes could not be saved on the server."))
+            return
+        yield _ndjson_line({"type": "done", **summary})
+    finally:
+        # The browser went away mid-stream and the server stopped this generator: stop the
+        # model call too. The loop then ends with ModelCancelled and nothing is saved.
+        if not work.done():
+            logger.info("fix cancelled by client")
+            guard.abort()
+            # It ends with ModelCancelled, which nobody needs to hear about.
+            work.add_done_callback(lambda done: done.cancelled() or done.exception())
+        # Every fallback was one more model call than the rounds alone account for.
+        limiter.record_model_calls(guard.fallback_calls)
+
+
 # ``async def`` so it can watch for the browser leaving, but everything slow — the loop's
 # model calls and the redline drawing — goes to a worker thread. Calling either directly
 # here would freeze the event loop, and /healthz with it, for the length of a fix.
-@app.post("/api/runs/{run_id}/fix")
+@app.post("/api/runs/{run_id}/fix", response_model=None)
 async def fix_run(
     request: Request,
     run_id: uuid.UUID,
@@ -1410,7 +1655,8 @@ async def fix_run(
     timeout_s: ModelTimeoutS,
     fallback: FallbackSettings,
     disconnected: Disconnects,
-) -> dict:
+    stream: bool = False,
+) -> dict | StreamingResponse:
     """Run the correction loop on the confirmed drawing and write the redline.
 
     Whether a finding cleared is decided by ``agent.correct`` re-running the rules, never
@@ -1422,6 +1668,12 @@ async def fix_run(
 
     If the browser goes away (Cancel), the model call in flight is aborted, the loop stops
     before another round, and nothing is written: the run keeps its previous results.
+
+    With ``?stream=1`` the reply is newline-delimited JSON instead, written as the loop
+    runs: ``round_started``, ``proposal`` and ``verdict`` for each round, then ``done``
+    carrying exactly the reply above, or ``error`` with the status it would have had.
+    Refusals before the loop starts (409, 429, a configuration error) are still plain
+    HTTP errors, since no stream has begun.
     """
     run_dir = _run_dir(root, run_id)
     confirmed = run_dir / CONFIRMED_JSON
@@ -1444,6 +1696,26 @@ async def fix_run(
         raise HTTPException(status_code=500, detail=f"Configuration error: {exc}") from exc
 
     guard = guard_for(client, meta.get("provider"), client_factory, timeout_s, fallback)
+
+    async def finish(report: CorrectionReport) -> dict:
+        return await _finish_fix(run_id, run_dir, report, page_png, meta, client, limiter)
+
+    if stream:
+        return StreamingResponse(
+            _fix_events(
+                request,
+                disconnected,
+                guard,
+                drawing,
+                page_png,
+                expected_model(client),
+                finish,
+                limiter,
+            ),
+            media_type=NDJSON_MEDIA_TYPE,
+            headers=STREAM_HEADERS,
+        )
+
     try:
         report = await _unless_disconnected(
             request, disconnected, guard, "fix", correct, drawing, page_png, guard
@@ -1454,28 +1726,7 @@ async def fix_run(
         # Every fallback was one more model call than the rounds alone account for.
         limiter.record_model_calls(guard.fallback_calls)
 
-    # The claim above paid for round one, which is all that could be known before the loop
-    # ran. Each further round was another model call, so the day's budget is charged for
-    # them now that the report says how many there were.
-    limiter.record_model_calls(len(report.rounds) - 1)
-
-    if report.rounds and report.rounds[0].timed_out:
-        raise HTTPException(status_code=504, detail=MODEL_TIMEOUT_MESSAGE)
-
-    await run_in_threadpool(_save_fix, run_dir, report, page_png, meta)
-
-    summary = _summarize(report)
-    after = final_rule_results(report)
-    summary["final_rule_results"] = [result.model_dump(mode="json") for result in after]
-    summary["final_checks_summary"] = checks_summary(after)
-    answered = [record for record in report.rounds if record.model]
-    summary["model"] = answered[-1].model if answered else None
-    summary["fell_back"] = any(record.fell_back for record in report.rounds)
-    summary["run_id"] = str(run_id)
-    summary["fake_model"] = is_fake(client)
-    summary["redline_pdf_url"] = f"/api/runs/{run_id}/redline.pdf"
-    summary["redline_png_url"] = f"/api/runs/{run_id}/redline.png"
-    return summary
+    return await finish(report)
 
 
 def _explain_input(run_dir: Path) -> tuple[Drawing, list[Finding], str]:

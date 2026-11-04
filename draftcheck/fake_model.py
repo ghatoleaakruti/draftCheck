@@ -15,6 +15,11 @@ and the usage limits all run for real on what it returns:
 * **Each correction round** returns one scripted edit — remove datum C from ``fcf_1`` —
   after about two seconds. The rule engine decides, as always, whether that edit is
   allowed and whether it cleared anything.
+* **``DRAFTCHECK_FAKE_SCENARIO=reject_then_fix``** scripts three rounds instead, so the
+  page's live rounds can be watched failing before they succeed: round 1 asks to delete
+  the frame (refused by ``edits.apply_edits``), round 2 changes the frame's tolerance
+  (applied, but the rules still report the finding), and round 3 removes datum C (the
+  rules stop reporting it). Unset, or any other value, keeps the one-edit default.
 * **The explanation** ("Explain this drawing") returns :data:`SCRIPTED_EXPLANATION`, a
   hand-written explanation of plate_001, including its one front view, an "unclear"
   projection (one view, no projection symbol), and no tables. Its note on the GDT-001
@@ -26,6 +31,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -59,6 +65,31 @@ SCRIPTED_EDIT = {
     "rationale": "Datum C is not defined on the drawing; A and B already locate the frame.",
     "finding_ids": ["GDT-001@fcf_1"],
 }
+
+#: Picks a scripted correction run. Development only, like the fake itself.
+FAKE_SCENARIO_ENV_VAR = "DRAFTCHECK_FAKE_SCENARIO"
+REJECT_THEN_FIX = "reject_then_fix"
+
+#: The three rounds of :data:`REJECT_THEN_FIX`, one edit each. Whether each is refused,
+#: applied, or clears the finding is decided by the edit guards and the rules, not here.
+REJECT_THEN_FIX_ROUNDS = (
+    {
+        "op": "delete_fcf",
+        "fcf_id": "fcf_1",
+        "rationale": "The frame cites a datum that is not defined, so remove the frame.",
+        "finding_ids": ["GDT-001@fcf_1"],
+    },
+    {
+        "op": "set_field",
+        "target": "fcf",
+        "id": "fcf_1",
+        "field": "tolerance",
+        "value": 0.2,
+        "rationale": "Tighten the position tolerance so the frame is easier to inspect.",
+        "finding_ids": ["GDT-001@fcf_1"],
+    },
+    SCRIPTED_EDIT,
+)
 
 
 #: The finding the scripted explanation knows about, and its note.
@@ -193,17 +224,31 @@ class FakeModelClient:
         extraction: Path = FAKE_EXTRACTION,
         change: tuple[str, str, object] | None = None,
         model: str = FAKE_MODEL_NAME,
+        scenario: str | None = None,
     ) -> None:
         self._delay_s = delay_s
+        #: Which scripted correction run to give; ``None`` is the one-edit default.
+        self._scenario = scenario
+        self._correction_calls = 0
         self._extraction = extraction
         #: One ``(dimension id, field, value)`` to read differently from the fixture.
         self._change = change
         self._model = model
+        #: The model id this client answers as, for the page to say before a round starts.
+        self.model = model
         self._cancelled = threading.Event()
 
     def abort(self) -> None:
         """Stop a pause in progress, as the real client closes its request on Cancel."""
         self._cancelled.set()
+
+    def _correction_edit(self) -> dict:
+        """The edit for the next correction round, by scenario."""
+        self._correction_calls += 1
+        if self._scenario == REJECT_THEN_FIX:
+            index = min(self._correction_calls, len(REJECT_THEN_FIX_ROUNDS)) - 1
+            return copy.deepcopy(REJECT_THEN_FIX_ROUNDS[index])
+        return dict(SCRIPTED_EDIT)
 
     def chat_json(self, system: str, user: str, images: list[bytes]) -> JSONChatResult:
         started = time.monotonic()
@@ -221,7 +266,7 @@ class FakeModelClient:
         elif system == EXPLAIN_SYSTEM:
             data = scripted_explanation(user)
         else:
-            data = {"edits": [dict(SCRIPTED_EDIT)]}
+            data = {"edits": [self._correction_edit()]}
 
         return JSONChatResult(
             data=data,
@@ -236,9 +281,16 @@ class FakeModelClient:
 def fake_client_factory(provider: str | None = None) -> FakeModelClient:
     """A fresh fake for each request, whatever provider was asked for.
 
-    The delay is read here rather than bound as a default, so a test can shorten it.
+    The delay is read here rather than bound as a default, so a test can shorten it. So is
+    the scenario (:data:`FAKE_SCENARIO_ENV_VAR`), so it can be switched without a restart.
     """
-    return FakeModelClient(delay_s=FAKE_DELAY_S)
+    return FakeModelClient(delay_s=FAKE_DELAY_S, scenario=fake_scenario())
+
+
+def fake_scenario() -> str | None:
+    """The scripted correction run asked for, or ``None`` for the default one."""
+    value = os.environ.get(FAKE_SCENARIO_ENV_VAR, "").strip().lower()
+    return value if value == REJECT_THEN_FIX else None
 
 
 def fake_cross_check_factory(provider: str | None = None) -> FakeModelClient:

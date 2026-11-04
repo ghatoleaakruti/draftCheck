@@ -421,3 +421,94 @@ def test_the_results_page_is_served() -> None:
         assert response.status_code == 200, path
         assert kind in response.headers["content-type"], path
     assert "Test results" in client.get("/eval.html").text
+
+
+# ---- Live agent rounds ---------------------------------------------------------------
+
+
+def _function_body(source: str, name: str) -> str:
+    """The text of one top-level function in app.js, up to the next top-level one."""
+    start = source.index(f"function {name}(")
+    following = re.search(r"\n(?:async )?function |\nclass |\n/\*\*", source[start + 1 :])
+    return source[start : start + 1 + following.start()] if following else source[start:]
+
+
+def test_the_fix_is_streamed_and_read_with_a_stream_reader() -> None:
+    source = read_app_js()
+    post = _function_body(source, "postFix")
+    assert '"?stream=1"' in post
+    assert '{ method: "POST", signal }' in post  # Cancel's AbortController reaches it
+    reader = _function_body(source, "readEvents")
+    assert "response.body.getReader()" in reader
+    assert "new TextDecoder()" in reader
+    assert "{ stream: !done }" in reader  # a character split across chunks survives
+    assert 'indexOf("\\n")' in reader  # one event per line, buffered until its newline
+    assert "JSON.parse(line)" in reader
+
+
+def test_each_stream_event_has_its_handler() -> None:
+    source = read_app_js()
+    stream = _function_body(source, "streamFix")
+    assert "application/x-ndjson" in stream
+    for event, handler in [
+        ("round_started", "onRoundStarted(event)"),
+        ("proposal", "onProposal(event)"),
+        ("verdict", "onVerdict(event, rounds)"),
+    ]:
+        assert f'event.type === "{event}") {handler}' in stream
+    assert 'event.type === "done") final = event' in stream
+    assert 'event.type === "error") failure = event' in stream
+    assert "StreamBroken" in stream
+
+
+def test_live_rounds_drive_the_strip_pill_cards_and_sheet() -> None:
+    source = read_app_js()
+    started = _function_body(source, "onRoundStarted")
+    assert 'phase: "running"' in started  # the blinking underline is the real round
+    assert "proposing…" in started
+    assert "`Round ${live.round} · proposing with`" in source
+    proposal = _function_body(source, "onProposal")
+    assert 'status: "pending"' in proposal
+    assert "event.fell_back" in proposal
+    verdict = _function_body(source, "onVerdict")
+    assert "showRoundAttempts(event)" in verdict
+    assert "colourClouds(liveOutcomes(rounds))" in verdict
+    assert "addPenNotes(" in verdict
+
+
+def test_the_stamp_lands_on_done_without_a_replay() -> None:
+    source = read_app_js()
+    run = _function_body(source, "runFix")
+    assert "postFix(true, signal)" in run
+    assert "renderAgent(result, { live: true })" in run
+    agent = _function_body(source, "renderAgent")
+    assert "const still = live || Sheet.reducedMotion();" in agent
+    assert "drawStamp(result)" in agent
+
+
+def test_the_replay_is_only_a_fallback_tried_once_without_streaming() -> None:
+    source = read_app_js()
+    run = _function_body(source, "runFix")
+    assert run.count("replayFix(signal)") == 1
+    assert "problem instanceof StreamBroken" in run
+    fallback = _function_body(source, "replayFix")
+    assert "postFix(false, signal)" in fallback
+    assert "renderAgent(result)" in fallback
+    # The 600 ms replay waits are only reached from the non-streamed path.
+    assert source.count("renderAgent(result)") == 1
+
+
+def test_rolled_back_edits_are_shown_struck_in_red_and_listed() -> None:
+    source = read_app_js()
+    edits = _function_body(source, "roundEdits")
+    assert "round.rolled_back" in edits
+    assert "roundEdits(round)" in _function_body(source, "showRoundAttempts")
+    assert "roundEdits(round)" in _function_body(source, "sheetEdits")
+    # On the sheet a rolled-back label is drawn like a refused one: red, struck through.
+    assert 'failed: "rejected"' in source
+    assert 'failed: "Failed, rolled back"' in source
+    rows = _function_body(source, "correctionRows")
+    assert "round.rolled_back" in rows
+    assert 'outcome: "failed"' in rows
+    # The "after" strings come only from kept edits.
+    assert "round.rolled_back" not in _function_body(source, "lastAppliedFor")

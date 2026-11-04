@@ -2092,6 +2092,17 @@ button.check:hover {
   font-size: 12px;
 }
 
+/* A live round still waiting on the model, or on the rules' re-run of its proposal. */
+.st-pending .verdict-chip {
+  background: color-mix(in srgb, var(--blue) 12%, transparent);
+  color: var(--blue);
+  animation: blink 1s ease-in-out infinite;
+}
+
+.attempt.is-proposing .attempt-edit {
+  animation: blink 1s ease-in-out infinite;
+}
+
 .round-error {
   color: var(--red);
   font-size: 12.5px;
@@ -2146,6 +2157,12 @@ button.check:hover {
 .status-chip.st-verified {
   background: var(--ok-soft);
   color: var(--ok);
+}
+
+/* Rolled back: the edit is not on the drawing, as on the sheet's struck red pen note. */
+.status-chip.st-failed {
+  background: var(--red-soft);
+  color: var(--red);
 }
 
 .exports {

@@ -5,6 +5,7 @@
  *   GET  /api/runs/{id}/page.png the rendered page, shown as paper on the desk
  *   POST /api/runs/{id}/check    the drawing the user confirmed -> findings
  *   POST /api/runs/{id}/fix      run the correction loop -> rounds, verdicts, redline URLs
+ *                                ?stream=1 sends each round as it happens (NDJSON)
  *   POST /api/runs/{id}/explain  an AI explanation for learners (never read by the rules)
  * plus GET /samples/plate_001.pdf, which "Try the sample drawing" fetches and then uploads,
  * and GET /eval/pdfs/<stem>.pdf, which "Try it live" on the Test results page asks for
@@ -218,6 +219,8 @@ let reading = false;
 let checking = false;
 let checkLabelShown = false;
 let fixing = false;
+/** The round in progress while a streamed fix runs, for the pill. Null otherwise. */
+let live = null;
 let explaining = false;
 /** Set when a check lands while an explanation is out, so it is asked again afterwards. */
 let explainQueued = false;
@@ -504,6 +507,14 @@ function paintPill(stage) {
   const proposer = state.fake ? "the fake model" : providerLabel(state.provider);
   if (stage === "reading") {
     setPill(`Reading with ${reader}`, null, { busy: true });
+  } else if (stage === "fixing" && live && live.round) {
+    // The real current round, from the stream, and the model that answered it.
+    const prefix = `Round ${live.round} · proposing with`;
+    if (live.model) {
+      setPill(prefix, live.model, { busy: true, fellBack: live.fellBack });
+    } else {
+      setPill(`${prefix} ${proposer}`, null, { busy: true });
+    }
   } else if (stage === "fixing") {
     setPill(`Proposing with ${proposer}`, null, { busy: true });
   } else if (state.answered) {
@@ -2315,18 +2326,23 @@ function resetRoundsStrip() {
   }
 }
 
+/** Every edit of one round: kept, rolled back by the rules, and refused by the guards. */
+function roundEdits(round) {
+  return [...(round.applied || []), ...(round.rolled_back || []), ...(round.rejected || [])];
+}
+
 /** "1 verified, 1 rejected": what the rule engine made of one round's edits. */
 function roundSummaryText(round) {
   if (round.error) {
     return "Could not run";
   }
-  const edits = [...(round.applied || []), ...(round.rejected || [])];
+  const edits = roundEdits(round);
   if (edits.length === 0) {
     return "No edits proposed";
   }
   const count = (status) => edits.filter((edit) => edit.status === status).length;
   const parts = [`${count("verified")} verified`];
-  for (const [status, word] of [["held", "held"], ["failed", "failed"], ["rejected", "rejected"]]) {
+  for (const [status, word] of [["held", "held"], ["failed", "rolled back"], ["rejected", "rejected"]]) {
     if (count(status) > 0) parts.push(`${count(status)} ${word}`);
   }
   return parts.join(", ");
@@ -2337,8 +2353,9 @@ function roundSummaryText(round) {
 const VERDICT_CHIPS = {
   verified: "✓ Rule engine: pass",
   held: "! pass, held for designer",
-  failed: "✕ Rule engine: fail",
+  failed: "✕ Rule engine: fail · rolled back",
   rejected: "✕ Rule engine: fail",
+  pending: "… Rule engine: re-checking",
 };
 
 function paragraph(className, value) {
@@ -2380,11 +2397,14 @@ function attemptItem(round, edit) {
     before.append(was);
     const after = document.createElement("p");
     after.className = "diff-line diff-after";
-    const now = document.createElement(edit.status === "rejected" ? "del" : "ins");
+    // Refused, or rolled back after the re-run: either way it is not on the drawing.
+    const offSheet = edit.status === "rejected" || edit.status === "failed";
+    const now = document.createElement(offSheet ? "del" : "ins");
     now.textContent = edit.after;
     after.append(now);
     diff.append(before, after);
-    diff.setAttribute("aria-label", `Before: ${edit.before}. ${edit.status === "rejected" ? "Proposed, refused" : "After"}: ${edit.after}.`);
+    const afterWord = edit.status === "rejected" ? "Proposed, refused" : edit.status === "failed" ? "Tried, rolled back" : "After";
+    diff.setAttribute("aria-label", `Before: ${edit.before}. ${afterWord}: ${edit.after}.`);
     item.appendChild(diff);
   }
 
@@ -2421,7 +2441,7 @@ function otherProposalsCard() {
 
 /** Add one round's edits to the cards of the issues they cite. */
 function showRoundAttempts(round) {
-  const edits = [...(round.applied || []), ...(round.rejected || [])];
+  const edits = roundEdits(round);
   for (const edit of edits) {
     const numbers = (edit.finding_ids || []).map((key) => numberByKey.get(key)).filter(Boolean);
     const cards = numbers.length ? numbers.map((number) => issueCards.get(number)) : [otherProposalsCard()];
@@ -2454,6 +2474,7 @@ function clearSheetMarkup() {
   penLayer.replaceChildren();
   stampLayer.replaceChildren();
   penNotes = [];
+  penSlots = new Map();
 }
 
 function clearAgent() {
@@ -2488,7 +2509,7 @@ function clearAgent() {
 function sheetEdits(result) {
   const edits = [];
   for (const round of result.rounds || []) {
-    for (const edit of [...(round.applied || []), ...(round.rejected || [])]) {
+    for (const edit of roundEdits(round)) {
       if (edit.pen) edits.push(edit);
     }
   }
@@ -2497,6 +2518,8 @@ function sheetEdits(result) {
 
 /* Pen notes: one per edit, beside the cloud of the issue it cites. */
 let penNotes = [];
+/** How many notes already sit beside each anchor, so the next one goes below them. */
+let penSlots = new Map();
 
 function noteAnchor(edit) {
   for (const key of edit.finding_ids || []) {
@@ -2507,24 +2530,31 @@ function noteAnchor(edit) {
   return pair && pair.bbox ? Sheet.toPixels(pair.bbox, state.imageW, state.imageH) : null;
 }
 
-const NOTE_STATUS = { verified: "verified", held: "held", failed: "held", rejected: "rejected" };
+/** Rolled-back edits are written like refused ones: red, struck through — not on the drawing. */
+const NOTE_STATUS = { verified: "verified", held: "held", failed: "rejected", rejected: "rejected" };
 
 function drawPenNotes(result) {
   clearSheetMarkup();
-  const edits = sheetEdits(result);
+  return addPenNotes(sheetEdits(result));
+}
+
+/**
+ * Write notes for `edits` beside the ones already on the sheet. A live round adds its own
+ * this way when its verdict arrives, so earlier rounds' notes are not written again.
+ */
+function addPenNotes(edits) {
   if (edits.length === 0 || !state.imageReady) {
     return 0;
   }
   const font = Sheet.loadPenFont();
   const filter = Sheet.ensureRoughFilter(overlay, state.unit);
-  const slots = new Map();
   let order = 0;
   for (const edit of edits) {
     const anchor = noteAnchor(edit);
     if (!anchor) continue;
     const key = `${anchor.x0},${anchor.y0}`;
-    const slot = slots.get(key) || 0;
-    slots.set(key, slot + 1);
+    const slot = penSlots.get(key) || 0;
+    penSlots.set(key, slot + 1);
     const group = Sheet.note({ text: edit.pen, status: NOTE_STATUS[edit.status] || "held", order, filter });
     penLayer.appendChild(group);
     penNotes.push({ group, anchor, slot });
@@ -2590,7 +2620,7 @@ const OUTCOME_WORDS = {
   verified: "Verified",
   held: "Held for designer",
   unresolved: "Unresolved",
-  failed: "Not verified",
+  failed: "Failed, rolled back",
 };
 
 /** The last applied edit that cites `key`, or null. */
@@ -2617,6 +2647,19 @@ function correctionRows(result) {
       after: edit && edit.after !== null ? edit.after : EM_DASH,
       outcome: entry.outcome || (entry.status === "resolved" ? "verified" : "unresolved"),
     });
+  }
+  // Every edit the rules rolled back gets its own row, under the issue it tried to fix.
+  for (const round of result.rounds || []) {
+    for (const edit of round.rolled_back || []) {
+      const number = (edit.finding_ids || []).map((key) => numberByKey.get(key)).find(Boolean) || null;
+      rows.push({
+        number,
+        finding: number ? state.findings[number - 1] : null,
+        before: edit.before ?? EM_DASH,
+        after: edit.after ?? EM_DASH,
+        outcome: "failed",
+      });
+    }
   }
   for (const round of result.rounds || []) {
     for (const edit of round.applied || []) {
@@ -2716,14 +2759,18 @@ exportCsv.addEventListener("click", () => {
 });
 
 /**
- * Show one correction run. /fix answers with every round at once, so the rounds are
- * replayed on screen one by one; then the clouds take their final colours, the pen notes
- * are written, and the stamp goes down. With reduced motion all of it lands at once.
+ * Show one correction run, from /fix's final reply.
+ *
+ * Streamed (`live`), the rounds have already been drawn as they happened, so this only
+ * settles the page on the final reply — the same rounds, drawn again at once — gives the
+ * clouds their final colours, and puts the stamp down. Not streamed (the fallback, when
+ * the stream failed), every round arrives at once and is replayed on screen one by one.
+ * With reduced motion all of it lands at once.
  */
-async function renderAgent(result) {
+async function renderAgent(result, { live = false } = {}) {
   const token = ++replayToken;
   const rounds = result.rounds || [];
-  const still = Sheet.reducedMotion();
+  const still = live || Sheet.reducedMotion();
   replaying = !still;
 
   const stamp = Date.now();
@@ -2777,7 +2824,8 @@ async function renderAgent(result) {
   renderFixChecks(result);
 
   colourClouds(new Map(statuses.map((entry) => [entry.finding, entry.outcome || "unresolved"])));
-  const notes = drawPenNotes(result);
+  // Live, each round wrote its own notes as its verdict came in; they stay as they are.
+  const notes = live && penNotes.length > 0 ? 0 : drawPenNotes(result);
   updateUI();
 
   // The stamp lands once the last note has been written (reveal 0.55 s, 260 ms apart).
@@ -3211,9 +3259,209 @@ async function runCheck() {
   }
 }
 
+/* ---- Live rounds: /fix?stream=1 ------------------------------------------- */
+
+/*
+ * The streamed fix sends one JSON object per line as the loop runs: round_started,
+ * proposal, and verdict for each round, then done (the same reply as without streaming)
+ * or error. Every verdict on it is the rule engine's re-run; the page only draws it.
+ */
+
+/** The stream broke before done or error: worth one retry without streaming. */
+class StreamBroken extends Error {}
+
+/** POST /fix, streamed or not. One fetch for both, so Cancel's signal reaches either. */
+function postFix(stream, signal) {
+  const query = stream ? "?stream=1" : "";
+  return fetch(`/api/runs/${state.runId}/fix${query}`, { method: "POST", signal });
+}
+
+/**
+ * Read newline-delimited JSON off `response` as it arrives, calling `onEvent` per line.
+ * A line can be split across chunks, so text is buffered until its newline comes.
+ */
+async function readEvents(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    let newline = buffer.indexOf("\n");
+    while (newline !== -1) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      if (line) onEvent(JSON.parse(line));
+      newline = buffer.indexOf("\n");
+    }
+    if (done) break;
+  }
+  if (buffer.trim()) onEvent(JSON.parse(buffer));
+}
+
+/** Take out what a live round put on the issue cards before its verdict. */
+function removeLiveAttempts(round) {
+  for (const item of findingsList.querySelectorAll(`.attempt[data-live-round="${round}"]`)) {
+    const list = item.parentElement;
+    item.remove();
+    if (list && list.children.length === 0) list.hidden = true;
+  }
+}
+
+/** Put `item` on the cards of the issues `keys` names, or on the "other" card. */
+function addLiveAttempt(keys, build) {
+  const numbers = keys.map((key) => numberByKey.get(key)).filter(Boolean);
+  const cards = numbers.length ? numbers.map((number) => issueCards.get(number)) : [otherProposalsCard()];
+  for (const card of cards) {
+    const list = card.querySelector(".attempts");
+    list.hidden = false;
+    list.appendChild(build());
+  }
+}
+
+/** "Round 2: proposing…" on each open error the round is working on. */
+function onRoundStarted(event) {
+  live = { round: event.round, model: event.model || (live && live.model), fellBack: false };
+  setRoundCell(event.round, { number: "–", sub: "Proposing…", phase: "running" });
+  const errors = new Set(state.findings.filter((f) => f.severity === "error").map((f) => f.key));
+  for (const key of (event.findings || []).filter((k) => errors.has(k) && numberByKey.has(k))) {
+    addLiveAttempt([key], () => {
+      const item = document.createElement("li");
+      item.className = "attempt is-proposing";
+      item.dataset.liveRound = String(event.round);
+      const head = document.createElement("p");
+      head.className = "attempt-head";
+      const label = document.createElement("span");
+      label.className = "attempt-round";
+      label.textContent = `Round ${event.round}:`;
+      const what = document.createElement("span");
+      what.className = "attempt-edit";
+      what.textContent = "proposing…";
+      head.append(label, what);
+      item.appendChild(head);
+      return item;
+    });
+  }
+  updateUI();
+}
+
+/** The model's proposal and rationale, before the rules have had their say. */
+function onProposal(event) {
+  live = { round: event.round, model: event.model || (live && live.model), fellBack: Boolean(event.fell_back) };
+  removeLiveAttempts(event.round);
+  setRoundCell(event.round, { number: "–", sub: "Re-checking…", phase: "running" });
+  for (const edit of event.edits || []) {
+    const pending = { ...edit, status: "pending", note: "The rules are re-run on this edit before it counts." };
+    addLiveAttempt(edit.finding_ids || [], () => {
+      const item = attemptItem(event, pending);
+      item.dataset.liveRound = String(event.round);
+      return item;
+    });
+  }
+  updateUI();
+}
+
+/**
+ * Clouds as the rounds so far leave them: cleared by a verified (or held) edit, or still
+ * open after an edit that tried. Only keys the re-run cleared are ever coloured as passed.
+ */
+function liveOutcomes(rounds) {
+  const outcomes = new Map();
+  for (const round of rounds) {
+    const cleared = new Set((round.cleared || []).map((entry) => entry.key));
+    for (const edit of round.edits || []) {
+      for (const key of edit.finding_ids || []) {
+        if (cleared.has(key)) {
+          outcomes.set(key, edit.status === "held" ? "held" : "verified");
+        } else if (outcomes.get(key) !== "verified" && outcomes.get(key) !== "held") {
+          outcomes.set(key, "unresolved");
+        }
+      }
+    }
+    for (const key of cleared) {
+      if (!outcomes.has(key) || outcomes.get(key) === "unresolved") outcomes.set(key, "verified");
+    }
+  }
+  return outcomes;
+}
+
+/** The rule engine's verdict on one round: chips on the cards, colours and notes on the sheet. */
+function onVerdict(event, rounds) {
+  rounds.push(event);
+  removeLiveAttempts(event.round);
+  showRoundAttempts(event);
+  setRoundCell(event.round, {
+    number: event.findings_after,
+    sub: roundSummaryText(event),
+    phase: "done",
+    title: event.error ? event.error : `${plural(event.findings_after, "finding")} left after round ${event.round}`,
+  });
+  colourClouds(liveOutcomes(rounds));
+  addPenNotes((event.edits || []).filter((edit) => edit.pen));
+  updateUI();
+}
+
+/**
+ * Run a streamed fix. Resolves with the final reply on done; throws an Error carrying the
+ * server's message on an error event, or StreamBroken if the stream ended without either.
+ */
+async function streamFix(response, signal) {
+  const type = response.headers.get("content-type") || "";
+  if (!type.includes("application/x-ndjson")) {
+    throw new StreamBroken("not a stream");
+  }
+  const rounds = [];
+  let final = null;
+  let failure = null;
+  selectTab("issues");
+  try {
+    await readEvents(response, (event) => {
+      if (signal.aborted || final || failure) return;
+      if (event.type === "round_started") onRoundStarted(event);
+      else if (event.type === "proposal") onProposal(event);
+      else if (event.type === "verdict") onVerdict(event, rounds);
+      else if (event.type === "done") final = event;
+      else if (event.type === "error") failure = event;
+    });
+  } catch (problem) {
+    if (signal.aborted) throw problem;
+    throw new StreamBroken(problem.message);
+  }
+  if (failure) {
+    throw new Error(failure.detail || `The server returned ${failure.status}.`);
+  }
+  if (!final) {
+    throw new StreamBroken("the stream ended early");
+  }
+  return final;
+}
+
+/** The fix without streaming: one reply, replayed round by round (ROUND_REPLAY_MS). */
+async function replayFix(signal) {
+  clearAgent();
+  live = null;
+  setRoundCell(1, { number: "–", sub: "Proposing…", phase: "running" });
+  updateUI();
+  const response = await postFix(false, signal);
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  const result = await response.json();
+  if (signal.aborted) return;
+  selectTab("issues");
+  fixController = null;
+  fixing = false;
+  const replay = renderAgent(result);
+  updateUI();
+  await replay;
+}
+
 /**
  * Ask the agent for corrections. Nothing is posted: the server works from the drawing
  * the last check saved, which is why this is only offered while that check is current.
+ *
+ * The rounds are streamed and drawn as they happen. If the stream itself fails, the fix
+ * is asked for once more without streaming and replayed instead.
  */
 async function runFix() {
   if (!state.runId || !state.checked || state.stale || state.errorCount === 0) {
@@ -3221,6 +3469,7 @@ async function runFix() {
   }
   clearErrorToasts();
   fixing = true;
+  live = null;
   clearAgent();
   setRoundCell(1, { number: "–", sub: "Proposing…", phase: "running" });
   updateUI();
@@ -3230,37 +3479,48 @@ async function runFix() {
   const { signal } = controller;
 
   try {
-    const response = await fetch(`/api/runs/${state.runId}/fix`, { method: "POST", signal });
-    if (!response.ok) {
-      const message = await errorMessage(response);
-      if (!signal.aborted) {
-        toast(`Could not propose fixes. ${message}`, { error: true });
+    let result = null;
+    try {
+      const response = await postFix(true, signal);
+      if (!response.ok) {
+        const message = await errorMessage(response);
+        if (!signal.aborted) {
+          toast(`Could not propose fixes. ${message}`, { error: true });
+        }
+        return;
       }
+      result = await streamFix(response, signal);
+    } catch (problem) {
+      if (signal.aborted || !(problem instanceof StreamBroken || problem instanceof TypeError)) {
+        throw problem;
+      }
+      // The stream broke (a proxy, a dropped connection): ask once more, all at once.
+      await replayFix(signal);
       return;
     }
-    const result = await response.json();
     if (!signal.aborted) {
-      // The rounds replay in the Issues tab, under the strip, and on the sheet.
-      selectTab("issues");
       fixController = null;
       fixing = false;
-      const replay = renderAgent(result);
+      live = null;
+      const settle = renderAgent(result, { live: true });
       updateUI();
-      await replay;
+      await settle;
     }
   } catch (problem) {
     if (!signal.aborted) {
-      toast(`Could not reach the server: ${problem.message}`, { error: true });
+      const message = problem instanceof TypeError ? `Could not reach the server: ${problem.message}` : `Could not propose fixes. ${problem.message}`;
+      toast(message, { error: true });
     }
   } finally {
     fixController = null;
     fixing = false;
+    live = null;
     if (signal.aborted) {
       toast(CANCELLED_MESSAGE);
     }
     if (!state.fixResult && state.checked) {
-      // Cancelled or failed: the rounds are still to come.
-      resetRoundsStrip();
+      // Cancelled or failed: the rounds are still to come, and nothing was saved.
+      clearAgent();
     }
     updateUI();
   }
