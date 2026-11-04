@@ -551,6 +551,7 @@ looking.
 | `GET` | `/api/runs/{run_id}/page.png` | The rendered page, for the review screen to draw on | `404` |
 | `POST` | `/api/runs/{run_id}/check` | Body is the confirmed (possibly edited) drawing JSON. Validates it with `parse_drawing`, saves `confirmed.json`, runs the rules. Returns the findings (each with its rule's short `title`, for the Issues card, and its `key`, the `finding_key` name `/fix` reports verdicts under), `parse_issues`, the error/warning counts, and `rules_run` (how many rules ran) | `404` unknown run, `422` not a drawing object |
 | `POST` | `/api/runs/{run_id}/fix` | Runs the correction loop on `confirmed.json` with the page image, writes `corrections.json` and the redline. Returns the rounds in plain English (see below), each edit's short before/after and pen note with its verdict (§4.17), the per-finding status and `outcome`, the final findings, and the corrected drawing | `404` unknown run, `409` `/check` has not run, `429` over a demo limit (§4.12) |
+| `POST` | `/api/runs/{run_id}/explain` | An AI explanation for learners of the confirmed drawing (or the extraction, before a check) and its findings, validated against the real ids and cached in `explain.json`; never read by the rules (§4.20) | `404` unknown run, `429` over a demo limit, `502` / `504` the model failed or timed out |
 | `GET` | `/api/runs/{run_id}/redline.pdf` | The two-page redline | `404` |
 | `GET` | `/api/runs/{run_id}/redline.png` | Page 1 of the redline | `404` |
 | `POST` | `/api/demo/low-confidence` | Builds a run out of `tests/fixtures/plate_001.model.json` and `samples/generated/plate_001.png`, with the first dimension and the frame lowered to `confidence: 0.6`. No model call. Same reply shape as `POST /api/runs`. **Off unless `DRAFTCHECK_ENABLE_DEMO=1`, and loopback only** | `404` unless both gates are open, or if the two repo files are absent |
@@ -1271,6 +1272,53 @@ both calls (`api.AbortGroup`), and a primary failure aborts the second call too.
 the plate_001 fixture with `dim_5` read as 35 instead of 30, so the markers can be seen
 without a real model.
 
+### 4.20 "About this drawing": AI explanations for learners — BUILT (step 25)
+
+**What it is.** A student who uploads a drawing can press "Explain this drawing" at the
+top of the Extracted tab. One separate model call (`POST /api/runs/{id}/explain`, prompts
+`EXPLAIN_SYSTEM` and `explain_user` in `prompts.py`) gets the page image, the drawing data,
+and the latest findings. It returns a guess at what the part is (a type chip, a name, a
+2–3 sentence summary, a feature list) and one short note per item: what kind of dimension
+each one is and why it is likely there, what each feature control frame controls and why
+that matters for function, the role of each datum, and, once the drawing has been checked,
+why each finding matters and how a student should think about fixing it.
+
+**A teaching aid, not a check.** The explanation is written by the model and is shown
+labelled "AI explanation · not checked by the rules" once in every section that shows one.
+The rules never read it, the extraction prompt is unchanged, and nothing in it is ever
+posted back to `/check` or `/fix`, so the eval results (§4.18) are unaffected. The prompt
+tells the model to speak cautiously ("likely", "appears to"), never invent features, never
+contradict the data, and never say whether anything passes or fails.
+
+**Validated against real ids.** `draftcheck/explain.py` validates the answer with pydantic,
+one entry at a time, and drops any entry whose id (dimensions, frames), label (datums), or
+key (findings) is not on the drawing or among the findings that were sent — and any second
+entry for the same item. Each drop is a line in the explanation's `parse_issues`, which the
+card lists. Datum notes are accepted only for labels a datum feature symbol on the drawing
+actually carries: a letter cited in a frame but never defined gets no story. An unknown part
+type becomes `other`; a confidence is clamped to 0–1.
+
+**What it explains.** The confirmed drawing and its findings when a check has run
+(`confirmed.json`, `findings.json`), otherwise the extraction with no findings. The reply
+says which (`based_on`).
+
+**Cached.** The answer is saved in the run folder as `explain.json`, with a fingerprint
+(`explain.explanation_fingerprint`: a hash of the drawing's items and the findings' keys
+and messages). Asking again about the same data returns the saved answer with
+`cached: true` and spends no model call and no limit slot. When the confirmed data changes,
+the next request explains afresh. If the student has already asked for an explanation on a
+run, the page asks again after each check, so the issue cards get their notes.
+
+**Limits, fallback, cancel.** One explanation is one model call against the day's budget
+and one slot of its own per-IP allowance, `DRAFTCHECK_MAX_EXPLAINS_PER_HOUR` (default 10).
+It goes through the same `guard_for` as the fix, so it has the same time limit and the same
+Baseten → Meta fallback (a fallback is charged as one extra call). Cancel aborts it the same
+way (`_unless_disconnected`), and nothing is written.
+
+**Fake model.** In fake-model mode (§4.16) the call returns
+`fake_model.SCRIPTED_EXPLANATION`, a hand-written explanation of plate_001, with its note
+on GDT-001 included only when that finding was sent.
+
 ## 5. Repo layout (what exists today)
 
 ```
@@ -1288,11 +1336,12 @@ draftCheck/
 │   ├── config.py               # BUILT
 │   ├── crosscheck.py           # BUILT  compares two models' readings (§4.19)
 │   ├── edits.py                # BUILT  the four allowed edit operations + their guards
+│   ├── explain.py              # BUILT  AI explanations for learners, validated (§4.20)
 │   ├── limits.py               # BUILT  demo usage limits + run-folder cleanup
 │   ├── llm_client.py           # BUILT
 │   ├── llm_parsing.py          # BUILT
 │   ├── memory.py               # BUILT  process memory in MB, for the upload's log lines
-│   ├── api.py                  # BUILT  FastAPI: upload, check, fix, redline
+│   ├── api.py                  # BUILT  FastAPI: upload, check, fix, explain, redline
 │   ├── pipeline.py             # BUILT
 │   ├── prompts.py              # BUILT
 │   ├── render.py               # BUILT
@@ -1331,6 +1380,7 @@ draftCheck/
 │   ├── test_edit_display.py    # short before/after strings and pen labels
 │   ├── test_edits.py
 │   ├── test_eval_suite.py      # generator, ground-truth sanity, eval scoring (no network)
+│   ├── test_explain.py         # explanation validation, fingerprint, endpoint, cache, limit
 │   ├── test_limits.py
 │   ├── test_memory.py
 │   ├── test_llm_client.py
@@ -1396,6 +1446,7 @@ draftCheck/
 | 2026-11-03 | The eval matches findings to seeded errors by rule id, and counts a finding nobody seeded as a false alarm; the ground-truth sanity test matches by full finding key | The model names items its own way, so its keys never equal the ground truth's, but a rule id is what the user acts on. The stricter key match belongs to the sanity test, where both sides use ground-truth ids, and it is what proves each seeded error is caught on the right item before any model is scored |
 | 2026-11-03 | The cross-check compares two Meta models' readings in Python and only marks cells; the rules never use it | Two models agreeing is not proof and disagreeing is not an error — either could be the one that is right. A disagreement is worth a reviewer's glance, which is what it gets; letting it move a verdict would hand the decision back to the models |
 | 2026-11-03 | The redline PDF draws the on-screen sheet's markup — revision clouds coloured by outcome, numbered deltas, pen labels, a CHECKED stamp — replacing the 2026-10-29 rectangle and balloon; the per-edit verdict is reused from `api.edit_verdict` rather than worked out again | The PDF is what leaves the building, and a reviewer who has just seen green clouds and "drop C" on screen should see the same thing on paper, not a different vocabulary. Clouds still enclose rather than cover, for the reason the rectangle did. Reusing the API's verdict (imported inside the function, since `api` imports `redline`) means the screen and the PDF cannot disagree about whether an edit was verified or held. Symbols no bundled font can draw are written as short words (`pos`, `(M)`) in the table, because a blank box would read as part of the markup |
+| 2026-11-03 | Explanations for learners are a separate model call whose entries are dropped unless they name a real id, label, or finding key, and nothing in them reaches the rules | A student should learn from the drawing, not from a hole the model imagined. Checking names against the data is the one thing Python can verify about free text; the sentences themselves stay unverified, which is why every section says so. Keeping them out of the rules and out of the extraction prompt means a teaching feature cannot move a verdict or the eval |
 | 2026-10-30 | `render.load_pages` translates pypdfium2's and pillow's own errors into `RenderError`, rather than each caller catching the dependency's error class | Every caller — the CLI's exit code, the API's status code — catches `RenderError` and nothing else, so an error leaking from a dependency is an exit code or a status code that never happens: a corrupt upload came out as a traceback and a 500 instead of a 400. Translating once at the boundary means the file-reading contract is stated in one place, and swapping the PDF library later does not touch any caller |
 
 ## 8. Status

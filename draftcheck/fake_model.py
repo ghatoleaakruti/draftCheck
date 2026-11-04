@@ -15,17 +15,22 @@ and the usage limits all run for real on what it returns:
 * **Each correction round** returns one scripted edit — remove datum C from ``fcf_1`` —
   after about two seconds. The rule engine decides, as always, whether that edit is
   allowed and whether it cleared anything.
+* **The explanation** ("Explain this drawing") returns :data:`SCRIPTED_EXPLANATION`, a
+  hand-written explanation of plate_001. Its note on the GDT-001 finding is included only
+  when that finding was in the request, as a real model would only explain findings it
+  was given. It is validated against the drawing like any real answer.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import threading
 import time
 from pathlib import Path
 
 from draftcheck.llm_client import JSONChatResult, ModelCancelled, Usage
-from draftcheck.prompts import EXTRACTION_SYSTEM
+from draftcheck.prompts import EXPLAIN_SYSTEM, EXTRACTION_SYSTEM
 
 #: The saved extraction the fake reads back. Lives beside the tests, like the demo's.
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -53,6 +58,105 @@ SCRIPTED_EDIT = {
     "rationale": "Datum C is not defined on the drawing; A and B already locate the frame.",
     "finding_ids": ["GDT-001@fcf_1"],
 }
+
+
+#: The finding the scripted explanation knows about, and its note.
+EXPLAINED_FINDING = "GDT-001@fcf_1"
+
+#: A hand-written explanation of plate_001, in our own words, for working on the page
+#: offline. Every id and label in it is one the fixture really has.
+SCRIPTED_EXPLANATION = {
+    "part": {
+        "type": "plate",
+        "name_guess": "Bracket mounting plate",
+        "summary": (
+            "This appears to be a flat aluminium plate, 100 by 60 mm, with two bolt holes "
+            "near its middle. It is likely bolted to another part, so the two holes have "
+            "to line up with holes or studs on that part."
+        ),
+        "features": [
+            "Rectangular plate, 100 × 60 mm",
+            "2 through holes, Ø8",
+            "Holes on one line, 60 mm apart",
+            "Material: AL 6061-T6",
+        ],
+        "confidence": 0.8,
+    },
+    "dimensions": [
+        {
+            "id": "dim_1",
+            "kind": "location",
+            "purpose": "Locates hole 2 from the left edge (datum B), so the two holes end "
+            "up the bolt spacing apart.",
+        },
+        {
+            "id": "dim_2",
+            "kind": "location",
+            "purpose": "Locates hole 1 from the left edge (datum B).",
+        },
+        {
+            "id": "dim_3",
+            "kind": "size",
+            "purpose": "Sets the overall height of the plate, likely so it fits the space "
+            "it is mounted in.",
+        },
+        {
+            "id": "dim_4",
+            "kind": "size",
+            "purpose": "Sets the overall width of the plate.",
+        },
+        {
+            "id": "dim_5",
+            "kind": "location",
+            "purpose": "Locates the holes up from the bottom edge (datum A).",
+        },
+        {
+            "id": "dim_6",
+            "kind": "size",
+            "purpose": "Sizes both holes at once; Ø8 is likely a clearance hole for an M6 or "
+            "similar bolt.",
+        },
+    ],
+    "fcfs": [
+        {
+            "id": "fcf_1",
+            "meaning": "Each hole centre must sit within a Ø0.25 circle around its exact "
+            "position, measured from datums A and B, so the bolts can pass through the "
+            "mating part; the MMC modifier gives extra room when the holes come out larger.",
+        }
+    ],
+    "datums": [
+        {
+            "label": "A",
+            "role": "primary",
+            "why": "The bottom edge is listed first in the frame, so it is likely the edge "
+            "the plate rests on when it is measured.",
+        },
+        {
+            "label": "B",
+            "role": "secondary",
+            "why": "The left edge likely stops the plate sliding sideways, and the hole "
+            "positions are measured from it.",
+        },
+    ],
+    "findings": [
+        {
+            "key": EXPLAINED_FINDING,
+            "why_it_matters": "An inspector cannot set the part up to measure the hole "
+            "positions if one of the reference surfaces is never shown on the drawing.",
+            "how_to_think_about_fixing": "Ask which surfaces really locate the part when it "
+            "is assembled: either show where datum C is, or leave it out of the frame.",
+        }
+    ],
+}
+
+
+def scripted_explanation(user: str) -> dict:
+    """The scripted explanation, with the finding note only if that finding was sent."""
+    data = copy.deepcopy(SCRIPTED_EXPLANATION)
+    if EXPLAINED_FINDING not in user:
+        data["findings"] = []
+    return data
 
 
 class FakeModelClient:
@@ -92,6 +196,8 @@ class FakeModelClient:
                 for dimension in data.get("dimensions", []):
                     if dimension.get("id") == item_id:
                         dimension[field] = value
+        elif system == EXPLAIN_SYSTEM:
+            data = scripted_explanation(user)
         else:
             data = {"edits": [dict(SCRIPTED_EDIT)]}
 

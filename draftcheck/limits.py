@@ -2,11 +2,12 @@
 
 DraftCheck is a free demo paid for out of one person's model credits, so the thing that
 has to be true after a deploy is that no single visitor — and no single day — can empty
-the account. That is three separate limits, and they fail for different reasons:
+the account. That is four separate limits, and they fail for different reasons:
 
 ======================= ==========================================================
 per-IP uploads          one visitor cannot loop the expensive path
 per-IP fix rounds       the correction loop is several model calls, not one
+per-IP explanations     a student's "explain this drawing" is one more model call
 global model calls/day  a crowd, or a visitor behind many addresses, still stops
 ======================= ==========================================================
 
@@ -35,13 +36,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 #: What a refused request says, whichever limit it hit. Deliberately the same sentence for
-#: all three: which budget ran out is our business, and a visitor can do nothing with the
+#: all four: which budget ran out is our business, and a visitor can do nothing with the
 #: difference except learn how to get around it.
 LIMIT_MESSAGE = "DraftCheck's demo limit is reached; please try again later."
 
 #: The defaults, as the environment variable that overrides each one.
 ENV_UPLOADS_PER_HOUR = "DRAFTCHECK_MAX_UPLOADS_PER_HOUR"
 ENV_FIXES_PER_HOUR = "DRAFTCHECK_MAX_FIXES_PER_HOUR"
+ENV_EXPLAINS_PER_HOUR = "DRAFTCHECK_MAX_EXPLAINS_PER_HOUR"
 ENV_MODEL_CALLS_PER_DAY = "DRAFTCHECK_MAX_MODEL_CALLS_PER_DAY"
 ENV_RUN_RETENTION_HOURS = "DRAFTCHECK_RUN_RETENTION_HOURS"
 ENV_CLEANUP_INTERVAL_SECONDS = "DRAFTCHECK_CLEANUP_INTERVAL_SECONDS"
@@ -49,6 +51,7 @@ ENV_TRUST_PROXY = "TRUST_PROXY"
 
 DEFAULT_UPLOADS_PER_HOUR = 5
 DEFAULT_FIXES_PER_HOUR = 10
+DEFAULT_EXPLAINS_PER_HOUR = 10
 DEFAULT_MODEL_CALLS_PER_DAY = 100
 DEFAULT_RUN_RETENTION_HOURS = 24
 DEFAULT_CLEANUP_INTERVAL_SECONDS = 3600
@@ -91,6 +94,7 @@ class Limits:
 
     uploads_per_ip_per_hour: int = DEFAULT_UPLOADS_PER_HOUR
     fixes_per_ip_per_hour: int = DEFAULT_FIXES_PER_HOUR
+    explains_per_ip_per_hour: int = DEFAULT_EXPLAINS_PER_HOUR
     model_calls_per_day: int = DEFAULT_MODEL_CALLS_PER_DAY
     run_retention_hours: int = DEFAULT_RUN_RETENTION_HOURS
     cleanup_interval_seconds: int = DEFAULT_CLEANUP_INTERVAL_SECONDS
@@ -103,6 +107,7 @@ class Limits:
         return cls(
             uploads_per_ip_per_hour=_int_env(ENV_UPLOADS_PER_HOUR, DEFAULT_UPLOADS_PER_HOUR),
             fixes_per_ip_per_hour=_int_env(ENV_FIXES_PER_HOUR, DEFAULT_FIXES_PER_HOUR),
+            explains_per_ip_per_hour=_int_env(ENV_EXPLAINS_PER_HOUR, DEFAULT_EXPLAINS_PER_HOUR),
             model_calls_per_day=_int_env(ENV_MODEL_CALLS_PER_DAY, DEFAULT_MODEL_CALLS_PER_DAY),
             run_retention_hours=_int_env(ENV_RUN_RETENTION_HOURS, DEFAULT_RUN_RETENTION_HOURS),
             cleanup_interval_seconds=_int_env(
@@ -160,6 +165,7 @@ class UsageLimiter:
         self._lock = threading.Lock()
         self._uploads: dict[str, deque[float]] = {}
         self._fixes: dict[str, deque[float]] = {}
+        self._explains: dict[str, deque[float]] = {}
         self._model_calls: deque[float] = deque()
 
     @staticmethod
@@ -195,6 +201,10 @@ class UsageLimiter:
     def claim_fix(self, ip: str) -> None:
         """One fix request: one per-IP fix slot and the loop's first round."""
         self._claim(self._fixes, ip, self.limits.fixes_per_ip_per_hour, HOUR_SECONDS)
+
+    def claim_explain(self, ip: str) -> None:
+        """One explanation: one per-IP explain slot and one model call. Raises when over."""
+        self._claim(self._explains, ip, self.limits.explains_per_ip_per_hour, HOUR_SECONDS)
 
     def record_model_calls(self, count: int) -> None:
         """Charge model calls already made, over and above the one that was claimed.

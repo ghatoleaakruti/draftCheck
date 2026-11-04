@@ -18,6 +18,7 @@ each request reads what the previous one left behind:
 ``confirmed.json``    the drawing the user confirmed, written by ``/check``
 ``findings.json``     the findings for that confirmed drawing
 ``corrections.json``  the correction loop's full report
+``explain.json``      the AI explanation for students, and what it was about
 ``redline.pdf/.png``  the two-page redline
 ===================== =====================================================
 
@@ -67,6 +68,7 @@ from draftcheck.crosscheck import (
     outcome_timeout,
 )
 from draftcheck.edits import Edit, RejectedEdit, apply_edits, parse_edit
+from draftcheck.explain import explain_drawing, explanation_fingerprint
 from draftcheck.fake_model import fake_client_factory, fake_cross_check_factory
 from draftcheck.limits import Cleaner, LimitExceeded, Limits, UsageLimiter, client_ip
 from draftcheck.llm_client import (
@@ -129,6 +131,7 @@ META_JSON = "meta.json"
 CONFIRMED_JSON = "confirmed.json"
 FINDINGS_JSON = "findings.json"
 CORRECTIONS_JSON = "corrections.json"
+EXPLAIN_JSON = "explain.json"
 REDLINE_PDF = "redline.pdf"
 REDLINE_PNG = "redline.png"
 
@@ -788,7 +791,8 @@ app = FastAPI(
 def _claim(limiter: UsageLimiter, request: Request, what: str) -> None:
     """Spend one slot for this request, or refuse it with a 429.
 
-    ``what`` is ``"upload"`` or ``"fix"``, naming which per-IP budget to draw on. The
+    ``what`` is ``"upload"``, ``"fix"``, or ``"explain"``, naming which per-IP budget to
+    draw on. The
     message is the same either way (:data:`limits.LIMIT_MESSAGE`), and the page shows it
     as it shows any other refusal, because it arrives in ``detail`` like all the rest.
     """
@@ -797,7 +801,11 @@ def _claim(limiter: UsageLimiter, request: Request, what: str) -> None:
         request.client.host if request.client else None,
         limiter.limits.trust_proxy,
     )
-    claim = limiter.claim_upload if what == "upload" else limiter.claim_fix
+    claim = {
+        "upload": limiter.claim_upload,
+        "fix": limiter.claim_fix,
+        "explain": limiter.claim_explain,
+    }[what]
     try:
         claim(ip)
     except LimitExceeded as exc:
@@ -1468,6 +1476,107 @@ async def fix_run(
     summary["redline_pdf_url"] = f"/api/runs/{run_id}/redline.pdf"
     summary["redline_png_url"] = f"/api/runs/{run_id}/redline.png"
     return summary
+
+
+def _explain_input(run_dir: Path) -> tuple[Drawing, list[Finding], str]:
+    """What an explanation is about: the confirmed drawing and its findings, if checked.
+
+    Before a check there is only what the model read, and no findings to explain. Returns
+    the drawing, the findings, and which of the two it was (``"confirmed"`` or
+    ``"extraction"``), so the page can say so.
+    """
+    confirmed = run_dir / CONFIRMED_JSON
+    if confirmed.is_file():
+        drawing = parse_drawing(_read_json(confirmed))
+        findings_path = run_dir / FINDINGS_JSON
+        raw = _read_json(findings_path) if findings_path.is_file() else []
+        return drawing, [Finding.model_validate(item) for item in raw], "confirmed"
+    extraction = _existing_file(run_dir, EXTRACTION_JSON, "the upload")
+    return parse_drawing(_read_json(extraction)), [], "extraction"
+
+
+# ``async def`` for the same reason as ``/fix``: the model call goes to a worker thread so
+# the event loop stays free, and Cancel (the browser leaving) aborts it.
+@app.post("/api/runs/{run_id}/explain")
+async def explain_run(
+    request: Request,
+    run_id: uuid.UUID,
+    root: RunsRoot,
+    client_factory: Clients,
+    limiter: Limiter,
+    timeout_s: ModelTimeoutS,
+    fallback: FallbackSettings,
+    disconnected: Disconnects,
+) -> dict:
+    """Explain the drawing for a student: what the part is and why each item is there.
+
+    A teaching aid, not a check. The model's answer is validated against the drawing by
+    :func:`draftcheck.explain.parse_explanation` — entries naming an id, datum label, or
+    finding key that does not exist are dropped into ``parse_issues`` — and it is never
+    read by the rules.
+
+    Cached in ``explain.json`` with a fingerprint of the data it explained. Asking again
+    about the same data returns the saved answer without a model call or a limit slot;
+    once the confirmed drawing or its findings change, the next request explains afresh.
+    """
+    run_dir = _run_dir(root, run_id)
+    drawing, findings, based_on = _explain_input(run_dir)
+    fingerprint = explanation_fingerprint(drawing, findings)
+
+    cache = run_dir / EXPLAIN_JSON
+    if cache.is_file():
+        saved = _read_json(cache)
+        if saved.get("fingerprint") == fingerprint:
+            return {**saved, "run_id": str(run_id), "cached": True}
+
+    # After the cache: a repeat question about the same data costs nothing.
+    _claim(limiter, request, "explain")
+
+    page_png = _existing_file(run_dir, PAGE_PNG, "the upload").read_bytes()
+    meta = _read_json(run_dir / META_JSON) if (run_dir / META_JSON).is_file() else {}
+    try:
+        client = client_factory(meta.get("provider"))
+    except ConfigError as exc:
+        raise HTTPException(status_code=500, detail=f"Configuration error: {exc}") from exc
+
+    guard = guard_for(client, meta.get("provider"), client_factory, timeout_s, fallback)
+    try:
+        explanation, result = await _unless_disconnected(
+            request,
+            disconnected,
+            guard,
+            "explain",
+            explain_drawing,
+            drawing,
+            findings,
+            page_png,
+            guard,
+        )
+    except ClientGone:
+        raise HTTPException(status_code=CANCELLED_STATUS, detail="Cancelled by client.") from None
+    except ModelTimeout as exc:
+        raise HTTPException(status_code=504, detail=MODEL_TIMEOUT_MESSAGE) from exc
+    except JSONParseError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"The model did not return usable JSON: {exc}"
+        ) from exc
+    except (APIStatusError, APIConnectionError) as exc:
+        raise HTTPException(status_code=502, detail=_provider_error(exc)) from exc
+    finally:
+        # A fallback was one more model call than the claim paid for.
+        limiter.record_model_calls(guard.fallback_calls)
+
+    payload = {
+        "explanation": explanation.model_dump(mode="json"),
+        "based_on": based_on,
+        "fingerprint": fingerprint,
+        "model": result.model,
+        "fell_back": bool(getattr(result, "fell_back", False)),
+        "fake_model": is_fake(client),
+        "created": datetime.now(UTC).isoformat(),
+    }
+    _write_json(cache, payload)
+    return {**payload, "run_id": str(run_id), "cached": False}
 
 
 @app.get("/api/runs/{run_id}/redline.pdf")

@@ -179,6 +179,31 @@
               </div>
 
               <div id="extracted" hidden>
+                <!-- AI explanation for learners. Never read by the rules. -->
+                <section id="about" class="about" aria-labelledby="about-heading">
+                  <div class="about-head">
+                    <h3 id="about-heading">About this drawing</h3>
+                    <button id="explain-button" class="btn-quiet btn-small" type="button">Explain this drawing</button>
+                  </div>
+                  <p id="about-intro" class="about-intro">
+                    For learners: the model explains what the part likely is and why each
+                    dimension, frame, and datum is there.
+                  </p>
+                  <div id="about-result" hidden>
+                    <p class="about-title">
+                      <span id="about-type" class="part-chip"></span>
+                      <strong id="about-name"></strong>
+                    </p>
+                    <p id="about-summary" class="about-summary"></p>
+                    <ul id="about-features" class="about-features"></ul>
+                    <p class="ai-label">AI explanation · not checked by the rules</p>
+                  </div>
+                  <div id="about-issues" class="note note-warn" hidden>
+                    <strong>Some explanation entries named items that are not on the drawing and were left out:</strong>
+                    <ul id="about-issues-list"></ul>
+                  </div>
+                </section>
+
                 <p class="runmeta">
                   <span>Model <code id="meta-model">—</code></span>
                   <span>Latency <code id="meta-latency">—</code></span>
@@ -220,6 +245,7 @@
                   <h3>Datums <span id="count-datums" class="count"></span></h3>
                   <button id="add-datum" class="btn-quiet btn-small" type="button">Add datum</button>
                 </div>
+                <p id="ai-label-datums" class="ai-label" hidden>AI explanation · not checked by the rules</p>
                 <div class="table-scroll">
                   <table class="data">
                     <thead><tr id="head-datums"></tr></thead>
@@ -230,6 +256,7 @@
                 <div class="table-head">
                   <h3>Dimensions <span id="count-dimensions" class="count"></span></h3>
                 </div>
+                <p id="ai-label-dimensions" class="ai-label" hidden>AI explanation · not checked by the rules</p>
                 <div class="table-scroll">
                   <table class="data">
                     <thead><tr id="head-dimensions"></tr></thead>
@@ -240,6 +267,7 @@
                 <div class="table-head">
                   <h3>Feature control frames <span id="count-fcfs" class="count"></span></h3>
                 </div>
+                <p id="ai-label-fcfs" class="ai-label" hidden>AI explanation · not checked by the rules</p>
                 <div class="table-scroll">
                   <table class="data">
                     <thead><tr id="head-fcfs"></tr></thead>
@@ -313,6 +341,7 @@
               </section>
 
               <p id="findings-none" class="pane-empty is-ok" hidden>No issues found.</p>
+              <p id="ai-label-issues" class="ai-label" hidden>AI explanation · not checked by the rules</p>
               <ol id="findings-list" class="findings-list"></ol>
             </div>
 

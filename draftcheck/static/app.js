@@ -5,6 +5,7 @@
  *   GET  /api/runs/{id}/page.png the rendered page, shown as paper on the desk
  *   POST /api/runs/{id}/check    the drawing the user confirmed -> findings
  *   POST /api/runs/{id}/fix      run the correction loop -> rounds, verdicts, redline URLs
+ *   POST /api/runs/{id}/explain  an AI explanation for learners (never read by the rules)
  * plus GET /samples/plate_001.pdf, which "Try the sample drawing" fetches and then uploads
  * through POST /api/runs exactly like a picked file.
  *
@@ -97,6 +98,12 @@ const correctionsIntro = $("corrections-intro");
 const correctionsRows = $("corrections-rows");
 const redlinePdf = $("redline-pdf");
 const exportCsv = $("export-csv");
+
+const explainButton = $("explain-button");
+const aboutIntro = $("about-intro");
+const aboutResult = $("about-result");
+const aboutIssuesBox = $("about-issues");
+const aboutIssuesList = $("about-issues-list");
 
 const actionHint = $("action-hint");
 const primaryButton = $("primary");
@@ -192,16 +199,24 @@ const state = {
   unit: 1,
   /** True from a new run until its boxes have been revealed by the final sweep. */
   revealPending: false,
+  /** The last /explain reply's `explanation`, or null. Shown only; never sent to the rules. */
+  explanation: null,
+  /** True once the user asked for an explanation of this run, so a later check refreshes it. */
+  explainWanted: false,
 };
 
 let reading = false;
 let checking = false;
 let checkLabelShown = false;
 let fixing = false;
+let explaining = false;
+/** Set when a check lands while an explanation is out, so it is asked again afterwards. */
+let explainQueued = false;
 
 /** The controller for the request Cancel would stop, or `null` when none is out. */
 let readController = null;
 let fixController = null;
+let explainController = null;
 
 /* ---- Formatting helpers -------------------------------------------------- */
 
@@ -614,7 +629,13 @@ function updateUI() {
   actionHint.textContent = action.hint;
   actionHint.classList.toggle("is-warn", Boolean(action.warn));
   // The replay of a fix that has already come back is not something to cancel.
-  cancelButton.hidden = !busy || replaying;
+  cancelButton.hidden = !(busy || explaining) || replaying;
+  explainButton.disabled = busy || explaining || checking || !state.runId;
+  explainButton.textContent = explaining
+    ? "Explaining…"
+    : state.explanation
+      ? "Explain again"
+      : "Explain this drawing";
 
   // Desk: the file, and the drop zone or the paper.
   const file = reading ? state.pendingFile : state.file;
@@ -1651,6 +1672,9 @@ function renderDatums() {
     });
     removeCell.appendChild(remove);
 
+    const datumNote = explainNote("datums", datum.label);
+    addExplainLine(labelCell, datumNote && `${capitalize(datumNote.role)}: ${datumNote.why}`);
+
     return {
       id: datum.id,
       cells: [
@@ -1687,7 +1711,8 @@ function renderDimensions() {
       marker: unsureMarker(dimension),
       cells: [
         idCell(id),
-        textCell(text(dimension.text_raw), "mono"),
+        printedWithNote(dimension.text_raw, explainNote("dimensions", id), (note) =>
+          `${capitalize(note.kind)}: ${note.purpose}`),
         markCrossCheck(
           numberCell(dimension, "value", was.value ?? null, { required: true, label: `Value, ${id}` }),
           id,
@@ -1755,7 +1780,11 @@ function renderFcfs() {
       marker: unsureMarker(fcf),
       cells: [
         idCell(id),
-        markCrossCheck(textCell(text(fcf.characteristic)), id, ["characteristic"]),
+        markCrossCheck(
+          printedWithNote(fcf.characteristic, explainNote("fcfs", id), (note) => note.meaning, ""),
+          id,
+          ["characteristic"],
+        ),
         markCrossCheck(
           numberCell(fcf, "tolerance", was.tolerance ?? null, {
             required: true,
@@ -1835,6 +1864,7 @@ function renderTables() {
   renderFcfs();
   renderConfidenceSummary();
   renderCrossCheckSummary();
+  paintAiLabels();
 }
 
 /* ---- Findings ------------------------------------------------------------ */
@@ -2017,7 +2047,11 @@ function findingCard(finding, number) {
   attempts.className = "attempts";
   attempts.hidden = true;
 
-  item.append(delta, title, chip, meta, why, source, attempts);
+  const notes = document.createElement("div");
+  notes.className = "finding-ai";
+  fillFindingNotes(notes, finding);
+
+  item.append(delta, title, chip, meta, why, source, notes, attempts);
   item.setAttribute("aria-label", `Issue ${number}, ${severity}: ${title.textContent}. ${meta.textContent}`);
 
   item.addEventListener("click", () => selectIssue(number));
@@ -2101,6 +2135,7 @@ function renderFindings(result) {
 
   findingsList.replaceChildren(cards);
   checkIssuesList.replaceChildren(lines);
+  paintAiLabels();
   findingsNone.hidden = findings.length > 0;
   checkIssuesBox.hidden = issues.length === 0;
 
@@ -2744,6 +2779,175 @@ async function renderAgent(result) {
   drawStamp(result);
 }
 
+/* ---- AI explanations for learners ---------------------------------------- */
+
+/*
+ * A teaching aid, written by the model and validated on the server against the drawing's
+ * real ids. It is display only: nothing here is posted to the rules, and every section
+ * that shows one is labelled "AI explanation · not checked by the rules".
+ */
+
+function capitalize(value) {
+  const word = String(value || "");
+  return word ? word[0].toUpperCase() + word.slice(1) : word;
+}
+
+/** The explanation's entry for one item, by id (or datum label, or finding key). */
+function explainNote(section, name) {
+  const explanation = state.explanation;
+  if (!explanation || !name) return null;
+  const field = section === "datums" ? "label" : section === "findings" ? "key" : "id";
+  return (explanation[section] || []).find((entry) => entry[field] === name) || null;
+}
+
+/** Add a muted second line to a cell, under what is printed there. */
+function addExplainLine(cell, line) {
+  if (!line) return;
+  const note = document.createElement("span");
+  note.className = "ai-line";
+  note.textContent = line;
+  cell.appendChild(note);
+}
+
+/** A cell with the printed text and, when there is an explanation, its line beneath. */
+function printedWithNote(printed, note, lineOf, className = "mono") {
+  const cell = document.createElement("td");
+  const main = document.createElement("span");
+  main.className = className;
+  main.textContent = text(printed);
+  cell.appendChild(main);
+  addExplainLine(cell, note && lineOf(note));
+  return cell;
+}
+
+/** "Why it matters" and "How to think about fixing" on an issue card, when explained. */
+function fillFindingNotes(container, finding) {
+  const note = explainNote("findings", finding.key);
+  container.replaceChildren();
+  container.hidden = !note;
+  if (!note) return;
+  for (const [label, value] of [
+    ["Why it matters", note.why_it_matters],
+    ["How to think about fixing", note.how_to_think_about_fixing],
+  ]) {
+    const line = document.createElement("p");
+    line.className = "finding-ai-line";
+    const strong = document.createElement("strong");
+    strong.textContent = `${label}: `;
+    line.append(strong, value);
+    container.appendChild(line);
+  }
+}
+
+/** Show each section's one label only when that section has an explanation in it. */
+function paintAiLabels() {
+  const explanation = state.explanation;
+  const has = (section, names) =>
+    Boolean(explanation) && names.some((name) => explainNote(section, name));
+  const working = state.working || {};
+  $("ai-label-datums").hidden = !has("datums", (working.datums || []).map((d) => d.label));
+  $("ai-label-dimensions").hidden = !has("dimensions", (working.dimensions || []).map((d) => d.id));
+  $("ai-label-fcfs").hidden = !has("fcfs", (working.fcfs || []).map((f) => f.id));
+  $("ai-label-issues").hidden = !has("findings", state.findings.map((f) => f.key));
+}
+
+/** The "About this drawing" card: chip, name guess, summary, features. */
+function renderAbout(result) {
+  const explanation = result && result.explanation;
+  const part = explanation && explanation.part;
+  aboutIntro.hidden = Boolean(part);
+  aboutResult.hidden = !part;
+  if (part) {
+    $("about-type").textContent = capitalize(part.type || "other");
+    $("about-name").textContent = part.name_guess || "Unnamed part";
+    $("about-summary").textContent = part.summary || "";
+    const features = document.createDocumentFragment();
+    for (const feature of part.features || []) {
+      const item = document.createElement("li");
+      item.textContent = feature;
+      features.appendChild(item);
+    }
+    $("about-features").replaceChildren(features);
+  }
+  const issues = (explanation && explanation.parse_issues) || [];
+  const lines = document.createDocumentFragment();
+  for (const issue of issues) {
+    const item = document.createElement("li");
+    item.textContent = issue;
+    lines.appendChild(item);
+  }
+  aboutIssuesList.replaceChildren(lines);
+  aboutIssuesBox.hidden = issues.length === 0;
+}
+
+/** Put a new explanation everywhere it shows: the card, the table rows, the issue cards. */
+function showExplanation(result) {
+  state.explanation = result.explanation || null;
+  renderAbout(result);
+  renderTables();
+  for (const [number, card] of issueCards) {
+    const finding = state.findings[number - 1];
+    const notes = card.querySelector(".finding-ai");
+    if (finding && notes) fillFindingNotes(notes, finding);
+  }
+  paintAiLabels();
+}
+
+/** Ask the server to explain the drawing. Cached there, so asking twice is free. */
+async function runExplain() {
+  if (explaining) {
+    explainQueued = true;
+    return;
+  }
+  if (!state.runId || isBusy()) {
+    return;
+  }
+  clearErrorToasts();
+  state.explainWanted = true;
+  explaining = true;
+  updateUI();
+
+  const controller = new AbortController();
+  explainController = controller;
+  const { signal } = controller;
+  const runId = state.runId;
+
+  try {
+    const response = await fetch(`/api/runs/${runId}/explain`, { method: "POST", signal });
+    if (!response.ok) {
+      const message = await errorMessage(response);
+      if (!signal.aborted) {
+        toast(`Could not explain the drawing. ${message}`, { error: true });
+      }
+      return;
+    }
+    const result = await response.json();
+    // A reply for a run that is no longer on screen is dropped.
+    if (!signal.aborted && state.runId === runId) {
+      if (result.fake_model) state.fake = true;
+      showExplanation(result);
+    }
+  } catch (problem) {
+    if (!signal.aborted) {
+      toast(`Could not reach the server: ${problem.message}`, { error: true });
+    }
+  } finally {
+    explainController = null;
+    explaining = false;
+    if (signal.aborted) {
+      explainQueued = false;
+      toast("Explanation cancelled.");
+    }
+    if (explainQueued && state.runId === runId) {
+      explainQueued = false;
+      setTimeout(runExplain, 0);
+    }
+    updateUI();
+  }
+}
+
+explainButton.addEventListener("click", runExplain);
+
 /* ---- Rendering one run --------------------------------------------------- */
 
 function render(run, file) {
@@ -2760,6 +2964,9 @@ function render(run, file) {
   // The second model's reading, compared on the server. Absent on the demo run.
   state.crossCheck = run.cross_check || null;
   clearFindings();
+  state.explanation = null;
+  state.explainWanted = false;
+  renderAbout(null);
   // A fresh reading: its boxes wait for the final sweep, and they start out shown.
   state.revealPending = true;
   setBoxesShown(true);
@@ -2815,6 +3022,7 @@ async function errorMessage(response) {
 cancelButton.addEventListener("click", () => {
   if (readController) readController.abort();
   if (fixController) fixController.abort();
+  if (explainController) explainController.abort();
 });
 
 /**
@@ -2896,6 +3104,11 @@ async function runCheck() {
     }
     renderFindings(await response.json());
     selectTab("issues");
+    // The user asked for an explanation of this run: the confirmed data has changed, so
+    // ask again, which adds notes for the new findings. One more model call, opted into.
+    if (state.explainWanted) {
+      setTimeout(runExplain, 0);
+    }
   } catch (problem) {
     toast(`Could not reach the server: ${problem.message}`, { error: true });
   } finally {
