@@ -239,6 +239,43 @@ button:disabled {
   letter-spacing: -0.01em;
 }
 
+/* Page links: the checker and its test results */
+
+.brand-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.topnav {
+  display: flex;
+  gap: 4px;
+}
+
+.brand .topnav-link {
+  margin-left: 10px;
+}
+
+.topnav-link {
+  padding: 5px 12px;
+  border-radius: 6px;
+  color: var(--desk-ink-2);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background var(--fast), color var(--fast);
+}
+
+.topnav-link:hover {
+  background: var(--desk);
+  color: var(--desk-ink);
+}
+
+.topnav-link.is-current {
+  background: var(--desk);
+  color: var(--desk-ink);
+  box-shadow: inset 0 -2px 0 var(--pen-red);
+}
+
 /* Stepper */
 
 .stepper {

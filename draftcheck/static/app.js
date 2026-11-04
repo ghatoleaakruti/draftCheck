@@ -6,7 +6,9 @@
  *   POST /api/runs/{id}/check    the drawing the user confirmed -> findings
  *   POST /api/runs/{id}/fix      run the correction loop -> rounds, verdicts, redline URLs
  *   POST /api/runs/{id}/explain  an AI explanation for learners (never read by the rules)
- * plus GET /samples/plate_001.pdf, which "Try the sample drawing" fetches and then uploads
+ * plus GET /samples/plate_001.pdf, which "Try the sample drawing" fetches and then uploads,
+ * and GET /eval/pdfs/<stem>.pdf, which "Try it live" on the Test results page asks for
+ * with /?try=<stem>; it is uploaded the same way
  * through POST /api/runs exactly like a picked file.
  *
  * Nothing here decides whether the drawing passes. The tables are an editor and a
@@ -122,6 +124,13 @@ const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 /** The sample drawing, served by the API as one static file. */
 const SAMPLE_URL = "/samples/plate_001.pdf";
 const SAMPLE_NAME = "plate_001.pdf";
+
+/** How the desk names where its file came from. */
+const SOURCE_LABELS = {
+  sample: "sample drawing",
+  demo: "demo extraction",
+  suite: "test drawing",
+};
 
 /** The correction loop's hard cap (draftcheck/agent.py MAX_ROUNDS). Only used in words. */
 const MAX_ROUNDS = 3;
@@ -641,7 +650,7 @@ function updateUI() {
   const file = reading ? state.pendingFile : state.file;
   fileName.textContent = file ? file.name : "No drawing yet";
   fileSub.textContent = file
-    ? `Sheet 1, ${file.source === "sample" ? "sample drawing" : file.source === "demo" ? "demo extraction" : "uploaded"}`
+    ? `Sheet 1, ${SOURCE_LABELS[file.source] || "uploaded"}`
     : "Upload a drawing to begin";
 
   const showPaper = Boolean(state.runId) && !reading && state.imageReady;
@@ -3345,6 +3354,27 @@ function offerFile(file, source = "uploaded") {
   startRun(file, source);
 }
 
+/** A test-drawing name from the Test results page: lowercase letters, digits, underscores. */
+const SUITE_STEM = /^[a-z0-9_]{1,64}$/;
+
+/** "Try it live": fetch one test drawing's PDF and upload it as a picked file would be. */
+async function trySuiteDrawing(stem) {
+  if (!SUITE_STEM.test(stem) || isBusy()) {
+    return;
+  }
+  try {
+    const response = await fetch(`/eval/pdfs/${stem}.pdf`);
+    if (!response.ok) {
+      toast(`Could not load the test drawing ${stem}.`, { error: true });
+      return;
+    }
+    const blob = await response.blob();
+    offerFile(new File([blob], `${stem}.pdf`, { type: "application/pdf" }), "suite");
+  } catch (problem) {
+    toast(`Could not reach the server: ${problem.message}`, { error: true });
+  }
+}
+
 /** Fetch the sample PDF and upload it exactly as a picked file would be. */
 async function trySample() {
   if (isBusy()) {
@@ -3470,6 +3500,19 @@ async function loadModelMode() {
 }
 
 loadModelMode();
+
+{
+  // Arriving from "Try it live": upload that test drawing once, then drop the parameter so
+  // a reload does not upload it again.
+  const params = new URLSearchParams(window.location.search);
+  const tryStem = params.get("try");
+  if (tryStem !== null) {
+    params.delete("try");
+    const rest = params.toString();
+    history.replaceState(null, "", `${window.location.pathname}${rest ? `?${rest}` : ""}`);
+    trySuiteDrawing(tryStem);
+  }
+}
 
 if (new URLSearchParams(window.location.search).get("demo") === LOW_CONFIDENCE_DEMO) {
   loadDemo();

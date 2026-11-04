@@ -1410,6 +1410,41 @@ on GDT-001 included only when that finding was sent. It describes plate_001 hone
 front view, projection `unclear` (one view, no projection symbol), no tables, a balloons
 sentence saying there are none, and every dimension in the front view with nothing in `also_seen_in`.
 
+### 4.21 "Test results": the eval as a page — BUILT (step 26f)
+
+**What it is.** `/eval.html`, linked from the header as "Test results", shows the
+evaluation for a demo: headline numbers across the suite (drawings, part types, views,
+GD&T frames, seeded issues, runs finished) and both models side by side (issues caught,
+false alarms, fixes verified, part types recognized, fallback runs, average latency); a
+gallery of every drawing with its thumbnail, part type chip, feature chips (views,
+sections, details, GD&T, tables, balloons), and per-model badges; filters by part type,
+model, seeded or clean, and multi-view; and a detail panel per drawing (a larger image, each
+seeded error and which model caught it, reading scores, view and part-type scores,
+latency, fallback). The page's one-line method note says the drawings have known answers
+and the scores are computed by Python against ground truth.
+
+**Instant, and nothing live.** `eval.js` fetches one static file, `/eval/results.json`,
+and nothing else: no model call and no API call. Everything is built with DOM calls and
+`textContent`. A missing or empty snapshot shows an empty state with the command that makes
+one, not an error.
+
+**The snapshot.** `scripts/run_eval.py` writes it after every run
+(`write_snapshot` / `build_snapshot`), or alone with `--snapshot-only` (no model calls;
+`docs/EVAL.md` and the results file are left alone). It is built field by field from a
+whitelist — scores, drawing features, part type, model, latency, fallback, and per seeded
+error which model caught it — so a run's `reason`, parse issues, findings, round errors,
+and anything from the environment can never reach it; a false alarm is kept as its rule id
+only, since the item id is the model's own name. Each status is `ok`, `failed`,
+`skipped`, `stale` (scored under an older version), or `not run`. Beside it go a 360 px
+thumbnail and a 1400 px image of each drawing, and the drawing's PDF. They are our own
+generated drawings, so publishing them is fine.
+
+**Try it live.** The detail panel's button opens `/?try=<stem>`. `app.js` accepts only a
+name of lowercase letters, digits, and underscores, drops the parameter from the address
+so a reload does not repeat it, fetches `/eval/pdfs/<stem>.pdf`, and hands it to
+`offerFile` exactly as a picked file — the normal upload flow, limits and all. The desk
+labels it "test drawing".
+
 ## 5. Repo layout (what exists today)
 
 ```
@@ -1445,6 +1480,11 @@ draftCheck/
 │       ├── style.css
 │       ├── app.js
 │       ├── sheet.js            # drawing on the sheet: scan, clouds, pen notes, stamp
+│       ├── eval.html, eval.css, eval.js  # the "Test results" page (§4.21)
+│       ├── eval/               # its snapshot, written by scripts/run_eval.py (§4.21)
+│       │   ├── results.json    # scores and features only, copied field by field
+│       │   ├── thumbs/, sheets/  # each drawing at 360 px and 1400 px
+│       │   └── pdfs/           # each drawing, for "Try it live"
 │       └── fonts/              # Archivo, JetBrains Mono, Nanum Pen Script + OFL.txt each
 ├── samples/
 │   └── generated/              # synthetic drawings, regenerable from scripts/

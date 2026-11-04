@@ -5,6 +5,7 @@ Run with:
     python -m scripts.run_eval --drawings plate_clean --providers baseten
     python -m scripts.run_eval --force                 # ignore the cache, run everything
     python -m scripts.run_eval --explain               # also explain each drawing and score it
+    python -m scripts.run_eval --snapshot-only         # rebuild the web app's snapshot only
 
 For each (drawing, provider) it does what the web server does: render page 1, extract with
 the model, run the rules, then run the correction loop. Model calls go through the
@@ -35,6 +36,14 @@ results already cached stay valid.
 **Drawing features**: a count, per drawing, of what its ground truth contains (views,
 sections, details, frames by type, datums, dimensions, tables, balloons, notes). Derived
 from the ground truth, so it is recomputed on every run rather than cached.
+
+**Public snapshot**: after every run (or alone, with ``--snapshot-only``, which calls no
+model and leaves ``docs/EVAL.md`` alone), ``draftcheck/static/eval/`` gets what the web
+app's "Test results" page shows: ``results.json`` (scores, drawing features, part type,
+model, latency, fallback — copied field by field, so no model text, no reasons, and no
+configuration can reach it), a thumbnail and a larger image of each drawing, and the
+drawing's PDF for "Try it live". These are our own generated drawings, so they can be
+published.
 
 Runs happen one at a time. Each finished run is written to ``outputs/eval/results.json``
 as soon as it ends, and a rerun skips it. A provider that cannot be reached (not
@@ -68,6 +77,8 @@ from scripts.drawing_suite import SUITE, DrawingSpec
 SAMPLES_DIR = Path("samples/generated")
 RESULTS_PATH = Path("outputs/eval/results.json")
 SUMMARY_PATH = Path("docs/EVAL.md")
+#: Where the public snapshot goes: served by the app at /eval/.
+SNAPSHOT_DIR = Path("draftcheck/static/eval")
 
 #: plate_001 first (the original sample), then the suite in its own order.
 DRAWINGS: tuple[str, ...] = ("plate_001", *SUITE)
@@ -846,6 +857,203 @@ def refresh_features(
         features[stem] = drawing_features(stem, load_ground_truth(stem, samples_dir))
 
 
+# --- Public snapshot for the web app ---------------------------------------------------
+
+#: Bumped when the snapshot's shape changes; the page reads it.
+SNAPSHOT_SCHEMA = 1
+
+#: The one-line method note the page shows at the top.
+METHOD_NOTE = (
+    "Generated drawings with known answers; scores computed by Python against ground "
+    "truth; see docs/EVAL.md."
+)
+
+#: How each provider is named on the page.
+PROVIDER_LABELS = {
+    "baseten": "Muse Spark Open (Baseten)",
+    "meta": "Muse Spark (Meta Model API)",
+}
+
+#: Longest side, in pixels, of a gallery thumbnail and of the detail panel's image.
+THUMB_SIDE = 360
+SHEET_SIDE = 1400
+
+
+def _status(entry: dict | None, version: int) -> str:
+    """"ok", "failed", "skipped", "stale" (scored under an older version), or "not run"."""
+    if entry is None:
+        return "not run"
+    if entry.get("status") == "ok" and entry.get("score_version") != version:
+        return "stale"
+    return str(entry.get("status", "not run"))
+
+
+def _rule_ids(keys: list[str]) -> list[str]:
+    """Finding keys reduced to their rule ids: item ids are the model's own names."""
+    return [key.split("@")[0] for key in keys]
+
+
+def _public_run(entry: dict | None) -> dict:
+    """One extraction run, copied field by field: nothing the model wrote, no reasons."""
+    status = _status(entry, SCORE_VERSION)
+    if status != "ok" or entry is None:
+        return {"status": status}
+    ex, er, fx = entry["extraction"], entry["errors"], entry["fixes"]
+    extraction_fields = (
+        "dims_expected", "dims_found", "dims_correct", "fcfs_expected", "fcfs_found",
+        "fcfs_correct", "datums_expected", "datums_found", "units_correct",
+        "general_tolerance_correct",
+    )
+    return {
+        "status": "ok",
+        "model": str(entry.get("model", "")),
+        "fell_back": bool(entry.get("fell_back")),
+        "latency_s": float(entry.get("latency_s", {}).get("total", 0.0)),
+        "extraction": {field: ex[field] for field in extraction_fields if field in ex},
+        "errors": {
+            "errors_expected": er["errors_expected"],
+            "errors_caught": er["errors_caught"],
+            "caught": list(er["caught"]),
+            "missed": list(er["missed"]),
+            "false_alarms": _rule_ids(er["false_alarms"]),
+        },
+        "fixes": {
+            "errors_before": fx["errors_before"],
+            "fixes_verified": fx["fixes_verified"],
+            "rounds": fx["rounds"],
+        },
+    }
+
+
+def _public_explain(entry: dict | None) -> dict:
+    """One explanation score, copied field by field (never the explanation's text)."""
+    status = _status(entry, EXPLAIN_SCORE_VERSION)
+    if status != "ok" or entry is None:
+        return {"status": status}
+    fields = (
+        "part_type", "part_type_correct", "views_expected", "views_found", "views_extra",
+        "dims_with_view", "dims_view_correct", "projection",
+    )
+    return {
+        "status": "ok",
+        **{field: entry.get(field) for field in fields},
+        "latency_s": float(entry.get("latency_s", {}).get("total", 0.0)),
+    }
+
+
+def _caught_by(seeded: list[dict], runs: dict[str, dict]) -> list[dict]:
+    """Each seeded error, and for each provider whether a finding of its rule caught it.
+
+    ``None`` when that provider has no finished run. Two seeded errors of the same rule
+    need two findings of it, exactly as :func:`score_findings` counts them.
+    """
+    left = {
+        provider: Counter(run["errors"]["caught"]) if run["status"] == "ok" else None
+        for provider, run in runs.items()
+    }
+    out = []
+    for error in seeded:
+        rule = error.get("rule_id") or LEGACY_ERROR_RULES.get(error.get("type", ""), "")
+        caught: dict[str, bool | None] = {}
+        for provider, counter in left.items():
+            if counter is None:
+                caught[provider] = None
+            elif counter[rule] > 0:
+                counter[rule] -= 1
+                caught[provider] = True
+            else:
+                caught[provider] = False
+        out.append({"rule_id": rule, "description": error.get("description", ""),
+                    "caught_by": caught})
+    return out
+
+
+def build_snapshot(
+    results: dict,
+    drawings: list[str],
+    providers: list[str],
+    samples_dir: Path = SAMPLES_DIR,
+) -> dict:
+    """The public test-results snapshot. Pure apart from reading the ground truth."""
+    runs = results.get("runs", {})
+    explains = results.get("explain", {})
+    entries = []
+    for stem in drawings:
+        truth = load_ground_truth(stem, samples_dir)
+        features = drawing_features(stem, truth)
+        public_runs = {p: _public_run(runs.get(run_key(stem, p))) for p in providers}
+        entries.append({
+            "stem": stem,
+            "title": (truth.get("title_block") or {}).get("title"),
+            "part_type": features.pop("part_type"),
+            "features": features,
+            "seeded_errors": _caught_by(truth.get("seeded_errors", []), public_runs),
+            "thumb": f"eval/thumbs/{stem}.png",
+            "sheet": f"eval/sheets/{stem}.png",
+            "pdf": f"eval/pdfs/{stem}.pdf",
+            "runs": public_runs,
+            "explain": {p: _public_explain(explains.get(run_key(stem, p))) for p in providers},
+        })
+
+    model_totals = {}
+    for provider in providers:
+        t = totals(runs, drawings, provider)
+        scored = [e["explain"][provider] for e in entries
+                  if e["explain"][provider]["status"] == "ok"
+                  and e["explain"][provider]["part_type_correct"] is not None]
+        model_totals[provider] = {
+            "label": PROVIDER_LABELS.get(provider, provider),
+            "runs_ok": t["ok"],
+            "errors_caught": t["errors_caught"],
+            "errors_expected": t["errors_expected"],
+            "false_alarms": t["false_alarms"],
+            "fixes_verified": t["fixes_verified"],
+            "errors_before": t["errors_before"],
+            "fallbacks": t["fallbacks"],
+            "latency_s": t["latency_s"],
+            "part_types_recognized": sum(1 for e in scored if e["part_type_correct"]),
+            "part_types_scored": len(scored),
+        }
+
+    return {
+        "schema": SNAPSHOT_SCHEMA,
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "method": METHOD_NOTE,
+        "providers": [{"id": p, "label": PROVIDER_LABELS.get(p, p)} for p in providers],
+        "suite": {
+            "drawings": len(entries),
+            "part_types": len({e["part_type"] for e in entries}),
+            "views": sum(e["features"]["views"] for e in entries),
+            "gdt_frames": sum(sum(e["features"]["gdt_frames"].values()) for e in entries),
+            "seeded_errors": sum(len(e["seeded_errors"]) for e in entries),
+        },
+        "totals": model_totals,
+        "drawings": entries,
+    }
+
+
+def write_snapshot(
+    results: dict,
+    drawings: list[str],
+    providers: list[str],
+    out_dir: Path = SNAPSHOT_DIR,
+    samples_dir: Path = SAMPLES_DIR,
+) -> Path:
+    """Write the snapshot JSON, each drawing's thumbnail and larger image, and its PDF."""
+    snapshot = build_snapshot(results, drawings, providers, samples_dir)
+    for folder in ("thumbs", "sheets", "pdfs"):
+        (out_dir / folder).mkdir(parents=True, exist_ok=True)
+    for stem in drawings:
+        pdf = samples_dir / f"{stem}.pdf"
+        for folder, side in (("thumbs", THUMB_SIDE), ("sheets", SHEET_SIDE)):
+            page = load_pages(pdf, dpi=200, max_side=side, max_pages=1)[0]
+            (out_dir / folder / f"{stem}.png").write_bytes(page.png_bytes)
+        (out_dir / "pdfs" / f"{stem}.pdf").write_bytes(pdf.read_bytes())
+    path = out_dir / "results.json"
+    path.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the DraftCheck evaluation suite.")
     parser.add_argument("--drawings", nargs="+", default=list(DRAWINGS), choices=DRAWINGS)
@@ -860,7 +1068,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also run and score the 'About this drawing' explanation (one more call each)",
     )
+    parser.add_argument(
+        "--snapshot-only",
+        action="store_true",
+        help="only rebuild the web app's snapshot from the results file (no model calls; "
+        "docs/EVAL.md is left alone)",
+    )
+    parser.add_argument("--snapshot", type=Path, default=SNAPSHOT_DIR)
     args = parser.parse_args(argv)
+
+    if args.snapshot_only:
+        results = load_results(args.results)
+        refresh_features(results, DRAWINGS)
+        path = write_snapshot(results, list(DRAWINGS), list(SUPPORTED_PROVIDERS), args.snapshot)
+        print(f"snapshot: {path}")
+        return 0
 
     results = run_eval(
         args.drawings, args.providers, results_path=args.results, force=args.force,
@@ -874,8 +1096,10 @@ def main(argv: list[str] | None = None) -> int:
     args.summary.write_text(
         summary_markdown(results, list(DRAWINGS), list(SUPPORTED_PROVIDERS)), encoding="utf-8"
     )
+    snapshot = write_snapshot(results, list(DRAWINGS), list(SUPPORTED_PROVIDERS), args.snapshot)
     print(f"results: {args.results}")
     print(f"summary: {args.summary}")
+    print(f"snapshot: {snapshot}")
     return 0
 
 

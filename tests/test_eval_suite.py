@@ -567,7 +567,8 @@ def test_the_explain_flag_reaches_run_eval(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(run_eval, "run_eval", fake_run_eval)
     code = run_eval.main(["--explain", "--drawings", "plate_clean", "--providers", "baseten",
                           "--results", str(tmp_path / "r.json"),
-                          "--summary", str(tmp_path / "EVAL.md")])
+                          "--summary", str(tmp_path / "EVAL.md"),
+                          "--snapshot", str(tmp_path / "snapshot")])
     assert code == 0 and seen["explain"] is True
     saved = json.loads((tmp_path / "r.json").read_text())
     assert set(saved["drawing_features"]) == set(DRAWINGS)
