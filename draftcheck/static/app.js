@@ -33,6 +33,7 @@ const $ = (id) => document.getElementById(id);
 
 const fileInput = $("file");
 const providerSelect = $("provider");
+const crossCheckBox = $("cross-check");
 const uploadButton = $("upload-button");
 const sampleButtons = Array.from(document.querySelectorAll(".js-sample"));
 
@@ -72,6 +73,7 @@ const parseIssuesBox = $("parse-issues");
 const parseIssuesList = $("parse-issues-list");
 const metaFallback = $("meta-fallback");
 const confidenceSummary = $("confidence-summary");
+const crossCheckSummary = $("crosscheck-summary");
 const resetButton = $("reset");
 const addDatumButton = $("add-datum");
 
@@ -151,6 +153,8 @@ const state = {
   run: null,
   /** Which provider the run was read with, for the pill while fixing. */
   provider: null,
+  /** The cross-check's outcome from the upload reply: status, summary, disagreements. */
+  crossCheck: null,
   /** The file on the desk, and where it came from: "uploaded", "sample", or "demo". */
   file: null,
   /** The file being read right now, shown in place of `file` until the read lands. */
@@ -644,6 +648,7 @@ function updateUI() {
     button.disabled = busy;
   }
   providerSelect.disabled = busy;
+  crossCheckBox.disabled = busy;
 
   // Panel: what each tab has to show.
   const hasRun = Boolean(state.runId) && !reading;
@@ -779,6 +784,7 @@ function buildOverlay(items) {
       continue;
     }
     const box = Sheet.el("g", { class: item.unsure ? "obox is-unsure" : "obox" });
+    box.classList.toggle("is-disagree", Boolean(item.disagree));
     // Hidden until the final sweep passes it, on a run that has just been read.
     box.classList.toggle("is-pending", state.revealPending);
     box.dataset.itemId = item.id;
@@ -1267,6 +1273,117 @@ function renderConfidenceSummary() {
   confidenceSummary.replaceChildren(button);
 }
 
+/* ---- Cross-check --------------------------------------------------------- */
+
+/*
+ * With cross-check on, a second Meta model read the same page and the server compared
+ * the two readings in Python. A cell the models read differently gets a "⇄" marker whose
+ * tooltip gives both readings; a row only the first model read says so; the item's box
+ * on the drawing is dashed. Like low confidence, this is a hint for the reviewer — the
+ * rules run on the table values and never on the cross-check.
+ */
+
+/** The marker on a cell the two models read differently. Not the amber of low confidence. */
+const DISAGREE_MARK = "⇄";
+const ONE_SIDED_TEXT = "only one model read this";
+
+/** Disagreement notes by "item:field", and the ids with any; rebuilt by `renderTables`. */
+let crossNotes = new Map();
+let disagreeIds = new Set();
+let oneSidedIds = new Set();
+
+function crossCheckResult() {
+  return state.crossCheck && state.crossCheck.status === "done" ? state.crossCheck : null;
+}
+
+function indexCrossCheck() {
+  crossNotes = new Map();
+  disagreeIds = new Set();
+  oneSidedIds = new Set();
+  const result = crossCheckResult();
+  if (!result) {
+    return;
+  }
+  for (const item of result.disagreements || []) {
+    crossNotes.set(`${item.item_id}:${item.field}`, item.note);
+    disagreeIds.add(item.item_id);
+  }
+  for (const item of result.only_primary || []) {
+    oneSidedIds.add(item.item_id);
+  }
+}
+
+/** Mark `cell` if the models disagree on any of `fields` of item `id`. Returns the cell. */
+function markCrossCheck(cell, id, fields) {
+  const notes = fields.map((field) => crossNotes.get(`${id}:${field}`)).filter(Boolean);
+  cell.classList.toggle("is-disagree", notes.length > 0);
+  if (notes.length > 0) {
+    const mark = document.createElement("span");
+    mark.className = "xcheck";
+    mark.textContent = DISAGREE_MARK;
+    mark.title = notes.join(" ");
+    mark.setAttribute("aria-label", `The two models disagree. ${notes.join(" ")}`);
+    cell.appendChild(mark);
+  }
+  return cell;
+}
+
+function oneSidedMarker(id) {
+  if (!id || !oneSidedIds.has(id)) {
+    return null;
+  }
+  const mark = document.createElement("span");
+  mark.className = "xcheck-only";
+  mark.textContent = ONE_SIDED_TEXT;
+  mark.title = "Muse Spark Open read this item; the cross-check model did not find it.";
+  return mark;
+}
+
+/** Where a disagreement about the whole drawing is shown, by field. */
+const DRAWING_CELLS = { units: "v-units", general_tolerance: "v-gentol" };
+
+function goToFirstDisagreement() {
+  const result = crossCheckResult();
+  const first = result && (result.disagreements || [])[0];
+  if (!first) {
+    return;
+  }
+  const pair = linked.get(first.item_id);
+  if (pair && pair.row) {
+    pick([first.item_id], pair.row);
+    return;
+  }
+  const cell = $(DRAWING_CELLS[first.field] || "v-units");
+  if (cell) {
+    cell.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+}
+
+function renderCrossCheckSummary() {
+  const outcome = state.crossCheck;
+  if (!outcome) {
+    crossCheckSummary.hidden = true;
+    crossCheckSummary.replaceChildren();
+    return;
+  }
+  crossCheckSummary.hidden = false;
+  const flagged = outcome.status === "done" && (outcome.disagreements || []).length > 0;
+  if (flagged) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "crosscheck-link";
+    button.textContent = `${DISAGREE_MARK} ${outcome.summary}`;
+    button.title = "Show the first value the two models read differently";
+    button.addEventListener("click", goToFirstDisagreement);
+    crossCheckSummary.className = "crosscheck-summary is-flagged";
+    crossCheckSummary.replaceChildren(button);
+    return;
+  }
+  const quiet = outcome.status !== "done";
+  crossCheckSummary.className = `crosscheck-summary ${quiet ? "is-quiet" : "is-clear"}`;
+  crossCheckSummary.replaceChildren(outcome.summary);
+}
+
 /* ---- Column headers, each with a plain-language tip ---------------------- */
 
 /*
@@ -1439,6 +1556,11 @@ function fillTable(tbodyId, rows, columns, emptyMessage) {
     for (const cell of cells) {
       row.appendChild(cell);
     }
+    const oneSided = oneSidedMarker(id);
+    if (oneSided) {
+      row.classList.add("is-one-sided");
+      cells[0].appendChild(oneSided);
+    }
     if (marker) {
       row.classList.add("is-unsure");
       cells[0].appendChild(marker);
@@ -1476,6 +1598,7 @@ function renderHeader() {
     shown: text(original.units),
     cell: $("v-units"),
   });
+  markCrossCheck($("v-units"), "drawing", ["units"]);
 
   if (!working.general_tolerance) {
     working.general_tolerance = { linear_plus_minus: null, text_raw: null };
@@ -1487,6 +1610,7 @@ function renderHeader() {
     cell: $("v-gentol"),
     label: "General tolerance",
   });
+  markCrossCheck($("v-gentol"), "drawing", ["general_tolerance"]);
 
   $("v-gentol-raw").textContent = text(originalTolerance.text_raw);
 }
@@ -1529,7 +1653,13 @@ function renderDatums() {
 
     return {
       id: datum.id,
-      cells: [idCell(datum.id), labelCell, zoneCell(datum), confidenceCell(datum), removeCell],
+      cells: [
+        idCell(datum.id),
+        markCrossCheck(labelCell, datum.id, ["label"]),
+        zoneCell(datum),
+        confidenceCell(datum),
+        removeCell,
+      ],
       marker: unsureMarker(datum),
     };
   });
@@ -1558,18 +1688,30 @@ function renderDimensions() {
       cells: [
         idCell(id),
         textCell(text(dimension.text_raw), "mono"),
-        numberCell(dimension, "value", was.value ?? null, { required: true, label: `Value, ${id}` }),
-        numberCell(dimension, "tol_plus", was.tol_plus ?? null, {
-          required: false,
-          min: 0,
-          label: `Plus tolerance, ${id}`,
-        }),
-        numberCell(dimension, "tol_minus", was.tol_minus ?? null, {
-          required: false,
-          min: 0,
-          label: `Minus tolerance, ${id}`,
-        }),
-        editCell(basic, {
+        markCrossCheck(
+          numberCell(dimension, "value", was.value ?? null, { required: true, label: `Value, ${id}` }),
+          id,
+          ["value"],
+        ),
+        markCrossCheck(
+          numberCell(dimension, "tol_plus", was.tol_plus ?? null, {
+            required: false,
+            min: 0,
+            label: `Plus tolerance, ${id}`,
+          }),
+          id,
+          ["tol_plus"],
+        ),
+        markCrossCheck(
+          numberCell(dimension, "tol_minus", was.tol_minus ?? null, {
+            required: false,
+            min: 0,
+            label: `Minus tolerance, ${id}`,
+          }),
+          id,
+          ["tol_minus"],
+        ),
+        markCrossCheck(editCell(basic, {
           read: () => ({ ok: true, value: basic.checked }),
           apply: (value) => {
             dimension.is_basic = value;
@@ -1577,8 +1719,8 @@ function renderDimensions() {
           was: Boolean(was.is_basic),
           shown: was.is_basic ? "yes" : "no",
           mono: false,
-        }),
-        textCell(fromTo(dimension), "mono"),
+        }), id, ["is_basic"]),
+        markCrossCheck(textCell(fromTo(dimension), "mono"), id, ["from_ref", "to_ref"]),
         zoneCell(dimension),
         confidenceCell(dimension),
       ],
@@ -1613,21 +1755,25 @@ function renderFcfs() {
       marker: unsureMarker(fcf),
       cells: [
         idCell(id),
-        textCell(text(fcf.characteristic)),
-        numberCell(fcf, "tolerance", was.tolerance ?? null, {
-          required: true,
-          min: 0,
-          label: `Tolerance, ${id}`,
-        }),
-        editCell(modifier, {
+        markCrossCheck(textCell(text(fcf.characteristic)), id, ["characteristic"]),
+        markCrossCheck(
+          numberCell(fcf, "tolerance", was.tolerance ?? null, {
+            required: true,
+            min: 0,
+            label: `Tolerance, ${id}`,
+          }),
+          id,
+          ["tolerance"],
+        ),
+        markCrossCheck(editCell(modifier, {
           read: () => ({ ok: true, value: modifier.value || null }),
           apply: (value) => {
             fcf.material_modifier = value;
           },
           was: was.material_modifier || null,
           shown: text(was.material_modifier),
-        }),
-        editCell(refs, {
+        }), id, ["material_modifier"]),
+        markCrossCheck(editCell(refs, {
           read: () => {
             const parsed = parseDatumRefs(refs.value);
             return {
@@ -1642,7 +1788,7 @@ function renderFcfs() {
           was: was.datum_refs || [],
           shown: datumRefsText(was.datum_refs) || EM_DASH,
           same: (a, b) => datumRefsText(a) === datumRefsText(b),
-        }),
+        }), id, ["datum_refs"]),
         zoneCell(fcf),
         confidenceCell(fcf),
       ],
@@ -1657,6 +1803,7 @@ function renderFcfs() {
 function renderTables() {
   invalidInputs.clear();
   unsureIds = [];
+  indexCrossCheck();
 
   buildOverlay([
     ...(state.working.datums || []).map((datum) => ({
@@ -1664,18 +1811,21 @@ function renderTables() {
       bbox: datum.bbox,
       title: `Datum ${text(datum.label)}`,
       unsure: isUnsure(datum),
+      disagree: disagreeIds.has(datum.id),
     })),
     ...(state.working.dimensions || []).map((dimension) => ({
       id: dimension.id,
       bbox: dimension.bbox,
       title: `Dimension ${text(dimension.text_raw)}`,
       unsure: isUnsure(dimension),
+      disagree: disagreeIds.has(dimension.id),
     })),
     ...(state.working.fcfs || []).map((fcf) => ({
       id: fcf.id,
       bbox: fcf.bbox,
       title: `Frame ${text(fcf.characteristic)}`,
       unsure: isUnsure(fcf),
+      disagree: disagreeIds.has(fcf.id),
     })),
   ]);
 
@@ -1684,6 +1834,7 @@ function renderTables() {
   renderDimensions();
   renderFcfs();
   renderConfidenceSummary();
+  renderCrossCheckSummary();
 }
 
 /* ---- Findings ------------------------------------------------------------ */
@@ -2606,6 +2757,8 @@ function render(run, file) {
   state.working = clone(drawing);
   state.answered = { prefix: "Read by", model: run.model, fellBack: Boolean(run.fell_back) };
   state.fake = Boolean(run.fake_model);
+  // The second model's reading, compared on the server. Absent on the demo run.
+  state.crossCheck = run.cross_check || null;
   clearFindings();
   // A fresh reading: its boxes wait for the final sweep, and they start out shown.
   state.revealPending = true;
@@ -2678,6 +2831,7 @@ async function startRun(file, source) {
   const body = new FormData();
   body.append("file", file);
   body.append("provider", providerSelect.value);
+  body.append("cross_check", crossCheckBox.checked ? "1" : "0");
   const provider = providerSelect.value;
 
   const controller = new AbortController();

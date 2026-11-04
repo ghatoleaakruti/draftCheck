@@ -221,3 +221,64 @@ def test_page_scripts_parse(name: str) -> None:
         [node, "--check", str(STATIC_DIR / name)], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr
+
+
+# ---- Two-model cross-check -------------------------------------------------------------
+
+
+def test_the_cross_check_checkbox_sits_beside_the_model_selector_and_is_on() -> None:
+    index = read_index()
+    selector = index.index('id="provider"')
+    checkbox = index.index('id="cross-check"')
+    actions_end = index.index("</div>", index.index('class="desk-actions"'))
+    assert selector < checkbox, "the checkbox comes after the model selector"
+    tag = index[index.rfind("<input", 0, checkbox) : index.index("/>", checkbox)]
+    assert "checked" in tag and 'type="checkbox"' in tag
+    assert "Cross-check with a second Meta model" in index
+    # Its one-line description says what it does and what it costs.
+    note = index[index.index('id="cross-check-note"') :]
+    note = note[: note.index("</p>")]
+    assert "extra model call" in note
+    assert checkbox < actions_end, "the checkbox is in the desk bar's actions"
+
+
+def test_the_page_sends_the_checkbox_with_the_upload() -> None:
+    source = read_app_js()
+    assert '$("cross-check")' in source
+    assert 'body.append("cross_check", crossCheckBox.checked ? "1" : "0")' in source
+
+
+def test_disagreements_get_their_own_marker_not_the_confidence_style() -> None:
+    source = read_app_js()
+    assert 'const DISAGREE_MARK = "⇄";' in source
+    assert 'mark.className = "xcheck";' in source
+    # The tooltip is the server's note: "Muse Spark Open read X; Muse Spark read Y."
+    assert "mark.title = notes.join" in source
+    css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+    rule = css[css.index(".xcheck {") :]
+    rule = rule[: rule.index("}")]
+    assert "var(--xcheck)" in rule
+    assert "amber" not in rule and "warn" not in rule
+
+
+def test_rows_only_one_model_read_say_so() -> None:
+    source = read_app_js()
+    assert 'const ONE_SIDED_TEXT = "only one model read this";' in source
+    assert "oneSidedMarker(id)" in source
+
+
+def test_disagreeing_boxes_are_dashed_in_their_own_colour() -> None:
+    css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+    rule = css[css.index(".obox.is-disagree .obox-frame {") :]
+    rule = rule[: rule.index("}")]
+    assert "stroke-dasharray" in rule
+    assert "var(--xcheck)" in rule
+    assert 'box.classList.toggle("is-disagree", Boolean(item.disagree));' in read_app_js()
+
+
+def test_the_summary_line_jumps_to_the_first_disagreement() -> None:
+    index = read_index()
+    assert 'id="crosscheck-summary"' in index
+    source = read_app_js()
+    assert '$("crosscheck-summary")' in source
+    assert 'button.addEventListener("click", goToFirstDisagreement);' in source

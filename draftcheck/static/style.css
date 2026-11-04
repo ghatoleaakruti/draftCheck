@@ -53,6 +53,9 @@
   --ok-soft: #ddf1e5;
   --warn: #9c6300;
   --warn-soft: #faeed3;
+  /* Cross-check disagreements: violet, so they never read as low confidence (amber). */
+  --xcheck: #6d3fd1;
+  --xcheck-soft: #efe8fd;
 
   --font-ui: "Archivo", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -83,6 +86,8 @@
     --ok-soft: #13301f;
     --warn: #e3a83c;
     --warn-soft: #33270f;
+    --xcheck: #b597ff;
+    --xcheck-soft: #2a2140;
     color-scheme: dark;
   }
 }
@@ -453,6 +458,39 @@ button:disabled {
   opacity: 0.5;
 }
 
+/* The cross-check toggle and its one-line description, on the desk bar. */
+.crosscheck {
+  display: grid;
+  gap: 1px;
+  max-width: 300px;
+}
+
+.crosscheck-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--desk-ink);
+  font-size: 12.5px;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.crosscheck-toggle input {
+  margin: 0;
+  accent-color: var(--blue-desk);
+}
+
+.crosscheck-toggle:has(input:disabled) {
+  opacity: 0.5;
+}
+
+.crosscheck-note {
+  margin: 0;
+  color: var(--desk-ink-2);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
 /* Stage: the drawing, or the drop zone */
 
 .stage {
@@ -599,6 +637,18 @@ button:disabled {
 
 .obox.is-unsure .obox-tag {
   fill: var(--pen-amber);
+}
+
+/* The two models read this item differently: a long violet dash, unlike the amber of
+   low confidence. Listed after it so a box that is both shows the disagreement. */
+.obox.is-disagree .obox-frame {
+  stroke: var(--xcheck);
+  stroke-dasharray: calc(var(--u) * 7px) calc(var(--u) * 3px);
+  stroke-width: calc(var(--u) * 1.6px);
+}
+
+.obox.is-disagree .obox-tag {
+  fill: var(--xcheck);
 }
 
 .obox.is-hot .obox-frame,
@@ -1036,6 +1086,55 @@ button:disabled {
 
 .confidence-summary.is-clear {
   color: var(--ok);
+}
+
+.crosscheck-summary {
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.crosscheck-summary.is-clear {
+  color: var(--ok);
+}
+
+.crosscheck-summary.is-quiet {
+  color: var(--ink-2);
+}
+
+.crosscheck-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--xcheck);
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+/* A cell the two models read differently, and its marker. */
+table.data td.is-disagree {
+  background: var(--xcheck-soft);
+  /* The marker stays beside the value rather than wrapping under it. */
+  white-space: nowrap;
+}
+
+.xcheck {
+  margin-left: 4px;
+  color: var(--xcheck);
+  font-family: var(--font-ui);
+  font-weight: 800;
+  cursor: help;
+}
+
+.xcheck-only {
+  display: block;
+  margin-top: 1px;
+  color: var(--xcheck);
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .confidence-link {

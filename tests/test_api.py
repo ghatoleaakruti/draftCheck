@@ -24,10 +24,12 @@ from fastapi.testclient import TestClient
 from openai import APIConnectionError, BadRequestError, InternalServerError
 
 from draftcheck.api import (
+    DEFAULT_CROSSCHECK_GRACE_S,
     DEFAULT_MAX_SIDE,
     DEFAULT_MODEL_TIMEOUT_S,
     DEFAULT_RENDER_DPI,
     DEMO_ENV_VAR,
+    ENV_CROSSCHECK_GRACE,
     ENV_FALLBACK_PROVIDER,
     ENV_MAX_SIDE,
     ENV_MODEL_TIMEOUT,
@@ -38,11 +40,14 @@ from draftcheck.api import (
     FallbackPolicy,
     GuardedClient,
     app,
+    cross_check_grace_s,
     fake_model_is_allowed,
     fallback_policy,
     finding_payload,
     get_cleaner,
     get_client_factory,
+    get_cross_check_factory,
+    get_cross_check_grace,
     get_disconnect_probe,
     get_fallback_policy,
     get_limiter,
@@ -53,12 +58,17 @@ from draftcheck.api import (
     stamp_model_name,
 )
 from draftcheck.config import ConfigError
-from draftcheck.fake_model import FAKE_MODEL_NAME, fake_client_factory
+from draftcheck.fake_model import (
+    FAKE_CROSS_CHECK_MODEL_NAME,
+    FAKE_MODEL_NAME,
+    fake_client_factory,
+)
 from draftcheck.limits import LIMIT_MESSAGE, Cleaner, Limits, UsageLimiter
 from draftcheck.llm_client import MODEL_TIMEOUT_MESSAGE, JSONChatResult, ModelCancelled, Usage
+from draftcheck.pipeline import check
 from draftcheck.prompts import EXTRACTION_SYSTEM
 from draftcheck.rules import RULES
-from draftcheck.schema import Finding
+from draftcheck.schema import Finding, parse_drawing
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DRAWING = REPO_ROOT / "samples" / "generated" / "plate_001.pdf"
@@ -352,6 +362,7 @@ def test_meta_json_never_holds_a_key(client: TestClient, tmp_path):
         "fallback_reason",
         "latency_s",
         "attempts",
+        "cross_check",
         "created",
     }
     assert "key" not in json.dumps(meta).lower()
@@ -1884,3 +1895,203 @@ def test_fix_puts_the_after_fixes_checks_on_the_redline(client: TestClient, monk
     client.post(f"/api/runs/{run_id}/fix")
 
     assert [r.rule_id for r in seen["final_rule_results"]] == [rule.id for rule in RULES]
+
+
+# ---- Two-model cross-check -------------------------------------------------------------
+
+
+def cross_extraction(dim_5_value: float = 35) -> dict:
+    """The fixture as a second model might read it: dim_5 as 35 instead of 30."""
+    data = extraction_data()
+    for dimension in data["dimensions"]:
+        if dimension["id"] == "dim_5":
+            dimension["value"] = dim_5_value
+    return data
+
+
+@pytest.fixture
+def crosschecking(tmp_path: Path):
+    """A TestClient with scripted Baseten, a scripted Meta fallback, and a scripted
+    cross-check — three separate fakes, so each test can say which one was asked what."""
+    made: dict = {}
+
+    def build(baseten_script=(), cross_script=(), grace_s=5.0, cross_data=None, probe=None):
+        made["baseten"] = ScriptedProvider("baseten", BASETEN_MODEL, *baseten_script)
+        made["meta"] = ScriptedProvider("meta", META_MODEL)
+        made["cross"] = ScriptedProvider("meta", META_MODEL, *cross_script)
+        made["cross"].extraction = cross_data if cross_data is not None else cross_extraction()
+        limiter = UsageLimiter(ROOMY)
+
+        def factory(provider=None):
+            return made[provider or "baseten"]
+
+        app.dependency_overrides[get_fallback_policy] = lambda: FallbackPolicy(
+            provider="meta", primary_timeout_s=SHORT_LIMIT_S
+        )
+        app.dependency_overrides[get_model_timeout] = lambda: 5.0
+        app.dependency_overrides[get_cross_check_grace] = lambda: grace_s
+        test_client = make_client(tmp_path, FakeClient(extraction_data()), limiter, Cleaner(ROOMY))
+        app.dependency_overrides[get_client_factory] = lambda: factory
+        app.dependency_overrides[get_cross_check_factory] = lambda: (
+            lambda provider=None: made["cross"]
+        )
+        if probe is not None:
+            app.dependency_overrides[get_disconnect_probe] = lambda: probe(made)
+        return test_client, made, limiter
+
+    yield build
+    for fake in made.values():
+        fake.aborted.set()
+    app.dependency_overrides.clear()
+
+
+def test_a_cross_check_reports_where_the_two_models_disagree(crosschecking, tmp_path) -> None:
+    test_client, made, limiter = crosschecking()
+    with test_client:
+        body = upload(test_client, cross_check="1")
+
+    outcome = body["cross_check"]
+    assert outcome["status"] == "done"
+    assert outcome["model"] == META_MODEL
+    assert [(d["item_id"], d["field"]) for d in outcome["disagreements"]] == [("dim_5", "value")]
+    assert outcome["disagreements"][0]["note"] == "Muse Spark Open read 30; Muse Spark read 35."
+    assert outcome["values_agreeing"] == outcome["values_compared"] - 1
+    assert outcome["summary"] == "Both Meta models agree on 43 of 44 values; 1 to double-check"
+    # The tables are the primary reading, untouched by the second one.
+    assert body["model"] == BASETEN_MODEL
+    dim_5 = next(d for d in body["drawing"]["dimensions"] if d["id"] == "dim_5")
+    assert dim_5["value"] == 30
+    meta = json.loads((tmp_path / body["run_id"] / "meta.json").read_text())
+    assert meta["cross_check"] == outcome
+    assert made["cross"].attempted == 1
+    # The upload's own call plus the cross-check.
+    assert limiter.model_calls_today() == 2
+
+
+def test_the_rules_ignore_the_cross_check(crosschecking) -> None:
+    test_client, _, _ = crosschecking()
+    with test_client:
+        body = upload(test_client, cross_check="1")
+        checked = test_client.post(f"/api/runs/{body['run_id']}/check", json=body["drawing"])
+    # Exactly the findings of the primary reading on its own, disagreement or not.
+    plain = [finding.rule_id for finding in check(parse_drawing(extraction_data()))]
+    assert rule_ids(checked.json()["findings"]) == plain
+
+
+def test_the_cross_check_is_off_unless_asked_for(crosschecking) -> None:
+    test_client, made, limiter = crosschecking()
+    with test_client:
+        body = upload(test_client)
+    assert body["cross_check"]["status"] == "off"
+    assert body["cross_check"]["summary"] == "Cross-check off."
+    assert made["cross"].attempted == 0
+    assert limiter.model_calls_today() == 1
+
+
+def test_picking_meta_as_the_reader_skips_the_cross_check(crosschecking) -> None:
+    test_client, made, limiter = crosschecking()
+    with test_client:
+        body = upload(test_client, provider="meta", cross_check="1")
+    assert body["cross_check"]["status"] == "skipped"
+    assert body["cross_check"]["summary"].startswith("Cross-check skipped: ")
+    assert made["cross"].attempted == 0
+    assert limiter.model_calls_today() == 1
+
+
+def test_a_primary_that_fell_back_skips_the_cross_check(crosschecking) -> None:
+    test_client, made, limiter = crosschecking(baseten_script=["hang"], cross_script=["hang"])
+    with test_client:
+        body = upload(test_client, cross_check="1")
+
+    assert body["fell_back"] is True
+    outcome = body["cross_check"]
+    assert outcome["status"] == "skipped"
+    assert "same model" in outcome["reason"]
+    assert outcome["disagreements"] == []
+    assert made["cross"].aborted.is_set(), "the second call was left running"
+    # Baseten, the fallback to Meta, and the cross-check that had already been sent.
+    assert limiter.model_calls_today() == 3
+
+
+def test_a_cross_check_past_the_grace_period_is_dropped(crosschecking) -> None:
+    test_client, made, limiter = crosschecking(cross_script=["hang"], grace_s=SHORT_LIMIT_S)
+    started = time.perf_counter()
+    with test_client:
+        body = upload(test_client, cross_check="1")
+
+    assert time.perf_counter() - started < 5  # ended by the grace period, not the fake
+    assert body["cross_check"]["status"] == "timeout"
+    assert body["cross_check"]["summary"] == "Cross-check didn't finish in time."
+    assert body["model"] == BASETEN_MODEL  # the primary reading is there as usual
+    assert made["cross"].aborted.is_set()
+    assert limiter.model_calls_today() == 2
+
+
+def test_a_failed_cross_check_leaves_the_primary_reading_alone(crosschecking) -> None:
+    test_client, made, limiter = crosschecking(cross_script=["5xx"])
+    with test_client:
+        body = upload(test_client, cross_check="1")
+    assert body["cross_check"]["status"] == "failed"
+    assert "HTTP 503" in body["cross_check"]["summary"]
+    assert body["drawing"]["dimensions"]
+    assert limiter.model_calls_today() == 2
+
+
+def test_cancel_aborts_both_model_calls(crosschecking, tmp_path: Path) -> None:
+    def gone_once_both_are_busy(made):
+        async def probe(request) -> bool:
+            return made["baseten"].in_call.is_set() and made["cross"].in_call.is_set()
+
+        return probe
+
+    test_client, made, limiter = crosschecking(
+        baseten_script=["hang"], cross_script=["hang"], probe=gone_once_both_are_busy
+    )
+    # Long enough that Baseten is still the one waiting when the browser leaves.
+    app.dependency_overrides[get_fallback_policy] = lambda: FallbackPolicy(
+        provider="meta", primary_timeout_s=5
+    )
+    started = time.perf_counter()
+    with test_client:
+        with DRAWING.open("rb") as handle:
+            response = test_client.post(
+                "/api/runs",
+                files={"file": (DRAWING.name, handle, "application/pdf")},
+                data={"cross_check": "1"},
+            )
+
+    assert response.status_code == 499
+    assert time.perf_counter() - started < 5
+    assert made["baseten"].aborted.is_set()
+    assert made["cross"].aborted.is_set()
+    assert list(tmp_path.iterdir()) == []
+    # Both calls were sent, so both are charged.
+    assert limiter.model_calls_today() == 2
+
+
+def test_fake_mode_cross_check_reads_one_value_differently(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv(FAKE_MODEL_ENV_VAR, "1")
+    monkeypatch.setattr("draftcheck.fake_model.FAKE_DELAY_S", 0)
+    app.dependency_overrides[get_limiter] = lambda: UsageLimiter(ROOMY)
+    app.dependency_overrides[get_cleaner] = lambda: Cleaner(ROOMY)
+    app.dependency_overrides[get_fallback_policy] = lambda: NO_FALLBACK
+    try:
+        with local_client(tmp_path) as client:
+            body = upload(client, provider="baseten", cross_check="1")
+    finally:
+        app.dependency_overrides.clear()
+    outcome = body["cross_check"]
+    assert outcome["status"] == "done"
+    assert outcome["model"] == FAKE_CROSS_CHECK_MODEL_NAME
+    assert [(d["item_id"], d["primary"], d["cross_check"]) for d in outcome["disagreements"]] == [
+        ("dim_5", 30, 35)
+    ]
+
+
+def test_cross_check_grace_defaults_to_twenty_seconds(monkeypatch) -> None:
+    monkeypatch.delenv(ENV_CROSSCHECK_GRACE, raising=False)
+    assert cross_check_grace_s() == DEFAULT_CROSSCHECK_GRACE_S == 20
+    monkeypatch.setenv(ENV_CROSSCHECK_GRACE, "7")
+    assert cross_check_grace_s() == 7
+    monkeypatch.setenv(ENV_CROSSCHECK_GRACE, "soon")
+    assert cross_check_grace_s() == 20

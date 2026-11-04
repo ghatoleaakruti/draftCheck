@@ -56,8 +56,18 @@ from starlette.concurrency import run_in_threadpool
 
 from draftcheck.agent import CorrectionReport, RoundRecord, correct
 from draftcheck.config import DEFAULT_PROVIDER, SUPPORTED_PROVIDERS, ConfigError, get_provider
+from draftcheck.crosscheck import (
+    SKIP_PRIMARY_FELL_BACK,
+    SKIP_PRIMARY_IS_CROSS,
+    compare,
+    outcome_done,
+    outcome_failed,
+    outcome_off,
+    outcome_skipped,
+    outcome_timeout,
+)
 from draftcheck.edits import Edit, RejectedEdit, apply_edits, parse_edit
-from draftcheck.fake_model import fake_client_factory
+from draftcheck.fake_model import fake_client_factory, fake_cross_check_factory
 from draftcheck.limits import Cleaner, LimitExceeded, Limits, UsageLimiter, client_ip
 from draftcheck.llm_client import (
     MODEL_TIMEOUT_MESSAGE,
@@ -181,6 +191,28 @@ def get_model_timeout() -> float:
     return model_timeout_s()
 
 
+#: How long the upload waits for the cross-check once the primary reading is back. The
+#: second reading started at the same moment, so it is usually done by then; when it is
+#: not, the upload goes on without it rather than keep the person waiting.
+ENV_CROSSCHECK_GRACE = "DRAFTCHECK_CROSSCHECK_GRACE_SECONDS"
+DEFAULT_CROSSCHECK_GRACE_S = 20
+
+#: The provider the cross-check reads with, and the only primary it is run for: the point
+#: is two *different* Meta models reading the same sheet.
+CROSS_CHECK_PROVIDER = "meta"
+CROSS_CHECKS_FROM = "baseten"
+
+
+def cross_check_grace_s() -> float:
+    """Seconds to wait for the cross-check after the primary, read on every upload."""
+    return float(_positive_int_env(ENV_CROSSCHECK_GRACE, DEFAULT_CROSSCHECK_GRACE_S))
+
+
+def get_cross_check_grace() -> float:
+    """The grace period, as a dependency so tests can make it a fraction of a second."""
+    return cross_check_grace_s()
+
+
 #: The automatic fallback. Muse Spark Open on Baseten stays the default provider; when one
 #: of its calls stalls or the service is down, the same call is sent once to the provider
 #: named here instead. An empty value turns the fallback off.
@@ -300,6 +332,11 @@ class GuardedClient:
     @property
     def cancelled(self) -> bool:
         return self._cancelled.is_set()
+
+    @property
+    def provider(self) -> str | None:
+        """The provider this guard sends to first."""
+        return self._provider
 
     def abort(self) -> None:
         """Stop the call in flight, if any, and every call after it. Any thread.
@@ -511,10 +548,100 @@ class ClientGone(Exception):
     """The browser disconnected while the model was working, and the call was aborted."""
 
 
+class AbortGroup:
+    """Several guards aborted as one, for a request with more than one call in flight."""
+
+    def __init__(self, *guards: Any) -> None:
+        self._guards = [guard for guard in guards if guard is not None]
+
+    def abort(self) -> None:
+        for guard in self._guards:
+            guard.abort()
+
+
+class CrossCheckCall:
+    """The second reading of an upload, run on its own thread beside the primary one.
+
+    Started as soon as the page is rendered, so both models read at the same time and the
+    cross-check adds little or no waiting. Its outcome is collected by
+    :func:`settle_cross_check`; :meth:`abort` stops it, as Cancel stops the primary.
+    """
+
+    def __init__(self, guard: GuardedClient) -> None:
+        self.guard = guard
+        #: True once the call has been sent, which is when it costs a model call.
+        self.started = False
+        self.result: ExtractionResult | None = None
+        self.error: BaseException | None = None
+        self._done = threading.Event()
+
+    def start(self, png_bytes: bytes) -> None:
+        def run() -> None:
+            try:
+                self.result = extract_page(png_bytes, self.guard)
+            except BaseException as exc:  # noqa: BLE001 - reported by settle_cross_check
+                self.error = exc
+            finally:
+                self._done.set()
+
+        self.started = True
+        threading.Thread(target=run, name="cross-check", daemon=True).start()
+
+    def wait(self, seconds: float) -> bool:
+        """Wait up to ``seconds`` for the reading; True if it is done."""
+        return self._done.wait(seconds)
+
+    @property
+    def done(self) -> bool:
+        return self._done.is_set()
+
+    def abort(self) -> None:
+        self.guard.abort()
+
+
+def _cross_check_failure(exc: BaseException) -> str:
+    """Why the second reading failed, in the page's words. No body, no headers, no key."""
+    if isinstance(exc, ConfigError):
+        return "the second model is not set up on this server."
+    if isinstance(exc, JSONParseError | ValidationError):
+        return "the second model's reply could not be read."
+    if isinstance(exc, APIStatusError):
+        return f"the second model's provider refused the call (HTTP {exc.status_code})."
+    if isinstance(exc, APIConnectionError):
+        return "could not reach the second model."
+    if isinstance(exc, ModelCancelled):
+        return "it was cancelled."
+    return "the second model's call failed."
+
+
+def settle_cross_check(result: ExtractionResult, cross: CrossCheckCall, grace_s: float) -> dict:
+    """The cross-check's outcome once the primary reading is back.
+
+    A primary that fell back was answered by the cross-check's own model, so comparing
+    would compare the model with itself: the second call is stopped and the cross-check is
+    skipped. Otherwise it gets ``grace_s`` more seconds; if it is still not back, it is
+    stopped and the upload goes on without it. Only a reading that did come back is
+    compared — by :func:`crosscheck.compare`, in Python.
+    """
+    if result.fell_back:
+        cross.abort()
+        return outcome_skipped(SKIP_PRIMARY_FELL_BACK)
+    if not cross.wait(grace_s):
+        cross.abort()
+        logger.info("cross-check not back %.1f s after the primary; going on without it", grace_s)
+        return outcome_timeout()
+    if isinstance(cross.error, ModelTimeout):
+        return outcome_timeout()
+    if cross.error is not None or cross.result is None:
+        logger.info("cross-check failed (%s)", type(cross.error).__name__)
+        return outcome_failed(_cross_check_failure(cross.error))
+    return outcome_done(compare(result.drawing, cross.result.drawing), cross.result.model)
+
+
 async def _unless_disconnected(
     request: Request,
     probe: DisconnectProbe,
-    guard: GuardedClient,
+    guard: GuardedClient | AbortGroup,
     what: str,
     func: Callable[..., Any],
     *args: Any,
@@ -622,12 +749,32 @@ Cleanup = Annotated[Cleaner, Depends(get_cleaner)]
 Clients = Annotated[ClientFactory, Depends(get_client_factory)]
 ModelTimeoutS = Annotated[float, Depends(get_model_timeout)]
 FallbackSettings = Annotated[FallbackPolicy, Depends(get_fallback_policy)]
+CrossCheckGraceS = Annotated[float, Depends(get_cross_check_grace)]
 Disconnects = Annotated[DisconnectProbe, Depends(get_disconnect_probe)]
 DrawingUpload = Annotated[UploadFile, File(description="A .pdf, .png, or .jpg drawing.")]
 ProviderField = Annotated[
     str | None, Form(description="baseten or meta. Default: the LLM_PROVIDER setting.")
 ]
+CrossCheckField = Annotated[
+    bool,
+    Form(description="Also read the drawing with a second Meta model and compare. Default: off."),
+]
 DrawingBody = Annotated[dict, Body(description="The confirmed (possibly edited) drawing.")]
+
+
+def get_cross_check_factory(request: Request, client_factory: Clients) -> ClientFactory:
+    """Builds the cross-check's client: the request's own factory, or the cross-check fake.
+
+    It follows :func:`get_client_factory`, so a test that replaces the model replaces the
+    cross-check's too and nothing reaches the network. In fake-model mode the cross-check
+    gets its own fake, whose reading differs from the primary's by one value.
+    """
+    if fake_model_is_allowed(request):
+        return fake_cross_check_factory
+    return client_factory
+
+
+CrossCheckClients = Annotated[ClientFactory, Depends(get_cross_check_factory)]
 
 
 app = FastAPI(
@@ -743,12 +890,21 @@ def _checked_provider(provider: str | None) -> str | None:
     return name
 
 
-def _render_and_extract(source: Path, run_dir: Path, client: GuardedClient) -> ExtractionResult:
+def _render_and_extract(
+    source: Path,
+    run_dir: Path,
+    client: GuardedClient,
+    cross: CrossCheckCall | None = None,
+    grace_s: float = 0.0,
+) -> tuple[ExtractionResult, dict | None]:
     """The slow, blocking half of an upload: render page 1, save it, read it with the model.
 
     Plain synchronous code, run in a worker thread by :func:`create_run`. Rendered once:
-    the same PNG is saved for the browser and the correction loop, and sent to the model.
-    Only page 1 is rasterized, at the server's settings.
+    the same PNG is saved for the browser and the correction loop, and sent to the model —
+    to both models when there is a cross-check, which starts first so the two run side by
+    side. Only page 1 is rasterized, at the server's settings.
+
+    Returns the primary reading and the cross-check's outcome (``None`` without one).
     """
     dpi, max_side = render_settings()
     png_bytes = load_pages(source, dpi=dpi, max_side=max_side, max_pages=1)[0].png_bytes
@@ -761,9 +917,12 @@ def _render_and_extract(source: Path, run_dir: Path, client: GuardedClient) -> E
         memory_mb(),
     )
 
-    # The page is on disk now and the model call holds its own reference to the bytes, so
-    # this function's copy goes as soon as the call returns.
-    return extract_page(png_bytes, client)
+    if cross is not None:
+        cross.start(png_bytes)
+    # The page is on disk now and the model calls hold their own references to the bytes,
+    # so this function's copy goes as soon as they return.
+    result = extract_page(png_bytes, client)
+    return result, (settle_cross_check(result, cross, grace_s) if cross is not None else None)
 
 
 @app.post("/api/runs", status_code=201)
@@ -777,13 +936,20 @@ async def create_run(
     timeout_s: ModelTimeoutS,
     fallback: FallbackSettings,
     disconnected: Disconnects,
+    cross_factory: CrossCheckClients,
+    grace_s: CrossCheckGraceS,
     provider: ProviderField = None,
+    cross_check: CrossCheckField = False,
 ) -> dict:
     """Upload a drawing, render page 1, and read it with the model.
 
     The extraction comes back for the user to confirm or edit; nothing is checked yet. If
-    the browser goes away first (Cancel), the model call is aborted and the run folder is
+    the browser goes away first (Cancel), the model calls are aborted and the run folder is
     deleted: a cancelled upload leaves nothing behind.
+
+    With ``cross_check`` on and Baseten reading, Meta reads the same page at the same time
+    and the two readings are compared (:mod:`draftcheck.crosscheck`). The comparison is a
+    hint for the reviewer; the tables and the rules use the primary reading only.
     """
     logger.info("upload received (memory %.0f MB)", memory_mb())
     suffix = _checked_suffix(file.filename)
@@ -811,17 +977,45 @@ async def create_run(
         raise
 
     guard: GuardedClient | None = None
+    cross: CrossCheckCall | None = None
+    cross_outcome: dict | None = None
     try:
         client = client_factory(provider_name)
         guard = guard_for(client, provider_name, client_factory, timeout_s, fallback)
+        if not cross_check:
+            cross_outcome = outcome_off()
+        elif guard.provider != CROSS_CHECKS_FROM:
+            cross_outcome = outcome_skipped(SKIP_PRIMARY_IS_CROSS)
+        else:
+            try:
+                cross = CrossCheckCall(
+                    GuardedClient(
+                        cross_factory(CROSS_CHECK_PROVIDER),
+                        timeout_s,
+                        provider=CROSS_CHECK_PROVIDER,
+                    )
+                )
+            except ConfigError:
+                # No Meta key, say. The primary reading is unaffected; the page says why.
+                cross_outcome = outcome_failed(_cross_check_failure(ConfigError()))
         # This endpoint is async (it streams the upload), so anything slow called directly
         # here would stall the event loop — every other request, /healthz included, would
         # wait for the model. Render restarts an instance whose health check fails for 60 s,
         # so the render and the model call go to a worker thread and this coroutine waits,
         # watching for the browser to leave while it does.
-        result = await _unless_disconnected(
-            request, disconnected, guard, "upload", _render_and_extract, source, run_dir, guard
+        result, settled = await _unless_disconnected(
+            request,
+            disconnected,
+            AbortGroup(guard, cross),
+            "upload",
+            _render_and_extract,
+            source,
+            run_dir,
+            guard,
+            cross,
+            grace_s,
         )
+        cross_outcome = settled or cross_outcome
     except ClientGone:
         await run_in_threadpool(shutil.rmtree, run_dir, ignore_errors=True)
         raise HTTPException(status_code=CANCELLED_STATUS, detail="Cancelled by client.") from None
@@ -845,10 +1039,16 @@ async def create_run(
     except (APIStatusError, APIConnectionError) as exc:
         raise HTTPException(status_code=502, detail=_provider_error(exc)) from exc
     finally:
+        # Whatever happened, a cross-check still running is no longer wanted.
+        if cross is not None and not cross.done:
+            cross.abort()
         # The upload's claim paid for one call. A fallback was a second, whether or not it
-        # answered, so the day's budget is charged for it here on every way out.
-        if guard is not None:
-            limiter.record_model_calls(guard.fallback_calls)
+        # answered, and a cross-check that was sent is another; the day's budget is
+        # charged for both here on every way out.
+        extra = guard.fallback_calls if guard is not None else 0
+        if cross is not None and cross.started:
+            extra += 1
+        limiter.record_model_calls(extra)
 
     drawing = result.drawing.model_dump(mode="json")
     meta = {
@@ -859,6 +1059,7 @@ async def create_run(
         **_answered_by(result),
         "latency_s": result.latency_s,
         "attempts": result.attempts,
+        "cross_check": cross_outcome,
         "created": datetime.now(UTC).isoformat(),
     }
 
@@ -876,6 +1077,7 @@ async def create_run(
         "attempts": result.attempts,
         "page_url": f"/api/runs/{run_id}/page.png",
         "fake_model": is_fake(client),
+        "cross_check": cross_outcome,
     }
 
 

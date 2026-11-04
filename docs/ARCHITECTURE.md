@@ -1159,6 +1159,54 @@ of that run.
 `docs/EVAL.md` is regenerated from the results file at the end of every run, with one row
 per drawing and provider and a totals row per provider.
 
+### 4.19 Two-model cross-check — BUILT (step 23)
+
+**What it does.** With the page's "Cross-check with a second Meta model" box ticked (the
+default) and Muse Spark Open on Baseten reading, the upload sends the same page image and
+the same extraction prompts to Muse Spark on the Meta Model API at the same moment. The
+primary reading fills the tables exactly as before. Once it is back, the upload waits at
+most `DRAFTCHECK_CROSSCHECK_GRACE_SECONDS` (default 20) for the second reading; if that is
+not back either, its call is aborted and the page says "Cross-check didn't finish in time."
+
+**When it is skipped.** If the primary call fell back to Meta (§4.14), both readings would
+come from the same model, so the second call is aborted and the cross-check is reported as
+skipped with that reason. If the person picked Meta as the reader, there is no second model
+to ask, and it is skipped before anything is sent. The form field `cross_check` defaults to
+off, so a caller other than the page (and every older test) sees no change.
+
+**Comparing, in Python.** `draftcheck/crosscheck.py` pairs items between the readings in
+passes — dimensions by printed text, then value, then nearest box centre (within 5 % of the
+sheet); datums by label, then box; frames by characteristic and tolerance, then
+characteristic near by, then box — and compares only the fields the rules read: a
+dimension's value, tol_plus, tol_minus, is_basic, from_ref, to_ref; a frame's
+characteristic, tolerance, material modifier, and datum refs; a datum's label; and the
+drawing's units and general tolerance. It reports each disagreement (item id, field, both
+values, and the sentence "Muse Spark Open read 30; Muse Spark read 35."), the items only
+one model found, and how many values were compared and how many agree.
+
+**Disagreements are review hints, nothing more.** The rules never read the cross-check:
+they run on the confirmed tables, which start from the primary reading alone. A
+disagreement does not fail a check, does not change a finding, and does not change a value
+— it marks a cell for a person to look at, like low confidence (§4.11). Two models reading
+the same wrong value agree, and one model can be right where the other is wrong; only the
+reviewer, looking at the drawing, decides which value is correct.
+
+**Where it shows.** The upload reply and `meta.json` carry a `cross_check` block with a
+`status` (`done`, `off`, `skipped`, `timeout`, `failed`) and a `summary` line. The Extracted
+tab shows that line ("Both Meta models agree on 43 of 44 values; 1 to double-check");
+clicking it jumps to the first disagreement. Cells the models read differently get a violet
+"⇄" whose tooltip gives both readings; rows only Muse Spark Open read say "only one model
+read this"; and the item's box on the drawing gets a violet dashed outline — deliberately
+not the amber of low confidence.
+
+**Limits and cancel.** A cross-check that was sent counts as one extra model call against
+the day's budget, recorded on every way out of the upload, like a fallback. Cancel aborts
+both calls (`api.AbortGroup`), and a primary failure aborts the second call too.
+
+**Fake model.** In fake-model mode (§4.16) the cross-check gets its own fake, which returns
+the plate_001 fixture with `dim_5` read as 35 instead of 30, so the markers can be seen
+without a real model.
+
 ## 5. Repo layout (what exists today)
 
 ```
@@ -1174,6 +1222,7 @@ draftCheck/
 │   ├── agent.py                # BUILT  correction loop, max 3 rounds
 │   ├── cli.py                  # BUILT  python -m draftcheck.cli check <drawing> [--fix]
 │   ├── config.py               # BUILT
+│   ├── crosscheck.py           # BUILT  compares two models' readings (§4.19)
 │   ├── edits.py                # BUILT  the four allowed edit operations + their guards
 │   ├── limits.py               # BUILT  demo usage limits + run-folder cleanup
 │   ├── llm_client.py           # BUILT
@@ -1214,6 +1263,7 @@ draftCheck/
 │   ├── test_api.py
 │   ├── test_cli.py
 │   ├── test_config.py
+│   ├── test_crosscheck.py      # matching and comparing two readings
 │   ├── test_edit_display.py    # short before/after strings and pen labels
 │   ├── test_edits.py
 │   ├── test_eval_suite.py      # generator, ground-truth sanity, eval scoring (no network)
@@ -1280,6 +1330,7 @@ draftCheck/
 | 2026-10-30 | Demo limits are three separate budgets — 5 uploads and 10 fixes per IP per hour, 100 model calls per day across everyone — held in memory, with `X-Forwarded-For` believed only when `TRUST_PROXY=1`; run folders are swept after 24 hours at startup and at most hourly on upload | A free demo on one person's credits has two different failure modes, and one limit cannot cover both: a per-IP limit does nothing about a crowd, and a global cap alone lets one visitor spend everyone's day in a minute. Separating uploads from fixes matters because a fix is up to three model calls, so sharing one allowance would price them as if they were equal. The header is the client's to write, so trusting it by default would make every per-IP limit bypassable by sending a new address each time — the flag has to be a deliberate statement about what is actually in front of the process. In memory is honest about what this is: a single instance where a restart forgives everyone, and the alternative is a datastore a hackathon demo does not need. Cleanup rides on uploads because there is no scheduler and nothing to keep alive between requests, and a server nobody uploads to is not accumulating anything either |
 | 2026-11-03 | Every rule reports a pass / fail / not-applicable result with a sentence, but the sentence comes from a separate `describe` function that is told whether `check` failed, and `rule_results` raises if the two disagree | A list of findings cannot show what was checked and found fine, and a reviewer trusts a clean result more when it names the values it looked at. Keeping the verdict in `check` alone means adding words cannot move a pass/fail — the same principle that keeps the model out of the verdict keeps the wording out of it too |
 | 2026-11-03 | The eval matches findings to seeded errors by rule id, and counts a finding nobody seeded as a false alarm; the ground-truth sanity test matches by full finding key | The model names items its own way, so its keys never equal the ground truth's, but a rule id is what the user acts on. The stricter key match belongs to the sanity test, where both sides use ground-truth ids, and it is what proves each seeded error is caught on the right item before any model is scored |
+| 2026-11-03 | The cross-check compares two Meta models' readings in Python and only marks cells; the rules never use it | Two models agreeing is not proof and disagreeing is not an error — either could be the one that is right. A disagreement is worth a reviewer's glance, which is what it gets; letting it move a verdict would hand the decision back to the models |
 | 2026-10-30 | `render.load_pages` translates pypdfium2's and pillow's own errors into `RenderError`, rather than each caller catching the dependency's error class | Every caller — the CLI's exit code, the API's status code — catches `RenderError` and nothing else, so an error leaking from a dependency is an exit code or a status code that never happens: a corrupt upload came out as a traceback and a 500 instead of a 400. Translating once at the boundary means the file-reading contract is stated in one place, and swapping the PDF library later does not touch any caller |
 
 ## 8. Status

@@ -47,3 +47,7 @@ services:
         value: "45"
       - key: DRAFTCHECK_FALLBACK_PROVIDER
         value: meta
+      # Two-model cross-check: after Muse Spark Open answers, wait at most this long for
+      # Muse Spark's parallel reading before going on without it. See docs/ARCHITECTURE.md §4.19.
+      - key: DRAFTCHECK_CROSSCHECK_GRACE_SECONDS
+        value: "20"
