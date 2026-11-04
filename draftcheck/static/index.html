@@ -59,6 +59,19 @@
                   <option value="meta">Muse Spark (Meta Model API)</option>
                 </select>
               </label>
+              <!-- Cross-check: a second Meta model reads the same page and the two readings
+                   are compared. A hint for the reviewer; the rules never use it. -->
+              <div class="crosscheck">
+                <label class="crosscheck-toggle">
+                  <input id="cross-check" name="cross_check" type="checkbox" checked
+                    aria-describedby="cross-check-note" />
+                  Cross-check with a second Meta model
+                </label>
+                <p id="cross-check-note" class="crosscheck-note">
+                  Muse Spark reads the drawing too and values the two read differently are
+                  marked. Uses one extra model call.
+                </p>
+              </div>
             </div>
           </div>
 
@@ -179,6 +192,7 @@
                 </div>
 
                 <p id="confidence-summary" class="confidence-summary"></p>
+                <p id="crosscheck-summary" class="crosscheck-summary" hidden></p>
 
                 <div class="table-head">
                   <h3>Units and general tolerance</h3>
