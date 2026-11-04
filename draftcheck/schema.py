@@ -9,7 +9,7 @@ drawing down with it.
 """
 
 from enum import StrEnum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -323,6 +323,26 @@ class Finding(Base):
     source: str
     item_ids: list[str] = Field(default_factory=list)
     bbox: BBox = None
+
+
+#: What one rule concluded about the whole drawing.
+RuleStatus = Literal["pass", "fail", "not_applicable"]
+
+
+class RuleResult(Base):
+    """One rule's verdict on the drawing as a whole, with a sentence saying why.
+
+    ``status`` is ``"fail"`` exactly when the rule produced findings; ``"not_applicable"``
+    means the drawing has nothing the rule could look at (no frames, no holes, ...).
+    ``issues`` are the 1-based numbers of this rule's findings in ``run_rules`` order —
+    the same numbers as the issue cards, the clouds, and the redline markers.
+    """
+
+    rule_id: str
+    title: str
+    status: RuleStatus
+    explanation: str
+    issues: list[int] = Field(default_factory=list)
 
 
 def finding_key(finding: Finding) -> str:

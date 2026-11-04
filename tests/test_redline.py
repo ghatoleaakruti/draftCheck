@@ -7,7 +7,9 @@ is a question about the markup and not about whatever the drawing had underneath
 from __future__ import annotations
 
 import io
+import json
 from datetime import date
+from pathlib import Path
 
 import pypdfium2 as pdfium
 import pytest
@@ -26,7 +28,7 @@ from draftcheck.redline import (
     render_redline,
     save_redline,
 )
-from draftcheck.rules import run_rules
+from draftcheck.rules import rule_results, run_rules
 from draftcheck.schema import Drawing, Finding, parse_drawing
 
 PAGE_SIZE = (1200, 900)
@@ -606,3 +608,70 @@ class _ScriptedClient:
 @pytest.fixture
 def scripted_client() -> _ScriptedClient:
     return _ScriptedClient()
+
+
+def test_page_two_lists_every_check_with_its_status():
+    fixture = Path(__file__).parent / "fixtures" / "plate_001.model.json"
+    plate = parse_drawing(json.loads(fixture.read_text()))
+    findings = run_rules(plate)
+    lines = findings_text(findings, rule_results=rule_results(plate, findings))
+    texts = [line.text for line in lines]
+
+    start = texts.index("Checks run")
+    assert texts[start + 1] == "6 checks: 5 passed, 1 failed"
+    assert "FAIL  GDT-001  Undefined datum" in texts
+    assert "PASS  MFG-001  Hole too close to edge" in texts
+    assert (
+        "Every hole keeps at least 8 mm of material to the edge "
+        "(closest: 16 mm, hole 1 to the left edge)."
+    ) in texts
+    # The failed check's sentence is drawn in red, the rest in grey.
+    by_text = {line.text: line for line in lines}
+    assert by_text["The frames reference A, B, C, but nothing defines C (see issue 1)."].style == (
+        "verdict"
+    )
+    assert by_text["Each datum label is used once: A, B."].style == "detail"
+
+
+def test_page_two_marks_not_applicable_checks():
+    bare = parse_drawing({"units": "mm", "general_tolerance": {"linear_plus_minus": 0.1}})
+    texts = [line.text for line in findings_text([], rule_results=rule_results(bare))]
+    assert "N/A  GDT-001  Undefined datum" in texts
+    assert "No feature control frames on this drawing." in texts
+
+
+def test_without_rule_results_page_two_has_no_checks_section(plate_drawing: Drawing):
+    texts = [line.text for line in findings_text(run_rules(plate_drawing))]
+    assert "Checks run" not in texts
+
+
+def test_checks_section_is_drawn_on_page_two(plate_drawing: Drawing):
+    findings = run_rules(plate_drawing)
+    without = render_redline(blank_page_png(), findings)[1]
+    with_checks = render_redline(
+        blank_page_png(), findings, rule_results=rule_results(plate_drawing, findings)
+    )[1]
+    assert with_checks.tobytes() != without.tobytes()
+
+
+def test_page_two_gives_both_summaries_after_a_fix():
+    fixture = Path(__file__).parent / "fixtures" / "plate_001.model.json"
+    data = json.loads(fixture.read_text())
+    submitted = parse_drawing(data)
+    data["datums"].append({"label": "C"})
+    corrected = parse_drawing(data)
+    findings = run_rules(submitted)
+
+    texts = [
+        line.text
+        for line in findings_text(
+            findings,
+            rule_results=rule_results(submitted, findings),
+            final_rule_results=rule_results(corrected, numbering=findings),
+        )
+    ]
+    start = texts.index("Checks run")
+    assert texts[start + 1] == "On the submitted drawing: 6 checks: 5 passed, 1 failed"
+    assert texts[start + 2] == "After the agent's verified fixes: 6 checks: 6 passed, 0 failed"
+    # The list itself is still the submitted drawing's, like the rest of the page.
+    assert "FAIL  GDT-001  Undefined datum" in texts

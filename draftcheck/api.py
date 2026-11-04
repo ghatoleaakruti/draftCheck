@@ -78,7 +78,7 @@ from draftcheck.redline import (
     save_redline,
 )
 from draftcheck.render import RenderError, load_pages
-from draftcheck.rules import RULES
+from draftcheck.rules import RULES, checks_summary, rule_results
 from draftcheck.schema import Drawing, Finding, finding_key, parse_drawing
 
 #: Where run folders are created. A dependency, so tests point it at a tmp folder.
@@ -911,10 +911,15 @@ def check_run(
     _write_json(run_dir / CONFIRMED_JSON, drawing.model_dump(mode="json"))
     _write_json(run_dir / FINDINGS_JSON, [f.model_dump(mode="json") for f in findings])
 
+    results = rule_results(drawing, findings)
+
     errors = sum(1 for finding in findings if finding.severity == "error")
     return {
         "run_id": str(run_id),
         "findings": [finding_payload(finding) for finding in findings],
+        # Every rule's verdict on the whole drawing, passes included, in registry order.
+        "rule_results": [result.model_dump(mode="json") for result in results],
+        "checks_summary": checks_summary(results),
         "parse_issues": drawing.parse_issues,
         "error_count": errors,
         "warning_count": len(findings) - errors,
@@ -1155,6 +1160,16 @@ def _provider_error(exc: APIStatusError | APIConnectionError) -> str:
     return "Could not reach the model provider."
 
 
+def final_rule_results(report: CorrectionReport):
+    """Every rule's verdict on the corrected drawing, from a fresh run of the rules.
+
+    The rules are run again here on ``final_drawing`` rather than read from the report or
+    from anything the model said. Issue numbers count into the *submitted* findings, so a
+    finding that survived keeps its card's number and a new one is called new.
+    """
+    return rule_results(report.final_drawing, numbering=report.original_findings)
+
+
 def _save_fix(run_dir: Path, report: CorrectionReport, page_png: bytes, meta: dict) -> None:
     """Write ``corrections.json`` and the two redline files. Slow; runs in a worker thread."""
     _write_json(run_dir / CORRECTIONS_JSON, report.to_dict())
@@ -1166,6 +1181,8 @@ def _save_fix(run_dir: Path, report: CorrectionReport, page_png: bytes, meta: di
         report.original_findings,
         report,
         model_name=stamp_model_name(meta, report),
+        rule_results=rule_results(report.original_drawing, report.original_findings),
+        final_rule_results=final_rule_results(report),
     )
     save_redline(pages, run_dir / REDLINE_PDF, run_dir / REDLINE_PNG)
 
@@ -1238,6 +1255,9 @@ async def fix_run(
     await run_in_threadpool(_save_fix, run_dir, report, page_png, meta)
 
     summary = _summarize(report)
+    after = final_rule_results(report)
+    summary["final_rule_results"] = [result.model_dump(mode="json") for result in after]
+    summary["final_checks_summary"] = checks_summary(after)
     answered = [record for record in report.rounds if record.model]
     summary["model"] = answered[-1].model if answered else None
     summary["fell_back"] = any(record.fell_back for record in report.rounds)

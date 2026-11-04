@@ -43,6 +43,21 @@ def test_check_from_json_reports_the_seeded_error_and_exits_1(tmp_path, capsys):
     assert "model not called" in out
 
 
+def test_check_prints_every_rule_after_the_findings_table(tmp_path, capsys):
+    run_cli(tmp_path)
+    out = capsys.readouterr().out
+
+    assert "6 checks: 5 passed, 1 failed" in out
+    assert out.index("MESSAGE") < out.index("6 checks:")
+    lines = out.splitlines()
+    gdt = next(line for line in lines if line.startswith("FAIL") and "GDT-001" in line)
+    assert "nothing defines C (see issue 1)." in gdt
+    mfg = next(line for line in lines if "MFG-001" in line and line.startswith("PASS"))
+    assert "closest: 16 mm, hole 1 to the left edge" in mfg
+    dim = next(line for line in lines if "DIM-001" in line)
+    assert dim.startswith("PASS") and "Units (mm)" in dim and "±0.1" in dim
+
+
 def test_check_writes_extraction_and_findings_but_no_raw(tmp_path):
     run_cli(tmp_path)
 

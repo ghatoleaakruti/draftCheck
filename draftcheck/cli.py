@@ -49,7 +49,8 @@ from draftcheck.llm_parsing import JSONParseError
 from draftcheck.pipeline import ExtractionResult, check, extract
 from draftcheck.redline import render_redline, save_redline
 from draftcheck.render import RenderError, load_pages
-from draftcheck.schema import Drawing, Finding, parse_drawing
+from draftcheck.rules import checks_summary, rule_results
+from draftcheck.schema import Drawing, Finding, RuleResult, parse_drawing
 
 DEFAULT_OUTPUT_ROOT = Path("outputs/runs")
 
@@ -103,6 +104,20 @@ def format_table(findings: list[Finding]) -> str:
     return _aligned(("RULE", "SEVERITY", "ITEMS", "MESSAGE"), rows)
 
 
+#: How each rule status is printed. Words rather than symbols, so any terminal shows them.
+CHECK_STATUS = {"pass": "PASS", "fail": "FAIL", "not_applicable": "N/A"}
+
+
+def format_checks(results: list[RuleResult]) -> str:
+    """The checks summary line, then one row per rule: status, id, title, explanation."""
+    rows = [
+        (CHECK_STATUS.get(r.status, r.status), r.rule_id, r.title, r.explanation)
+        for r in results
+    ]
+    table = _aligned(("STATUS", "RULE", "CHECK", "WHY"), rows)
+    return f"{checks_summary(results)}\n{table}"
+
+
 def format_status_table(statuses: list[FindingStatus]) -> str:
     """One row per finding the drawing started with, and what became of it."""
     if not statuses:
@@ -130,6 +145,9 @@ def _print_summary(findings: list[Finding], drawing: Drawing) -> None:
     warnings = len(findings) - errors
     print()
     print(f"{errors} error(s), {warnings} warning(s).")
+
+    print()
+    print(format_checks(rule_results(drawing, findings)))
 
 
 def _one_line(value: object, limit: int = 110) -> str:
@@ -274,7 +292,16 @@ def run_check(args: argparse.Namespace) -> int:
         except RenderError as exc:
             print(f"Could not read the drawing: {exc}", file=sys.stderr)
             return EXIT_FAILED
-        pages = render_redline(page.png_bytes, findings, report, model_name=model_name)
+        pages = render_redline(
+            page.png_bytes,
+            findings,
+            report,
+            model_name=model_name,
+            rule_results=rule_results(drawing, findings),
+            final_rule_results=(
+                rule_results(report.final_drawing, numbering=findings) if report else None
+            ),
+        )
         save_redline(pages, out_dir / "redline.pdf", out_dir / "redline.png")
         written.extend(["redline.pdf", "redline.png"])
 

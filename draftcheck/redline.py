@@ -31,7 +31,16 @@ from pydantic import ValidationError
 
 from draftcheck.agent import CorrectionReport
 from draftcheck.edits import AddDatum, AddDimension, Edit, RemoveDatumRef, SetField
-from draftcheck.schema import FCF, Characteristic, Dimension, Drawing, Finding, finding_key
+from draftcheck.rules import checks_summary
+from draftcheck.schema import (
+    FCF,
+    Characteristic,
+    Dimension,
+    Drawing,
+    Finding,
+    RuleResult,
+    finding_key,
+)
 
 RED = (200, 30, 30)
 INK = (25, 25, 25)
@@ -712,6 +721,8 @@ BODY = "body"
 DETAIL = "detail"
 VERDICT = "verdict"
 NOTE = "note"
+#: One rule's line in "Checks run": spaced like an entry, but not counted as a finding.
+CHECK = "check"
 
 
 @dataclass(frozen=True)
@@ -730,7 +741,10 @@ def _describe_status(status: str) -> str:
 
 
 def findings_text(
-    findings: list[Finding], report: CorrectionReport | None = None
+    findings: list[Finding],
+    report: CorrectionReport | None = None,
+    rule_results: list[RuleResult] | None = None,
+    final_rule_results: list[RuleResult] | None = None,
 ) -> list[Line]:
     """Everything page 2 says, in order, as styled lines.
 
@@ -778,11 +792,53 @@ def findings_text(
         for edit in unattributed:
             lines.append(Line(f"fix: {plain_edit(edit, names)}", DETAIL, indent=1.6))
 
+    if rule_results:
+        lines.extend(checks_text(rule_results, final_rule_results))
+
+    return lines
+
+
+#: How each rule status is written on the sheet.
+_STATUS_WORDS = {"pass": "PASS", "fail": "FAIL", "not_applicable": "N/A"}
+
+
+#: The two summary lines' lead-ins, shared with the page's wording.
+SUBMITTED_LEAD = "On the submitted drawing"
+AFTER_FIXES_LEAD = "After the agent's verified fixes"
+
+
+def checks_text(
+    rule_results: list[RuleResult], final_rule_results: list[RuleResult] | None = None
+) -> list[Line]:
+    """The "Checks run" section: every rule, its status, and the sentence explaining it.
+
+    Passing rules are listed too, so the reader can see what was looked at and found
+    fine, not only what went wrong. The list is for the drawing as submitted, like the
+    rest of the page; with ``final_rule_results`` (a fix ran) a second summary line gives
+    the count after the fixes, from a fresh run of the rules on the corrected drawing.
+    """
+    lines = [Line("Checks run", HEADING)]
+    if final_rule_results:
+        lines.append(Line(f"{SUBMITTED_LEAD}: {checks_summary(rule_results)}", DETAIL))
+        lines.append(
+            Line(f"{AFTER_FIXES_LEAD}: {checks_summary(final_rule_results)}", DETAIL)
+        )
+    else:
+        lines.append(Line(checks_summary(rule_results), DETAIL))
+    for result in rule_results:
+        status = _STATUS_WORDS.get(result.status, result.status.upper())
+        lines.append(Line(f"{status}  {result.rule_id}  {result.title}", CHECK))
+        style = VERDICT if result.status == "fail" else DETAIL
+        lines.append(Line(result.explanation, style, indent=1.6))
     return lines
 
 
 def _list_findings(
-    size: tuple[int, int], findings: list[Finding], report: CorrectionReport | None
+    size: tuple[int, int],
+    findings: list[Finding],
+    report: CorrectionReport | None,
+    rule_results: list[RuleResult] | None = None,
+    final_rule_results: list[RuleResult] | None = None,
 ) -> Image.Image:
     """Page 2: a clean white sheet describing every finding, and any applied edits."""
     width, height = size
@@ -803,6 +859,7 @@ def _list_findings(
         DETAIL: (small_font, GREY),
         VERDICT: (small_font, RED),
         NOTE: (small_font, GREY),
+        CHECK: (body_font, INK),
     }
 
     footer_lines = _wrap(draw, FOOTER, footer_font, width - 2 * margin)
@@ -811,19 +868,21 @@ def _list_findings(
     column = _Column(draw, margin, width - margin, height - margin - footer_height)
     column.y = margin
 
-    lines = findings_text(findings, report)
+    lines = findings_text(findings, report, rule_results, final_rule_results)
     for index, line in enumerate(lines):
         if column.full:
             # Overflow is rare — a sheet with this many findings has bigger problems — but
             # it must not look like the list simply ended.
             remaining = sum(1 for rest in lines[index:] if rest.style == ENTRY)
+            checks = sum(1 for rest in lines[index:] if rest.style == CHECK)
             column.bottom = height  # the note itself still has to fit
-            column.write(
-                f"... {remaining} more finding(s) not shown; see findings.json.",
-                *styles[NOTE],
-            )
+            if remaining:
+                note = f"... {remaining} more finding(s) not shown; see findings.json."
+            else:
+                note = f"... {checks} more check(s) not shown."
+            column.write(note, *styles[NOTE])
             break
-        if line.style in (HEADING, ENTRY):
+        if line.style in (HEADING, ENTRY, CHECK):
             column.space(body_font.size * 0.6)
         font, fill = styles[line.style]
         column.write(line.text, font, fill=fill, indent=line.indent * body_font.size)
@@ -842,6 +901,8 @@ def render_redline(
     report: CorrectionReport | None = None,
     model_name: str | None = None,
     when: date_type | None = None,
+    rule_results: list[RuleResult] | None = None,
+    final_rule_results: list[RuleResult] | None = None,
 ) -> tuple[Image.Image, Image.Image]:
     """Build the two redline pages for one run.
 
@@ -854,12 +915,18 @@ def render_redline(
             its rationale, and the rule engine's resolved/unresolved verdict to page 2.
         model_name: Shown in the stamp. Defaults to saying no model was called.
         when: The review date in the stamp. Defaults to today.
+        rule_results: Every rule's verdict on the submitted drawing, from
+            ``rules.rule_results``. Adds a "Checks run" section to page 2.
+        final_rule_results: The same for the corrected drawing, when a fix ran. Adds an
+            "after the agent's verified fixes" summary line to that section.
 
     Returns:
         ``(page_1, page_2)`` as pillow images, both the size of the rendered drawing.
     """
     marked = _mark_drawing(page_png, findings, model_name or NO_MODEL, when or date_type.today())
-    return marked, _list_findings(marked.size, findings, report)
+    return marked, _list_findings(
+        marked.size, findings, report, rule_results, final_rule_results
+    )
 
 
 def save_redline(

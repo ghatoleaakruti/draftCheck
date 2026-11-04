@@ -98,6 +98,54 @@ is copied into the code.
 Every finding names the offending item's id(s) and its bounding box, so the redline stage
 can draw it in the right place.
 
+#### Rule results — one verdict per rule (step 20)
+
+Findings only say what went wrong. `rule_results(drawing, findings=None)` adds one
+`RuleResult` per rule, in registry order, for the drawing as a whole: `rule_id`, `title`,
+`status` (`pass`, `fail`, or `not_applicable`), a one-sentence `explanation` worded from the
+drawing's own values, and `issues` — the 1-based numbers of the rule's findings in
+`run_rules` order, which are the same numbers as the issue cards, the clouds, and the
+redline markers. `checks_summary(results)` gives the one-line count ("6 checks: 5 passed,
+1 failed", plus "N not applicable" only when there are some).
+
+Each `Rule` carries a `describe(drawing, failed)` function next to its `check`. **Failing is
+still decided only by `check`**: `rule_results` calls `describe` with `failed=True` exactly
+when the rule produced findings and raises if the status returned disagrees, so a sentence
+can never turn a pass into a fail or back. A failed result's sentence ends with "(see issue
+N)". On plate_001:
+
+| Rule | Status | Explanation |
+| --- | --- | --- |
+| GDT-001 | fail | The frames reference A, B, C, but nothing defines C (see issue 1). |
+| GDT-002 | pass | Each datum label is used once: A, B. |
+| GDT-003 | pass | No form control (flatness, straightness, circularity, cylindricity) references a datum. |
+| GDT-004 | pass | The drawing has 1 position tolerance and 3 basic dimensions. |
+| DIM-001 | pass | Units (mm) and a general tolerance (±0.1) are both stated. |
+| MFG-001 | pass | Every hole keeps at least 8 mm of material to the edge (closest: 16 mm, hole 1 to the left edge). |
+
+`not_applicable` means there is nothing for the rule to look at: no frames (GDT-001,
+GDT-003), no frame naming a datum (GDT-001), no datum symbols (GDT-002), no position
+tolerance (GDT-004), no hole diameter or no hole located from an edge (MFG-001). DIM-001
+always applies. MFG-001's check and its sentence share `_edge_material`, so the "closest"
+distance is the same number the check compared.
+
+Where they appear: `POST /api/runs/{id}/check` returns `rule_results` and `checks_summary`
+beside `findings`; the Issues tab lists them under the rounds strip (§4.17); page 2 of the
+redline has a "Checks run" section after the findings (§4.7); and `check` prints them after
+the findings table (§4.3). All four show the drawing **as submitted**, like the findings.
+
+**After a fix.** `POST /api/runs/{id}/fix` also returns `final_rule_results` and
+`final_checks_summary` for the corrected drawing (`report.final_drawing`, every edit the
+loop applied). `api.final_rule_results` runs the rules again on that drawing — it does not
+read `final_findings` from the report or anything the model said. It passes
+`numbering=report.original_findings`, so `rule_results` numbers each finding by its place
+in the *submitted* list: a finding that survived keeps its card's number ("see issue 1"),
+and one the fixes introduced gets no number and is called new ("1 new finding, not on the
+submitted drawing"). Findings that share a key take the key's numbers in order. The
+redline's "Checks run" section then opens with two lines, "On the submitted drawing: …"
+and "After the agent's verified fixes: …"; the list under them stays the submitted
+drawing's, like the rest of page 2. The CLI's `--fix --redline` does the same.
+
 #### MFG-001 — how the distance is worked out
 
 The rule reads geometry out of each dimension's `from_ref`/`to_ref` pair (see §4.2):
@@ -141,6 +189,10 @@ including both overall sizes and both hole locations.
 python -m draftcheck.cli check <drawing> [--from-json path] [--provider baseten|meta]
                                          [--fix] [--redline] [--out dir] [--dpi n]
 ```
+
+The findings table and the error/warning counts are followed by the checks summary
+(§4.1): the "6 checks: 5 passed, 1 failed" line, then one row per rule — `PASS`, `FAIL`, or
+`N/A` (words, so any terminal shows them), id, title, and the explanation.
 
 `--fix` runs the correction loop after the check (§4.5) and prints, per round, what was
 proposed, what was applied with its rationale, what was rejected and why, and which
@@ -353,7 +405,8 @@ edit being proposed three times running.
 
 ### 4.7 The redlined output — BUILT
 
-`redline.render_redline(page_png, findings, report=None, model_name=None, when=None)`
+`redline.render_redline(page_png, findings, report=None, model_name=None, when=None,
+rule_results=None)`
 returns two pillow images; `redline.save_redline(pages, path_pdf, path_png)` writes them as
 a 2-page PDF (at 200 dpi, so the page comes out its real physical size) and page 1 on its
 own as a PNG.
@@ -370,7 +423,10 @@ and the date, separated by ` | `.
 
 **Page 2** is a clean white sheet the same size: every finding by number, with its rule id,
 severity, and message. With a `CorrectionReport` it also carries each applied edit, that
-edit's rationale, and `verified resolved` or `unresolved`. The footer reads *Proposed
+edit's rationale, and `verified resolved` or `unresolved`. When `render_redline` is given
+`rule_results=` (the CLI and the API both pass it), a "Checks run" section follows: the
+`checks_summary` line, then every rule as `PASS`/`FAIL`/`N/A`, id, and title, with its
+explanation underneath — red for a fail, grey otherwise (§4.1). The footer reads *Proposed
 corrections are verified by DraftCheck's rule engine and require engineer review.*
 
 Edits are written out in plain English — `Remove datum C from the position frame`, not
@@ -1020,6 +1076,22 @@ red, struck through; after in green, or grey and struck through when refused), t
 chip ("✓ Rule engine: pass", "! pass, held for designer", "✕ Rule engine: fail"), and
 Python's note. Proposals that cite no finding get a card of their own.
 
+**Checks.** Below the strip, a "Checks" box lists every rule from `/check`'s
+`rule_results`: a green ✓, red ✗, or grey – icon, the rule id and title, and the server's
+explanation in muted text, with `checks_summary` in the box's header. The page decides no
+status and writes no sentence. A failed check is a button that opens its first issue —
+the card and its cloud, as clicking the cloud does. The box is cleared with the findings
+whenever they are.
+
+Once a fix has run, the box shows two summary lines — "On the submitted drawing: …" and
+"After the agent's verified fixes: …" (the same lead-ins as the redline, checked by a
+test) — and an "After fixes / Submitted" toggle that switches the list between `/check`'s
+results and `/fix`'s `final_rule_results`. It opens on "After fixes"; the summary for the
+list on show is in bold. Issue numbers in the after-fixes list are the submitted
+drawing's, so a failed check there still opens the right card; a check that fails only on
+new findings has no card to open and is not a button. A new check drops the after-fixes
+set.
+
 **Corrections tab.** "N corrections passed the rule engine. M need a designer.", a table
 (delta, before, after, status) with one row per original finding plus any applied edit that
 cites none, and two exports: the redlined PDF (the existing endpoint) and the correction list
@@ -1149,6 +1221,7 @@ draftCheck/
 | 2026-10-30 | Confidence is shown but never acted on: the rules run on a flagged row exactly as on any other, and a low score neither fails a check nor changes a finding | Same principle as the rest of the project — the LLM reads, deterministic Python decides. Letting the model's own estimate of its reading move a pass/fail would hand the verdict back to it through the side door, and a confident wrong reading is the case that matters most. The score steers a human's attention, which is all it is good for |
 | 2026-10-30 | `?demo=low-confidence` is served by `/api/demo/low-confidence`, off unless `DRAFTCHECK_ENABLE_DEMO=1` **and** the request arrives from loopback | Reviewing the confidence markings should not cost a model call or need a key, but a route that fabricates runs should not exist in a deployment at all. The two gates fail in different directions and so cover each other: the variable is the deliberate act, defaulting to off so forgetting is safe and nothing has to be removed before a deploy; loopback is the backstop for the variable being set somewhere nobody intended, since it is a property of the connection and cannot be misconfigured. Building a real run folder rather than returning a payload means the demo goes through `/check` like any other drawing, so it exercises the page instead of a special case of it |
 | 2026-10-30 | Demo limits are three separate budgets — 5 uploads and 10 fixes per IP per hour, 100 model calls per day across everyone — held in memory, with `X-Forwarded-For` believed only when `TRUST_PROXY=1`; run folders are swept after 24 hours at startup and at most hourly on upload | A free demo on one person's credits has two different failure modes, and one limit cannot cover both: a per-IP limit does nothing about a crowd, and a global cap alone lets one visitor spend everyone's day in a minute. Separating uploads from fixes matters because a fix is up to three model calls, so sharing one allowance would price them as if they were equal. The header is the client's to write, so trusting it by default would make every per-IP limit bypassable by sending a new address each time — the flag has to be a deliberate statement about what is actually in front of the process. In memory is honest about what this is: a single instance where a restart forgives everyone, and the alternative is a datastore a hackathon demo does not need. Cleanup rides on uploads because there is no scheduler and nothing to keep alive between requests, and a server nobody uploads to is not accumulating anything either |
+| 2026-11-03 | Every rule reports a pass / fail / not-applicable result with a sentence, but the sentence comes from a separate `describe` function that is told whether `check` failed, and `rule_results` raises if the two disagree | A list of findings cannot show what was checked and found fine, and a reviewer trusts a clean result more when it names the values it looked at. Keeping the verdict in `check` alone means adding words cannot move a pass/fail — the same principle that keeps the model out of the verdict keeps the wording out of it too |
 | 2026-10-30 | `render.load_pages` translates pypdfium2's and pillow's own errors into `RenderError`, rather than each caller catching the dependency's error class | Every caller — the CLI's exit code, the API's status code — catches `RenderError` and nothing else, so an error leaking from a dependency is an exit code or a status code that never happens: a corrupt upload came out as a traceback and a 500 instead of a 400. Translating once at the boundary means the file-reading contract is stated in one place, and swapping the PDF library later does not touch any caller |
 
 ## 8. Status

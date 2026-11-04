@@ -21,6 +21,9 @@ from draftcheck.schema import (
     Dimension,
     Drawing,
     Finding,
+    RuleResult,
+    RuleStatus,
+    finding_key,
 )
 
 
@@ -37,6 +40,11 @@ class Rule:
     #: Where the rule comes from — standard and topic, cited rather than quoted.
     source: str
     check: Callable[[Drawing], list[Finding]]
+    #: Words the rule's verdict on the whole drawing. Called with ``failed=True`` when
+    #: ``check`` produced findings, and then must return ``"fail"``; otherwise returns
+    #: ``"pass"`` or ``"not_applicable"``. The status is never decided here on its own:
+    #: failing is ``check``'s call, and this only says what was looked at.
+    describe: Callable[[Drawing, bool], tuple[RuleStatus, str]]
 
 
 def _finding(rule: Rule, message: str, item_ids: list[str], bbox: BBox = None) -> Finding:
@@ -57,6 +65,19 @@ def _first_bbox(boxes: list[BBox]) -> BBox:
         if box is not None:
             return box
     return None
+
+
+def _join(words: list[str]) -> str:
+    """``["A"]`` -> ``"A"``, ``["A", "B", "C"]`` -> ``"A, B, C"``."""
+    return ", ".join(words)
+
+
+def _times(count: int, word: str) -> str:
+    """``(1, "frame")`` -> ``"1 frame"``, ``(2, "frame")`` -> ``"2 frames"``."""
+    return f"{count} {word}" if count == 1 else f"{count} {word}s"
+
+
+NO_FRAMES = "No feature control frames on this drawing."
 
 
 # --- GDT-001: undefined datum ---------------------------------------------------------
@@ -87,6 +108,22 @@ def _check_undefined_datum(drawing: Drawing) -> list[Finding]:
     return findings
 
 
+def _describe_undefined_datum(drawing: Drawing, failed: bool) -> tuple[RuleStatus, str]:
+    if not drawing.fcfs:
+        return "not_applicable", NO_FRAMES
+    referenced = sorted({ref.label for fcf in drawing.fcfs for ref in fcf.datum_refs})
+    if not referenced:
+        return "not_applicable", "No feature control frame references a datum."
+    defined = {datum.label for datum in drawing.datums}
+    missing = [label for label in referenced if label not in defined]
+    if failed:
+        return "fail", (
+            f"The frames reference {_join(referenced)}, but nothing defines "
+            f"{_join(missing)}."
+        )
+    return "pass", f"Every datum the frames reference is defined: {_join(referenced)}."
+
+
 GDT_001 = Rule(
     id="GDT-001",
     title="Undefined datum",
@@ -94,6 +131,7 @@ GDT_001 = Rule(
     severity="error",
     source="ASME Y14.5-2018, datum reference frames",
     check=_check_undefined_datum,
+    describe=_describe_undefined_datum,
 )
 
 
@@ -121,6 +159,20 @@ def _check_duplicate_datum(drawing: Drawing) -> list[Finding]:
     return findings
 
 
+def _describe_duplicate_datum(drawing: Drawing, failed: bool) -> tuple[RuleStatus, str]:
+    if not drawing.datums:
+        return "not_applicable", "No datum feature symbols on this drawing."
+    counts: dict[str, int] = defaultdict(int)
+    for datum in drawing.datums:
+        counts[datum.label] += 1
+    labels = sorted(counts)
+    if failed:
+        repeated = [f"{label} ({_times(counts[label], 'time')})" for label in labels
+                    if counts[label] > 1]
+        return "fail", f"More than one symbol claims the same label: {_join(repeated)}."
+    return "pass", f"Each datum label is used once: {_join(labels)}."
+
+
 GDT_002 = Rule(
     id="GDT-002",
     title="Duplicate datum",
@@ -128,6 +180,7 @@ GDT_002 = Rule(
     severity="error",
     source="ASME Y14.5-2018, datum feature identification",
     check=_check_duplicate_datum,
+    describe=_describe_duplicate_datum,
 )
 
 
@@ -153,6 +206,38 @@ def _check_form_control_with_datum(drawing: Drawing) -> list[Finding]:
     return findings
 
 
+#: The form controls, named in a fixed order for the sentences below.
+_FORM_NAMES = ", ".join(
+    c.value
+    for c in (
+        Characteristic.FLATNESS,
+        Characteristic.STRAIGHTNESS,
+        Characteristic.CIRCULARITY,
+        Characteristic.CYLINDRICITY,
+    )
+)
+
+
+def _describe_form_control_with_datum(
+    drawing: Drawing, failed: bool
+) -> tuple[RuleStatus, str]:
+    if not drawing.fcfs:
+        return "not_applicable", NO_FRAMES
+    forms = [fcf for fcf in drawing.fcfs if fcf.characteristic in FORM_CONTROLS]
+    if failed:
+        offenders = [
+            f"{fcf.characteristic.value} to {_join([ref.label for ref in fcf.datum_refs])}"
+            for fcf in forms
+            if fcf.datum_refs
+        ]
+        return "fail", f"A form control references a datum: {_join(offenders)}."
+    sentence = f"No form control ({_FORM_NAMES}) references a datum."
+    if forms:
+        checked = _join(sorted({fcf.characteristic.value for fcf in forms}))
+        sentence = sentence[:-1] + f" (checked: {checked})."
+    return "pass", sentence
+
+
 GDT_003 = Rule(
     id="GDT-003",
     title="Form control with datum",
@@ -160,6 +245,7 @@ GDT_003 = Rule(
     severity="error",
     source="ASME Y14.5-2018, form tolerances",
     check=_check_form_control_with_datum,
+    describe=_describe_form_control_with_datum,
 )
 
 
@@ -191,6 +277,19 @@ def _check_position_without_basic(drawing: Drawing) -> list[Finding]:
     ]
 
 
+def _describe_position_without_basic(
+    drawing: Drawing, failed: bool
+) -> tuple[RuleStatus, str]:
+    positions = [fcf for fcf in drawing.fcfs if fcf.characteristic == Characteristic.POSITION]
+    if not positions:
+        return "not_applicable", "No position tolerances on this drawing."
+    count = _times(len(positions), "position tolerance")
+    if failed:
+        return "fail", f"The drawing has {count} but no basic dimensions to locate them."
+    basics = sum(1 for dimension in drawing.dimensions if dimension.is_basic)
+    return "pass", f"The drawing has {count} and {_times(basics, 'basic dimension')}."
+
+
 GDT_004 = Rule(
     id="GDT-004",
     title="Position without basic dimensions",
@@ -198,6 +297,7 @@ GDT_004 = Rule(
     severity="error",
     source="ASME Y14.5-2018, position tolerancing and basic dimensions",
     check=_check_position_without_basic,
+    describe=_describe_position_without_basic,
 )
 
 
@@ -209,6 +309,50 @@ def _has_general_tolerance(drawing: Drawing) -> bool:
     return (
         drawing.general_tolerance is not None
         and drawing.general_tolerance.linear_plus_minus is not None
+    )
+
+
+def _inspected(drawing: Drawing) -> list[Dimension]:
+    """Dimensions that need a permitted range.
+
+    Basic dimensions carry no tolerance by definition, and reference dimensions are not
+    inspected, so neither needs a fallback.
+    """
+    return [d for d in drawing.dimensions if not d.is_basic and not d.is_reference]
+
+
+def _untoleranced(drawing: Drawing) -> list[Dimension]:
+    """Inspected dimensions that print no tolerance of their own."""
+    return [d for d in _inspected(drawing) if d.tol_plus is None and d.tol_minus is None]
+
+
+def _describe_units_and_general_tolerance(
+    drawing: Drawing, failed: bool
+) -> tuple[RuleStatus, str]:
+    general = drawing.general_tolerance
+    if failed:
+        problems = []
+        if drawing.units is None:
+            problems.append("no units are stated")
+        if not _has_general_tolerance(drawing):
+            untoleranced = _untoleranced(drawing)
+            if untoleranced:
+                problems.append(
+                    f"there is no general tolerance and {_times(len(untoleranced), 'dimension')}"
+                    f" carry none of their own ({_join([d.id or '' for d in untoleranced])})"
+                )
+        text = "; ".join(problems)
+        return "fail", text[0].upper() + text[1:] + "."
+    units = drawing.units.value if drawing.units else ""
+    if general is not None and general.linear_plus_minus is not None:
+        return "pass", (
+            f"Units ({units}) and a general tolerance "
+            f"(±{_number(general.linear_plus_minus)}) are both stated."
+        )
+    inspected = len(_inspected(drawing))
+    return "pass", (
+        f"Units ({units}) are stated; there is no general tolerance, but all "
+        f"{_times(inspected, 'inspected dimension')} carry their own."
     )
 
 
@@ -226,16 +370,7 @@ def _check_units_and_general_tolerance(drawing: Drawing) -> list[Finding]:
         )
 
     if not _has_general_tolerance(drawing):
-        # Basic dimensions carry no tolerance by definition, and reference dimensions are
-        # not inspected, so neither needs a fallback.
-        untoleranced = [
-            dimension
-            for dimension in drawing.dimensions
-            if not dimension.is_basic
-            and not dimension.is_reference
-            and dimension.tol_plus is None
-            and dimension.tol_minus is None
-        ]
+        untoleranced = _untoleranced(drawing)
         if untoleranced:
             ids = [dimension.id or "" for dimension in untoleranced]
             findings.append(
@@ -259,6 +394,7 @@ DIM_001 = Rule(
     severity="error",
     source="ASME Y14.5-2018, units of measure and general tolerances",
     check=_check_units_and_general_tolerance,
+    describe=_describe_units_and_general_tolerance,
 )
 
 
@@ -324,12 +460,12 @@ def _number(value: float) -> str:
     return f"{value:g}"
 
 
-def _check_hole_edge_distance(drawing: Drawing) -> list[Finding]:
-    diameter = _hole_diameter(drawing)
-    if diameter is None:
-        return []
+#: (hole number, edge) -> (material left, dimension ids, bbox).
+EdgeMaterial = dict[tuple[int, str], tuple[float, list[str], BBox]]
 
-    minimum = MIN_EDGE_MATERIAL_RATIO * diameter
+
+def _edge_material(drawing: Drawing, diameter: float) -> EdgeMaterial:
+    """How much material each located hole leaves to each edge we can work out."""
     radius = diameter / 2
 
     # Which overall size dimension, if any, spans the part across each edge.
@@ -340,11 +476,10 @@ def _check_hole_edge_distance(drawing: Drawing) -> list[Finding]:
             overall[edge_a] = span
             overall[edge_b] = span
 
-    # (hole number, edge) -> (material left, dimension ids, bbox). Measured distances are
-    # collected separately from derived ones so a printed dimension always wins over a
-    # value we worked out ourselves.
-    measured: dict[tuple[int, str], tuple[float, list[str], BBox]] = {}
-    derived: dict[tuple[int, str], tuple[float, list[str], BBox]] = {}
+    # Measured distances are collected separately from derived ones so a printed dimension
+    # always wins over a value we worked out ourselves.
+    measured: EdgeMaterial = {}
+    derived: EdgeMaterial = {}
 
     for dimension in drawing.dimensions:
         refs = [_ref(dimension.from_ref), _ref(dimension.to_ref)]
@@ -365,8 +500,27 @@ def _check_hole_edge_distance(drawing: Drawing) -> list[Finding]:
                 dimension.bbox,
             )
 
+    return dict(sorted({**derived, **measured}.items()))
+
+
+def _edge_words(edge: str) -> str:
+    """``"left_edge"`` -> ``"left edge"``."""
+    return edge.replace("_", " ")
+
+
+def _length(drawing: Drawing, value: float) -> str:
+    """A length with the drawing's unit when it has one, e.g. ``"16 mm"``."""
+    return f"{_number(value)} {drawing.units.value}" if drawing.units else _number(value)
+
+
+def _check_hole_edge_distance(drawing: Drawing) -> list[Finding]:
+    diameter = _hole_diameter(drawing)
+    if diameter is None:
+        return []
+    minimum = MIN_EDGE_MATERIAL_RATIO * diameter
+
     findings: list[Finding] = []
-    for (hole, edge), (material, ids, bbox) in sorted({**derived, **measured}.items()):
+    for (hole, edge), (material, ids, bbox) in _edge_material(drawing, diameter).items():
         if material >= minimum:
             continue
         findings.append(
@@ -383,6 +537,32 @@ def _check_hole_edge_distance(drawing: Drawing) -> list[Finding]:
     return findings
 
 
+def _describe_hole_edge_distance(drawing: Drawing, failed: bool) -> tuple[RuleStatus, str]:
+    diameter = _hole_diameter(drawing)
+    if diameter is None:
+        return "not_applicable", "No hole diameter on this drawing, so there is nothing to measure."
+    distances = _edge_material(drawing, diameter)
+    if not distances:
+        return "not_applicable", (
+            "No dimension locates a hole from an edge, so edge distance cannot be worked out."
+        )
+    minimum = MIN_EDGE_MATERIAL_RATIO * diameter
+    need = _length(drawing, minimum)
+    if failed:
+        short = [
+            f"hole {hole} leaves {_length(drawing, material)} to the {_edge_words(edge)}"
+            for (hole, edge), (material, _, _) in distances.items()
+            if material < minimum
+        ]
+        text = _join(short)
+        return "fail", f"{text[0].upper()}{text[1:]}, under the {need} minimum."
+    (hole, edge), (material, _, _) = min(distances.items(), key=lambda item: item[1][0])
+    return "pass", (
+        f"Every hole keeps at least {need} of material to the edge (closest: "
+        f"{_length(drawing, material)}, hole {hole} to the {_edge_words(edge)})."
+    )
+
+
 MFG_001 = Rule(
     id="MFG-001",
     title="Hole too close to edge",
@@ -393,6 +573,7 @@ MFG_001 = Rule(
         "is configurable via MIN_EDGE_MATERIAL_RATIO"
     ),
     check=_check_hole_edge_distance,
+    describe=_describe_hole_edge_distance,
 )
 
 
@@ -412,3 +593,88 @@ def run_rules(drawing: Drawing) -> list[Finding]:
     for rule in RULES:
         findings.extend(rule.check(drawing))
     return sorted(findings, key=lambda finding: (finding.rule_id, finding.item_ids))
+
+
+def _issue_refs(numbers: list[int]) -> str:
+    """``[2]`` -> ``"issue 2"``, ``[2, 3]`` -> ``"issues 2, 3"``."""
+    word = "issue" if len(numbers) == 1 else "issues"
+    return f"{word} {', '.join(str(number) for number in numbers)}"
+
+
+def _new_refs(count: int) -> str:
+    """``1`` -> ``"1 new finding"``, ``2`` -> ``"2 new findings"``."""
+    return _times(count, "new finding")
+
+
+def rule_results(
+    drawing: Drawing,
+    findings: list[Finding] | None = None,
+    numbering: list[Finding] | None = None,
+) -> list[RuleResult]:
+    """Every rule's verdict on the whole drawing, in registry order.
+
+    A rule fails exactly when it produced findings; that is decided by the rule's
+    ``check``, never by its sentence. ``findings`` is ``run_rules(drawing)`` — pass it
+    when you already have it, so the issue numbers match the list you are showing.
+
+    ``numbering`` is the finding list the issue numbers count into; it defaults to
+    ``findings``. For a corrected drawing, pass the *submitted* drawing's findings, so a
+    finding that survived the fixes keeps its original number (its card, cloud, and
+    redline marker). A finding that is not on that list has no number, and the sentence
+    says it is new.
+    """
+    if findings is None:
+        findings = run_rules(drawing)
+    reference = findings if numbering is None else numbering
+    # Two findings can share a key (one frame missing two datums), so each key holds its
+    # numbers in order and each matching finding takes the next one.
+    numbers_by_key: dict[str, list[int]] = defaultdict(list)
+    for number, finding in enumerate(reference, start=1):
+        numbers_by_key[finding_key(finding)].append(number)
+
+    numbers: dict[str, list[int]] = defaultdict(list)
+    new: dict[str, int] = defaultdict(int)
+    for finding in findings:
+        waiting = numbers_by_key.get(finding_key(finding))
+        if waiting:
+            numbers[finding.rule_id].append(waiting.pop(0))
+        else:
+            new[finding.rule_id] += 1
+
+    results: list[RuleResult] = []
+    for rule in RULES:
+        issues = sorted(numbers.get(rule.id, []))
+        fresh = new.get(rule.id, 0)
+        failed = bool(issues) or fresh > 0
+        status, explanation = rule.describe(drawing, failed)
+        if failed != (status == "fail"):
+            raise ValueError(f"{rule.id} described itself as {status!r} against its findings")
+        body = explanation[:-1]
+        if issues and fresh:
+            explanation = f"{body} (see {_issue_refs(issues)}, plus {_new_refs(fresh)})."
+        elif issues:
+            explanation = f"{body} (see {_issue_refs(issues)})."
+        elif fresh:
+            explanation = f"{body} ({_new_refs(fresh)}, not on the submitted drawing)."
+        results.append(
+            RuleResult(
+                rule_id=rule.id,
+                title=rule.title,
+                status=status,
+                explanation=explanation,
+                issues=issues,
+            )
+        )
+    return results
+
+
+def checks_summary(results: list[RuleResult]) -> str:
+    """One line for the whole run, e.g. ``"6 checks: 5 passed, 1 failed"``.
+
+    "not applicable" is only mentioned when some rule had nothing to look at.
+    """
+    passed = sum(1 for result in results if result.status == "pass")
+    failed = sum(1 for result in results if result.status == "fail")
+    skipped = len(results) - passed - failed
+    line = f"{len(results)} checks: {passed} passed, {failed} failed"
+    return f"{line}, {skipped} not applicable" if skipped else line

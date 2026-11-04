@@ -1752,3 +1752,135 @@ def test_each_rounds_before_is_the_drawing_the_round_started_from(
     assert first["after"] == "⌖ Ø0.2 Ⓜ | A | B | C"
     assert second["before"] == "⌖ Ø0.2 Ⓜ | A | B | C"
     assert second["after"] == "⌖ Ø0.15 Ⓜ | A | B | C"
+
+
+def test_check_returns_a_result_for_every_rule(client: TestClient):
+    """Passes are reported too, each with a sentence built from the drawing's values."""
+    created = upload(client)
+    body = client.post(f"/api/runs/{created['run_id']}/check", json=created["drawing"]).json()
+
+    results = body["rule_results"]
+    assert [r["rule_id"] for r in results] == [rule.id for rule in RULES]
+    by_id = {r["rule_id"]: r for r in results}
+    assert by_id["GDT-001"]["status"] == "fail"
+    assert by_id["GDT-001"]["issues"] == [1]
+    assert "nothing defines C" in by_id["GDT-001"]["explanation"]
+    assert by_id["DIM-001"] == {
+        "rule_id": "DIM-001",
+        "title": "Missing units or general tolerance",
+        "status": "pass",
+        "explanation": "Units (mm) and a general tolerance (±0.1) are both stated.",
+        "issues": [],
+    }
+    assert body["checks_summary"] == "6 checks: 5 passed, 1 failed"
+    # Findings are unchanged by the addition.
+    assert rule_ids(body["findings"]) == ["GDT-001"]
+
+
+def test_check_results_follow_an_edit(client: TestClient):
+    """Defining datum C turns GDT-001 from fail to pass, naming all three datums."""
+    created = upload(client)
+    edited = created["drawing"]
+    edited["datums"].append({"label": "C"})
+    body = client.post(f"/api/runs/{created['run_id']}/check", json=edited).json()
+
+    gdt_001 = next(r for r in body["rule_results"] if r["rule_id"] == "GDT-001")
+    assert gdt_001["status"] == "pass"
+    assert gdt_001["explanation"] == "Every datum the frames reference is defined: A, B, C."
+    assert body["checks_summary"] == "6 checks: 6 passed, 0 failed"
+
+
+def test_fix_puts_the_checks_on_the_redline(client: TestClient, monkeypatch):
+    """The redline is drawn with every rule's result for the drawing as submitted."""
+    import draftcheck.api as api_module
+
+    seen: dict = {}
+    real = api_module.render_redline
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(api_module, "render_redline", spy)
+    created = upload(client)
+    run_id = created["run_id"]
+    client.post(f"/api/runs/{run_id}/check", json=created["drawing"])
+    assert client.post(f"/api/runs/{run_id}/fix").status_code == 200
+
+    results = seen["rule_results"]
+    assert [r.rule_id for r in results] == [rule.id for rule in RULES]
+    assert next(r for r in results if r.rule_id == "GDT-001").status == "fail"
+
+
+def test_fix_returns_rule_results_for_the_corrected_drawing(client: TestClient, fake: FakeClient):
+    """The after-fixes checks come from re-running the rules on the corrected drawing."""
+    fake.corrections = [
+        {
+            "edits": [
+                {
+                    "op": "remove_datum_ref",
+                    "fcf_id": "fcf_1",
+                    "label": "C",
+                    "rationale": "A and B already locate the pattern.",
+                    "finding_ids": ["GDT-001@fcf_1"],
+                }
+            ]
+        }
+    ]
+    created = upload(client)
+    run_id = created["run_id"]
+    client.post(f"/api/runs/{run_id}/check", json=created["drawing"])
+    body = client.post(f"/api/runs/{run_id}/fix").json()
+
+    after = {r["rule_id"]: r for r in body["final_rule_results"]}
+    assert list(after) == [rule.id for rule in RULES]
+    assert after["GDT-001"]["status"] == "pass"
+    assert after["GDT-001"]["explanation"] == "Every datum the frames reference is defined: A, B."
+    assert body["final_checks_summary"] == "6 checks: 6 passed, 0 failed"
+
+
+def test_fix_checks_ignore_what_the_model_claims(client: TestClient, fake: FakeClient):
+    """An edit that cites GDT-001 but does not fix it leaves GDT-001 failed after fixes."""
+    fake.corrections = [
+        {
+            "edits": [
+                {
+                    "op": "set_field",
+                    "target": "dimension",
+                    "id": "dim_3",
+                    "field": "tol_plus",
+                    "value": 0.3,
+                    "rationale": "This resolves the undefined datum.",
+                    "finding_ids": ["GDT-001@fcf_1"],
+                }
+            ]
+        }
+    ] * 3
+    created = upload(client)
+    run_id = created["run_id"]
+    client.post(f"/api/runs/{run_id}/check", json=created["drawing"])
+    body = client.post(f"/api/runs/{run_id}/fix").json()
+
+    gdt = next(r for r in body["final_rule_results"] if r["rule_id"] == "GDT-001")
+    assert gdt["status"] == "fail"
+    assert gdt["issues"] == [1]  # still the submitted drawing's issue 1
+    assert body["final_checks_summary"] == "6 checks: 5 passed, 1 failed"
+
+
+def test_fix_puts_the_after_fixes_checks_on_the_redline(client: TestClient, monkeypatch):
+    import draftcheck.api as api_module
+
+    seen: dict = {}
+    real = api_module.render_redline
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(api_module, "render_redline", spy)
+    created = upload(client)
+    run_id = created["run_id"]
+    client.post(f"/api/runs/{run_id}/check", json=created["drawing"])
+    client.post(f"/api/runs/{run_id}/fix")
+
+    assert [r.rule_id for r in seen["final_rule_results"]] == [rule.id for rule in RULES]
