@@ -165,7 +165,8 @@ def _print_corrections(report: CorrectionReport) -> None:
         print()
         print(
             f"Round {record.number}: proposed {len(record.proposed)}, "
-            f"applied {len(record.applied)}, rejected {len(record.rejected)}"
+            f"applied {len(record.applied)}, rejected {len(record.rejected)}, "
+            f"rolled back {len(record.rolled_back)}"
         )
         if record.error:
             print(f"  failed    {record.error}")
@@ -178,6 +179,9 @@ def _print_corrections(report: CorrectionReport) -> None:
         for item in record.rejected:
             print(f"  rejected  {_one_line(item.edit)}")
             print(f"            {item.reason}")
+        for item in record.rolled_back:
+            print(f"  rolled back  {item.edit.describe()}")
+            print(f"               {item.reason}")
         print(
             f"  findings  {len(record.findings_before)} before "
             f"-> {len(record.findings_after)} after"

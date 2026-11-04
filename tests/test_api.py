@@ -1700,15 +1700,23 @@ def test_an_edit_whose_finding_survives_the_rerun_has_failed(
     fake.corrections = [{"edits": [tightened]}] * 3
     body = client.post(f"/api/runs/{run_id}/fix").json()
 
-    edit = body["rounds"][0]["applied"][0]
+    first = body["rounds"][0]
+    assert first["applied"] == []  # failed, so not left on the drawing
+    edit = first["rolled_back"][0]
     assert edit["status"] == "failed"
-    assert "still reports GDT-001@fcf_1" in edit["note"]
+    assert edit["rolled_back"] is True
+    assert edit["note"] == (
+        "The re-run still reports GDT-001@fcf_1. Rolled back before the next round."
+    )
+    # What it did before it was undone, so the card and the sheet can show it.
     assert (edit["before"], edit["after"], edit["pen"]) == (
         "⌖ Ø0.25 Ⓜ | A | B | C",
         "⌖ Ø0.2 Ⓜ | A | B | C",
         "Ø0.2",
     )
     assert body["status"][0]["outcome"] == "unresolved"
+    assert body["rolled_back_count"] == 3
+    assert body["final_drawing"]["fcfs"][0]["tolerance"] == 0.25
 
 
 def test_a_refused_but_understood_edit_still_shows_what_it_asked_for(
@@ -1743,7 +1751,7 @@ def test_a_refused_but_understood_edit_still_shows_what_it_asked_for(
 def test_each_rounds_before_is_the_drawing_the_round_started_from(
     client: TestClient, fake: FakeClient
 ):
-    """Round 2's 'before' carries round 1's edit, not the drawing as first submitted."""
+    """Round 2's 'before' is the drawing round 1 left: its failed edit rolled back."""
     run_id = checked_run(client)
 
     def tolerance(value: float) -> dict:
@@ -1759,9 +1767,9 @@ def test_each_rounds_before_is_the_drawing_the_round_started_from(
     fake.corrections = [{"edits": [tolerance(0.2)]}, {"edits": [tolerance(0.15)]}]
     body = client.post(f"/api/runs/{run_id}/fix").json()
 
-    first, second = (round_["applied"][0] for round_ in body["rounds"][:2])
+    first, second = (round_["rolled_back"][0] for round_ in body["rounds"][:2])
     assert first["after"] == "⌖ Ø0.2 Ⓜ | A | B | C"
-    assert second["before"] == "⌖ Ø0.2 Ⓜ | A | B | C"
+    assert second["before"] == "⌖ Ø0.25 Ⓜ | A | B | C"
     assert second["after"] == "⌖ Ø0.15 Ⓜ | A | B | C"
 
 
@@ -2095,3 +2103,196 @@ def test_cross_check_grace_defaults_to_twenty_seconds(monkeypatch) -> None:
     assert cross_check_grace_s() == 7
     monkeypatch.setenv(ENV_CROSSCHECK_GRACE, "soon")
     assert cross_check_grace_s() == 20
+
+
+# ---- /fix?stream=1: the rounds as they happen ------------------------------------
+
+
+def _stream_events(response) -> list[dict]:
+    """The stream's body as a list of events: one JSON object per line, nothing else."""
+    lines = response.text.split("\n")
+    assert lines[-1] == "", "the stream must end with a newline"
+    return [json.loads(line) for line in lines[:-1]]
+
+
+def _reject_then_fix_client(tmp_path: Path) -> tuple[TestClient, FakeClient]:
+    from draftcheck.fake_model import REJECT_THEN_FIX_ROUNDS
+
+    script = [{"edits": [edit]} for edit in REJECT_THEN_FIX_ROUNDS]
+    scripted = FakeClient(extraction_data(), *script)
+    return make_client(tmp_path, scripted, UsageLimiter(ROOMY), Cleaner(ROOMY)), scripted
+
+
+def test_the_stream_reports_three_rounds_in_order_then_the_full_reply(tmp_path: Path) -> None:
+    test_client, _ = _reject_then_fix_client(tmp_path)
+    try:
+        with test_client:
+            run_id = _checked_run(test_client)
+            response = test_client.post(f"/api/runs/{run_id}/fix?stream=1")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/x-ndjson")
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-accel-buffering"] == "no"
+
+    events = _stream_events(response)
+    assert [(event["type"], event.get("round")) for event in events] == [
+        ("round_started", 1),
+        ("proposal", 1),
+        ("verdict", 1),
+        ("round_started", 2),
+        ("proposal", 2),
+        ("verdict", 2),
+        ("round_started", 3),
+        ("proposal", 3),
+        ("verdict", 3),
+        ("done", None),
+    ]
+    started = [event for event in events if event["type"] == "round_started"]
+    assert started[0]["findings"] == ["GDT-001@fcf_1"]
+    proposals = [event for event in events if event["type"] == "proposal"]
+    verdicts = [event for event in events if event["type"] == "verdict"]
+    done = events[-1]
+
+    # Who answered, as the round's record says.
+    assert all(event["model"] == "fake-model" for event in proposals)
+
+    # Round 1: the model asks to delete the frame; Python refuses it.
+    assert proposals[0]["edits"][0]["edit"] == "an edit the model called 'delete_fcf'"
+    assert [e["status"] for e in verdicts[0]["edits"]] == ["rejected"]
+    assert "not an allowed operation" in verdicts[0]["edits"][0]["note"]
+    # Round 2: applied, but the re-run still reports the finding.
+    second = proposals[1]["edits"][0]
+    assert second["rationale"].startswith("Tighten the position tolerance")
+    assert second["before"] == "⌖ Ø0.25 Ⓜ | A | B | C"
+    assert second["after"] == "⌖ Ø0.2 Ⓜ | A | B | C"
+    assert second["pen"]
+    assert [e["status"] for e in verdicts[1]["edits"]] == ["failed"]
+    assert verdicts[1]["applied"] == []
+    assert [e["edit"] for e in verdicts[1]["rolled_back"]] == [
+        "Set the tolerance of the position frame to 0.2"
+    ]
+    assert verdicts[1]["edits"][0]["note"].endswith("Rolled back before the next round.")
+    assert verdicts[1]["cleared"] == []
+    # Round 3: verified, because the re-run no longer reports it.
+    assert [e["status"] for e in verdicts[2]["edits"]] == ["verified"]
+    assert [c["key"] for c in verdicts[2]["cleared"]] == ["GDT-001@fcf_1"]
+    assert (verdicts[2]["findings_before"], verdicts[2]["findings_after"]) == (1, 0)
+    assert verdicts[2]["introduced"] == []
+
+    # Each verdict is exactly the round the final reply reports, live.
+    for verdict, final in zip(verdicts, done["rounds"], strict=True):
+        assert {key: verdict[key] for key in final} == final
+        assert verdict["edits"] == final["applied"] + final["rolled_back"] + final["rejected"]
+    assert done["resolved_count"] == 1
+    assert (tmp_path / run_id / "redline.pdf").is_file()
+    # Only the kept edit is on the corrected drawing: round 2's tolerance was rolled back.
+    [frame] = done["final_drawing"]["fcfs"]
+    assert frame["tolerance"] == 0.25
+    assert [ref["label"] for ref in frame["datum_refs"]] == ["A", "B"]
+    assert done["rounds"][2]["applied"][0]["before"] == "⌖ Ø0.25 Ⓜ | A | B | C"
+    assert done["rounds"][2]["applied"][0]["after"] == "⌖ Ø0.25 Ⓜ | A | B"
+
+
+def test_the_done_event_is_the_plain_reply(tmp_path: Path) -> None:
+    """``done`` carries the very reply the non-stream endpoint gives, which is unchanged."""
+    test_client, _ = _reject_then_fix_client(tmp_path)
+    try:
+        with test_client:
+            run_id = _checked_run(test_client)
+            streamed = _stream_events(test_client.post(f"/api/runs/{run_id}/fix?stream=1"))[-1]
+        plain_client, _ = _reject_then_fix_client(tmp_path)
+        with plain_client:
+            plain_run = _checked_run(plain_client)
+            plain = plain_client.post(f"/api/runs/{plain_run}/fix")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert plain.status_code == 200
+    assert plain.headers["content-type"] == "application/json"
+    body = plain.json()
+    assert "type" not in body
+    assert streamed.pop("type") == "done"
+    for key in ("run_id", "redline_pdf_url", "redline_png_url"):
+        assert streamed.pop(key) != body.pop(key)  # a different run, otherwise identical
+    assert streamed == body
+
+
+def test_a_stream_whose_first_round_times_out_ends_with_an_error_event(
+    hanging, tmp_path: Path
+) -> None:
+    test_client, _ = hanging(hang_from=2)
+    with test_client:
+        run_id = _checked_run(test_client)
+        response = test_client.post(f"/api/runs/{run_id}/fix?stream=1")
+    assert response.status_code == 200  # the stream had begun; the error is in it
+    events = _stream_events(response)
+    assert [event["type"] for event in events] == ["round_started", "verdict", "error"]
+    assert events[1]["error"] == MODEL_TIMEOUT_MESSAGE
+    assert events[-1] == {"type": "error", "status": 504, "detail": MODEL_TIMEOUT_MESSAGE}
+    assert not (tmp_path / run_id / "redline.pdf").exists()
+
+
+def test_a_stream_refused_before_it_starts_is_a_plain_http_error(client: TestClient) -> None:
+    created = upload(client)
+    response = client.post(f"/api/runs/{created['run_id']}/fix?stream=1")
+    assert response.status_code == 409
+    assert "Confirm the extraction" in response.json()["detail"]
+
+
+def test_a_disconnect_mid_stream_aborts_the_round_and_saves_nothing(
+    cancelling, tmp_path: Path
+) -> None:
+    test_client, slow = cancelling(hang_from=3)  # extraction, round one, then round two hangs
+    slow.corrections = [{"edits": [{"op": "delete_fcf", "fcf_id": "fcf_1"}]}]
+    with test_client:
+        run_id = _checked_run(test_client)
+        response = test_client.post(f"/api/runs/{run_id}/fix?stream=1")
+
+    events = _stream_events(response)
+    assert [(event["type"], event["round"]) for event in events] == [
+        ("round_started", 1),
+        ("proposal", 1),
+        ("verdict", 1),
+        ("round_started", 2),
+    ]
+    assert slow.aborted.is_set(), "the model call was left running"
+    assert slow.attempted == 3  # no third round was started after the abort
+    run_dir = tmp_path / run_id
+    for name in ("corrections.json", "redline.pdf", "redline.png"):
+        assert not (run_dir / name).exists(), name
+    assert (run_dir / "confirmed.json").is_file()
+
+
+def test_closing_the_stream_early_aborts_the_model_call() -> None:
+    """What the server does on a real disconnect: it stops the generator, which aborts."""
+    import asyncio
+
+    from draftcheck.api import _fix_events
+
+    slow = AbortableClient(extraction_data(), hang_from=1)  # round one is the first call
+    guard = GuardedClient(slow, seconds=30)
+    drawing = parse_drawing(extraction_data())
+    limiter = UsageLimiter(ROOMY)
+
+    async def never_gone(request) -> bool:
+        return False
+
+    async def finish(report):
+        raise AssertionError("nothing may be saved after a disconnect")
+
+    async def run() -> dict:
+        events = _fix_events(None, never_gone, guard, drawing, b"png", "m", finish, limiter)
+        first = json.loads(await events.__anext__())
+        await events.aclose()
+        # Let the worker thread see the abort and end while the loop is still running.
+        await asyncio.sleep(0.3)
+        return first
+
+    first = asyncio.run(run())
+    assert first["type"] == "round_started"
+    assert slow.aborted.is_set(), "the model call was left running"
+    assert guard.cancelled
+    assert slow.calls == []  # round one never got an answer

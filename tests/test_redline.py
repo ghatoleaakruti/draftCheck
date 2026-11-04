@@ -325,6 +325,45 @@ def test_a_refused_edit_is_written_in_red_and_struck_through(plate_drawing: Draw
     assert max(colour_count(row, PEN_RED) for row in rows) > 15, "no strike line"
 
 
+#: Applies cleanly and cites GDT-001, but changes nothing GDT-001 is about.
+TIGHTEN = {
+    "op": "set_field",
+    "target": "fcf",
+    "id": "F1",
+    "field": "tolerance",
+    "value": 0.2,
+    "rationale": "Tighter is better.",
+    "finding_ids": ["GDT-001@F1"],
+}
+
+
+def test_a_rolled_back_edit_is_written_in_red_and_struck_through(plate_drawing: Drawing):
+    report = correct(plate_drawing, blank_page_png(), _EditsClient([TIGHTEN]), max_rounds=1)
+    assert report.rounds[0].applied == [] and report.rounds[0].rolled_back
+
+    page1, _ = render_redline(blank_page_png(), run_rules(plate_drawing), report)
+
+    strip = pen_strip(FRAME_BBOX)
+    assert colour_count(page1, PEN_RED, strip) > 20, "the label should be red, not amber"
+    assert colour_count(page1, PEN_AMBER, strip) == 0
+    rows = [page1.crop((strip[0], y, strip[2], y + 1)) for y in range(strip[1], strip[3])]
+    assert max(colour_count(row, PEN_RED) for row in rows) > 15, "no strike line"
+
+
+def test_a_rolled_back_edit_is_listed_but_not_kept(plate_drawing: Drawing):
+    report = correct(plate_drawing, blank_page_png(), _EditsClient([TIGHTEN]), max_rounds=1)
+
+    findings = run_rules(plate_drawing)
+    number = next(i for i, finding in enumerate(findings, 1) if finding.rule_id == "GDT-001")
+    lines = findings_text(findings, report)
+    rows = table_rows(lines)
+
+    assert rows == [[str(number), "⌖ 0.25 | A | C", "⌖ 0.2 | A | C", "Failed, rolled back"]]
+    # The corrected drawing, and so page 2's "fix:" lines, carry only kept edits.
+    assert report.final_drawing.fcfs[0].tolerance == 0.25
+    assert "fix: no edit was applied for this finding" in [line.text for line in lines]
+
+
 def test_the_pen_font_falls_back_to_archivo_for_a_missing_character():
     assert Path(_pen_font_for("drop C", 30).path) == PEN_FONT
     assert Path(_pen_font_for("Ø0.25", 30).path) == ARCHIVO_FONT
@@ -463,7 +502,7 @@ def test_the_corrections_table_uses_the_same_strings_as_fix(
     on_screen = [
         (edit["before"], edit["after"])
         for round_ in _summarize(report)["rounds"]
-        for edit in round_["applied"] + round_["rejected"]
+        for edit in round_["applied"] + round_["rolled_back"] + round_["rejected"]
     ]
 
     rows = table_rows(findings_text(run_rules(plate_drawing), report))

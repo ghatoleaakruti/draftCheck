@@ -33,7 +33,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import ValidationError
 
-from draftcheck.agent import CorrectionReport
+from draftcheck.agent import CorrectionReport, RolledBackEdit
 from draftcheck.edits import (
     AddDatum,
     AddDimension,
@@ -503,7 +503,8 @@ def _mark_drawing(
                     continue
                 anchor = _box_pixels(bbox, image.width, image.height, 0)
                 colour = PEN_GREEN if row.status == "verified" else PEN_AMBER
-            rejected = row.status == "rejected"
+            # A refused or rolled-back edit is not on the drawing: red, struck through.
+            rejected = row.status in {"rejected", "failed"}
             note = _draw_pen_label(
                 draw,
                 row.display.pen,
@@ -621,6 +622,17 @@ class EditNames:
 
     def __init__(self, report: CorrectionReport):
         self.drawings = (report.original_drawing, report.final_drawing)
+
+    @classmethod
+    def for_drawings(cls, original: Drawing, latest: Drawing) -> EditNames:
+        """Names for a run still in progress, whose latest drawing stands in for the final.
+
+        The live rounds on the page word each edit before the loop has finished, so there
+        is no report yet; the drawing as it stands after the round is the best "final".
+        """
+        names = cls.__new__(cls)
+        names.drawings = (original, latest)
+        return names
 
     def _find(self, list_name: str, item_id: str | None):
         for drawing in self.drawings:
@@ -964,12 +976,22 @@ def edit_display(edit: Edit, before: Drawing, after: Drawing | None) -> EditDisp
     )
 
 
+def rolled_back_display(item: RolledBackEdit, start: Drawing) -> EditDisplay:
+    """A rolled-back edit's before/after, read against the drawing its round started from.
+
+    It is not on the drawing any more, so its "after" is what it did before it was undone;
+    one that no longer applies on its own shows what it asked for instead.
+    """
+    changed, took, _ = apply_edits(start, [item.edit])
+    return edit_display(item.edit, start, changed if took else None)
+
+
 @dataclass(frozen=True)
 class Correction:
     """One proposed edit as the redline shows it: what changed, and what came of it."""
 
     display: EditDisplay
-    #: ``verified``, ``held``, ``failed``, or ``rejected`` — the same words /fix uses.
+    #: ``verified``, ``held``, ``failed`` (rolled back), or ``rejected`` — as /fix says.
     status: str
     finding_ids: tuple[str, ...]
 
@@ -998,6 +1020,13 @@ def corrections(report: CorrectionReport) -> list[Correction]:
                 Correction(edit_display(edit, current, after), status, tuple(edit.finding_ids))
             )
             current = after
+        # Undone before the next round, so they are drawn struck through like a refusal.
+        for item in record.rolled_back:
+            rows.append(
+                Correction(
+                    rolled_back_display(item, start), "failed", tuple(item.edit.finding_ids)
+                )
+            )
         for item in record.rejected:
             edit, _ = parse_edit(item.edit)
             if edit is None:
@@ -1219,7 +1248,7 @@ def findings_text(
 CORRECTION_STATUS_WORDS = {
     "verified": "Verified",
     "held": "Held for designer",
-    "failed": "Not verified",
+    "failed": "Failed, rolled back",
     "rejected": "Rejected",
 }
 

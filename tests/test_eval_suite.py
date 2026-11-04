@@ -236,20 +236,24 @@ def test_run_one_scores_a_perfect_reading_and_a_verified_fix() -> None:
     assert result["extraction"]["dims_correct"] == result["extraction"]["dims_expected"]
 
 
-def _remove(fcf_id: str, label: str) -> dict:
+def _remove(fcf_id: str, label: str, finding: str) -> dict:
+    # Cites the finding it fixes: an edit citing none is rolled back as unverifiable.
     return {
         "op": "remove_datum_ref",
         "fcf_id": fcf_id,
         "label": label,
         "rationale": "test",
-        "finding_ids": [],
+        "finding_ids": [finding],
     }
 
 
 def test_fixes_verified_counts_errors_only() -> None:
     """bracket_01: two errors (GDT-001, GDT-003) and one warning (MFG-001)."""
     truth = load_ground_truth("bracket_01")
-    edits = [_remove("fcf_position_holes", "D"), _remove("fcf_flatness", "A")]
+    edits = [
+        _remove("fcf_position_holes", "D", "GDT-001@fcf_position_holes"),
+        _remove("fcf_flatness", "A", "GDT-003@fcf_flatness"),
+    ]
     client = ScriptedClient(truth, edits)
     fixes = run_eval.run_one("bracket_01", "baseten", client_for=lambda _: client)["fixes"]
 
