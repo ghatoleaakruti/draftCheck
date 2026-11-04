@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-11-04T06:21:11+00:00",
+  "generated_at": "2026-11-04T06:59:14+00:00",
   "method": "Generated drawings with known answers; scores computed by Python against ground truth; see docs/EVAL.md.",
   "providers": [
     {
@@ -22,29 +22,29 @@
   "totals": {
     "baseten": {
       "label": "Muse Spark Open (Baseten)",
-      "runs_ok": 0,
-      "errors_caught": 0,
-      "errors_expected": 0,
-      "false_alarms": 0,
-      "fixes_verified": 0,
-      "errors_before": 0,
-      "fallbacks": 0,
-      "latency_s": 0,
-      "part_types_recognized": 0,
-      "part_types_scored": 0
+      "runs_ok": 17,
+      "errors_caught": 11,
+      "errors_expected": 13,
+      "false_alarms": 1,
+      "fixes_verified": 10,
+      "errors_before": 10,
+      "fallbacks": 8,
+      "latency_s": 919.6,
+      "part_types_recognized": 15,
+      "part_types_scored": 17
     },
     "meta": {
       "label": "Muse Spark (Meta Model API)",
-      "runs_ok": 0,
-      "errors_caught": 0,
-      "errors_expected": 0,
-      "false_alarms": 0,
-      "fixes_verified": 0,
-      "errors_before": 0,
+      "runs_ok": 17,
+      "errors_caught": 11,
+      "errors_expected": 13,
+      "false_alarms": 1,
+      "fixes_verified": 10,
+      "errors_before": 10,
       "fallbacks": 0,
-      "latency_s": 0,
-      "part_types_recognized": 0,
-      "part_types_scored": 0
+      "latency_s": 414.3,
+      "part_types_recognized": 15,
+      "part_types_scored": 17
     }
   },
   "drawings": [
@@ -73,8 +73,8 @@
           "rule_id": "GDT-001",
           "description": "The position feature control frame references datum C as its tertiary datum, but no datum feature symbol C appears on the drawing. Only datums A and B are defined.",
           "caught_by": {
-            "baseten": null,
-            "meta": null
+            "baseten": true,
+            "meta": true
           }
         }
       ],
@@ -83,18 +83,94 @@
       "pdf": "eval/pdfs/plate_001.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "meta-models/muse-spark-open-1026",
+          "fell_back": true,
+          "latency_s": 78.11,
+          "extraction": {
+            "dims_expected": 6,
+            "dims_found": 6,
+            "dims_correct": 6,
+            "fcfs_expected": 1,
+            "fcfs_found": 1,
+            "fcfs_correct": 1,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "GDT-001"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 1,
+            "fixes_verified": 1,
+            "rounds": 1
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 26.34,
+          "extraction": {
+            "dims_expected": 6,
+            "dims_found": 6,
+            "dims_correct": 6,
+            "fcfs_expected": 1,
+            "fcfs_found": 1,
+            "fcfs_correct": 1,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "GDT-001"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 1,
+            "fixes_verified": 1,
+            "rounds": 1
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "bracket",
+          "part_type_correct": false,
+          "views_expected": 1,
+          "views_found": 1,
+          "views_extra": 0,
+          "dims_with_view": 6,
+          "dims_view_correct": 6,
+          "projection": "unclear",
+          "latency_s": 16.22
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "plate",
+          "part_type_correct": true,
+          "views_expected": 1,
+          "views_found": 1,
+          "views_extra": 0,
+          "dims_with_view": 6,
+          "dims_view_correct": 6,
+          "projection": "unclear",
+          "latency_s": 9.58
         }
       }
     },
@@ -124,18 +200,90 @@
       "pdf": "eval/pdfs/plate_clean.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "meta-models/muse-spark-open-1026",
+          "fell_back": false,
+          "latency_s": 19.87,
+          "extraction": {
+            "dims_expected": 6,
+            "dims_found": 6,
+            "dims_correct": 6,
+            "fcfs_expected": 1,
+            "fcfs_found": 1,
+            "fcfs_correct": 1,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 0,
+            "errors_caught": 0,
+            "caught": [],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 0,
+            "fixes_verified": 0,
+            "rounds": 0
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 12.4,
+          "extraction": {
+            "dims_expected": 6,
+            "dims_found": 6,
+            "dims_correct": 6,
+            "fcfs_expected": 1,
+            "fcfs_found": 1,
+            "fcfs_correct": 1,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 0,
+            "errors_caught": 0,
+            "caught": [],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 0,
+            "fixes_verified": 0,
+            "rounds": 0
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "plate",
+          "part_type_correct": true,
+          "views_expected": 1,
+          "views_found": 1,
+          "views_extra": 0,
+          "dims_with_view": 6,
+          "dims_view_correct": 6,
+          "projection": "unclear",
+          "latency_s": 13.01
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "plate",
+          "part_type_correct": true,
+          "views_expected": 1,
+          "views_found": 0,
+          "views_extra": 1,
+          "dims_with_view": 6,
+          "dims_view_correct": 0,
+          "projection": "unclear",
+          "latency_s": 10.35
         }
       }
     },
@@ -164,8 +312,8 @@
           "rule_id": "GDT-002",
           "description": "Two datum feature symbols are both labelled A: one on the bottom edge and one on the top edge.",
           "caught_by": {
-            "baseten": null,
-            "meta": null
+            "baseten": false,
+            "meta": true
           }
         }
       ],
@@ -174,18 +322,94 @@
       "pdf": "eval/pdfs/plate_dup_datum.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "meta-models/muse-spark-open-1026",
+          "fell_back": false,
+          "latency_s": 27.56,
+          "extraction": {
+            "dims_expected": 6,
+            "dims_found": 6,
+            "dims_correct": 6,
+            "fcfs_expected": 1,
+            "fcfs_found": 1,
+            "fcfs_correct": 1,
+            "datums_expected": 3,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 0,
+            "caught": [],
+            "missed": [
+              "GDT-002"
+            ],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 0,
+            "fixes_verified": 0,
+            "rounds": 0
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 35.26,
+          "extraction": {
+            "dims_expected": 6,
+            "dims_found": 6,
+            "dims_correct": 6,
+            "fcfs_expected": 1,
+            "fcfs_found": 1,
+            "fcfs_correct": 1,
+            "datums_expected": 3,
+            "datums_found": 3,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "GDT-002"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 1,
+            "fixes_verified": 1,
+            "rounds": 1
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "plate",
+          "part_type_correct": true,
+          "views_expected": 1,
+          "views_found": 1,
+          "views_extra": 0,
+          "dims_with_view": 6,
+          "dims_view_correct": 6,
+          "projection": "unclear",
+          "latency_s": 14.72
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "plate",
+          "part_type_correct": true,
+          "views_expected": 1,
+          "views_found": 0,
+          "views_extra": 1,
+          "dims_with_view": 6,
+          "dims_view_correct": 0,
+          "projection": "unclear",
+          "latency_s": 16.34
         }
       }
     },
@@ -215,8 +439,8 @@
           "rule_id": "GDT-003",
           "description": "The flatness frame references datum A. Flatness is a form control and takes no datum.",
           "caught_by": {
-            "baseten": null,
-            "meta": null
+            "baseten": true,
+            "meta": true
           }
         }
       ],
@@ -225,18 +449,94 @@
       "pdf": "eval/pdfs/plate_flatness_datum.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "meta-models/muse-spark-open-1026",
+          "fell_back": false,
+          "latency_s": 40.81,
+          "extraction": {
+            "dims_expected": 6,
+            "dims_found": 6,
+            "dims_correct": 6,
+            "fcfs_expected": 2,
+            "fcfs_found": 2,
+            "fcfs_correct": 2,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "GDT-003"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 1,
+            "fixes_verified": 1,
+            "rounds": 1
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 16.22,
+          "extraction": {
+            "dims_expected": 6,
+            "dims_found": 6,
+            "dims_correct": 6,
+            "fcfs_expected": 2,
+            "fcfs_found": 2,
+            "fcfs_correct": 2,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "GDT-003"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 1,
+            "fixes_verified": 1,
+            "rounds": 1
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "plate",
+          "part_type_correct": true,
+          "views_expected": 1,
+          "views_found": 1,
+          "views_extra": 0,
+          "dims_with_view": 6,
+          "dims_view_correct": 6,
+          "projection": "unclear",
+          "latency_s": 14.18
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "plate",
+          "part_type_correct": true,
+          "views_expected": 1,
+          "views_found": 0,
+          "views_extra": 1,
+          "dims_with_view": 6,
+          "dims_view_correct": 0,
+          "projection": "unclear",
+          "latency_s": 12.65
         }
       }
     },
@@ -265,8 +565,8 @@
           "rule_id": "GDT-004",
           "description": "The holes carry a position tolerance, but their locating dimensions (20, 80, 30) are plain dimensions, not basic ones.",
           "caught_by": {
-            "baseten": null,
-            "meta": null
+            "baseten": true,
+            "meta": true
           }
         }
       ],
@@ -275,18 +575,94 @@
       "pdf": "eval/pdfs/plate_no_basic.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "meta-models/muse-spark-open-1026",
+          "fell_back": false,
+          "latency_s": 31.01,
+          "extraction": {
+            "dims_expected": 6,
+            "dims_found": 6,
+            "dims_correct": 6,
+            "fcfs_expected": 1,
+            "fcfs_found": 1,
+            "fcfs_correct": 1,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "GDT-004"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 1,
+            "fixes_verified": 1,
+            "rounds": 1
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 20.42,
+          "extraction": {
+            "dims_expected": 6,
+            "dims_found": 6,
+            "dims_correct": 6,
+            "fcfs_expected": 1,
+            "fcfs_found": 1,
+            "fcfs_correct": 1,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "GDT-004"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 1,
+            "fixes_verified": 1,
+            "rounds": 1
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "plate",
+          "part_type_correct": true,
+          "views_expected": 1,
+          "views_found": 1,
+          "views_extra": 0,
+          "dims_with_view": 6,
+          "dims_view_correct": 6,
+          "projection": "unclear",
+          "latency_s": 42.51
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "plate",
+          "part_type_correct": true,
+          "views_expected": 1,
+          "views_found": 0,
+          "views_extra": 1,
+          "dims_with_view": 6,
+          "dims_view_correct": 0,
+          "projection": "unclear",
+          "latency_s": 10.8
         }
       }
     },
@@ -315,8 +691,8 @@
           "rule_id": "DIM-001",
           "description": "The title block gives no general tolerance, and the overall height 60 prints no tolerance of its own.",
           "caught_by": {
-            "baseten": null,
-            "meta": null
+            "baseten": true,
+            "meta": true
           }
         }
       ],
@@ -325,18 +701,94 @@
       "pdf": "eval/pdfs/plate_no_gentol.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "meta-models/muse-spark-open-1026",
+          "fell_back": false,
+          "latency_s": 48.45,
+          "extraction": {
+            "dims_expected": 6,
+            "dims_found": 5,
+            "dims_correct": 5,
+            "fcfs_expected": 1,
+            "fcfs_found": 1,
+            "fcfs_correct": 1,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "DIM-001"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 1,
+            "fixes_verified": 1,
+            "rounds": 1
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 42.77,
+          "extraction": {
+            "dims_expected": 6,
+            "dims_found": 6,
+            "dims_correct": 6,
+            "fcfs_expected": 1,
+            "fcfs_found": 1,
+            "fcfs_correct": 1,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "DIM-001"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 1,
+            "fixes_verified": 1,
+            "rounds": 1
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "plate",
+          "part_type_correct": true,
+          "views_expected": 1,
+          "views_found": 1,
+          "views_extra": 0,
+          "dims_with_view": 6,
+          "dims_view_correct": 6,
+          "projection": "unclear",
+          "latency_s": 14.28
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "plate",
+          "part_type_correct": true,
+          "views_expected": 1,
+          "views_found": 0,
+          "views_extra": 1,
+          "dims_with_view": 6,
+          "dims_view_correct": 0,
+          "projection": "unclear",
+          "latency_s": 11.57
         }
       }
     },
@@ -365,8 +817,8 @@
           "rule_id": "MFG-001",
           "description": "Hole 3 (Ø6) has its centre 5 mm from the right edge, leaving a web far thinner than one hole diameter.",
           "caught_by": {
-            "baseten": null,
-            "meta": null
+            "baseten": true,
+            "meta": true
           }
         }
       ],
@@ -375,18 +827,94 @@
       "pdf": "eval/pdfs/plate_edge_hole.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": true,
+          "latency_s": 56.51,
+          "extraction": {
+            "dims_expected": 9,
+            "dims_found": 9,
+            "dims_correct": 9,
+            "fcfs_expected": 1,
+            "fcfs_found": 1,
+            "fcfs_correct": 1,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "MFG-001"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 0,
+            "fixes_verified": 0,
+            "rounds": 0
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 14.92,
+          "extraction": {
+            "dims_expected": 9,
+            "dims_found": 9,
+            "dims_correct": 9,
+            "fcfs_expected": 1,
+            "fcfs_found": 1,
+            "fcfs_correct": 1,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "MFG-001"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 0,
+            "fixes_verified": 0,
+            "rounds": 0
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "plate",
+          "part_type_correct": true,
+          "views_expected": 1,
+          "views_found": 1,
+          "views_extra": 0,
+          "dims_with_view": 9,
+          "dims_view_correct": 9,
+          "projection": "unclear",
+          "latency_s": 17.5
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "plate",
+          "part_type_correct": true,
+          "views_expected": 1,
+          "views_found": 0,
+          "views_extra": 1,
+          "dims_with_view": 9,
+          "dims_view_correct": 0,
+          "projection": "unclear",
+          "latency_s": 17.5
         }
       }
     },
@@ -417,24 +945,24 @@
           "rule_id": "GDT-001",
           "description": "The position frame references datum D, but the drawing defines only A and B.",
           "caught_by": {
-            "baseten": null,
-            "meta": null
+            "baseten": true,
+            "meta": true
           }
         },
         {
           "rule_id": "GDT-003",
           "description": "The flatness frame on the back face references datum A.",
           "caught_by": {
-            "baseten": null,
-            "meta": null
+            "baseten": true,
+            "meta": true
           }
         },
         {
           "rule_id": "MFG-001",
           "description": "The Ø6 hole has its centre 5 mm from the right edge.",
           "caught_by": {
-            "baseten": null,
-            "meta": null
+            "baseten": false,
+            "meta": false
           }
         }
       ],
@@ -443,18 +971,100 @@
       "pdf": "eval/pdfs/bracket_01.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": true,
+          "latency_s": 136.93,
+          "extraction": {
+            "dims_expected": 11,
+            "dims_found": 11,
+            "dims_correct": 11,
+            "fcfs_expected": 2,
+            "fcfs_found": 2,
+            "fcfs_correct": 2,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 3,
+            "errors_caught": 2,
+            "caught": [
+              "GDT-001",
+              "GDT-003"
+            ],
+            "missed": [
+              "MFG-001"
+            ],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 2,
+            "fixes_verified": 2,
+            "rounds": 1
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 53.89,
+          "extraction": {
+            "dims_expected": 11,
+            "dims_found": 11,
+            "dims_correct": 11,
+            "fcfs_expected": 2,
+            "fcfs_found": 2,
+            "fcfs_correct": 2,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 3,
+            "errors_caught": 2,
+            "caught": [
+              "GDT-001",
+              "GDT-003"
+            ],
+            "missed": [
+              "MFG-001"
+            ],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 2,
+            "fixes_verified": 2,
+            "rounds": 1
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "bracket",
+          "part_type_correct": true,
+          "views_expected": 2,
+          "views_found": 2,
+          "views_extra": 0,
+          "dims_with_view": 11,
+          "dims_view_correct": 11,
+          "projection": "unclear",
+          "latency_s": 17.9
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "bracket",
+          "part_type_correct": true,
+          "views_expected": 2,
+          "views_found": 2,
+          "views_extra": 0,
+          "dims_with_view": 11,
+          "dims_view_correct": 11,
+          "projection": "unclear",
+          "latency_s": 15.36
         }
       }
     },
@@ -484,8 +1094,8 @@
           "rule_id": "GDT-002",
           "description": "Datum B is placed twice: on the left edge and again on the right edge.",
           "caught_by": {
-            "baseten": null,
-            "meta": null
+            "baseten": true,
+            "meta": false
           }
         }
       ],
@@ -494,18 +1104,94 @@
       "pdf": "eval/pdfs/plate_inch_multi.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "meta-models/muse-spark-open-1026",
+          "fell_back": false,
+          "latency_s": 38.58,
+          "extraction": {
+            "dims_expected": 7,
+            "dims_found": 7,
+            "dims_correct": 7,
+            "fcfs_expected": 2,
+            "fcfs_found": 2,
+            "fcfs_correct": 2,
+            "datums_expected": 3,
+            "datums_found": 3,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "GDT-002"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 1,
+            "fixes_verified": 1,
+            "rounds": 1
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 23.07,
+          "extraction": {
+            "dims_expected": 7,
+            "dims_found": 7,
+            "dims_correct": 7,
+            "fcfs_expected": 2,
+            "fcfs_found": 2,
+            "fcfs_correct": 2,
+            "datums_expected": 3,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 0,
+            "caught": [],
+            "missed": [
+              "GDT-002"
+            ],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 0,
+            "fixes_verified": 0,
+            "rounds": 0
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "cover",
+          "part_type_correct": false,
+          "views_expected": 1,
+          "views_found": 1,
+          "views_extra": 0,
+          "dims_with_view": 7,
+          "dims_view_correct": 7,
+          "projection": "unclear",
+          "latency_s": 24.43
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "cover",
+          "part_type_correct": false,
+          "views_expected": 1,
+          "views_found": 1,
+          "views_extra": 0,
+          "dims_with_view": 7,
+          "dims_view_correct": 7,
+          "projection": "unclear",
+          "latency_s": 14.64
         }
       }
     },
@@ -536,18 +1222,90 @@
       "pdf": "eval/pdfs/gear_spur.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": true,
+          "latency_s": 60.3,
+          "extraction": {
+            "dims_expected": 8,
+            "dims_found": 8,
+            "dims_correct": 8,
+            "fcfs_expected": 1,
+            "fcfs_found": 0,
+            "fcfs_correct": 0,
+            "datums_expected": 1,
+            "datums_found": 1,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 0,
+            "errors_caught": 0,
+            "caught": [],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 0,
+            "fixes_verified": 0,
+            "rounds": 0
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 13.24,
+          "extraction": {
+            "dims_expected": 8,
+            "dims_found": 8,
+            "dims_correct": 8,
+            "fcfs_expected": 1,
+            "fcfs_found": 0,
+            "fcfs_correct": 0,
+            "datums_expected": 1,
+            "datums_found": 1,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 0,
+            "errors_caught": 0,
+            "caught": [],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 0,
+            "fixes_verified": 0,
+            "rounds": 0
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "gear",
+          "part_type_correct": true,
+          "views_expected": 2,
+          "views_found": 2,
+          "views_extra": 0,
+          "dims_with_view": 8,
+          "dims_view_correct": 8,
+          "projection": "third-angle",
+          "latency_s": 16.59
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "gear",
+          "part_type_correct": true,
+          "views_expected": 2,
+          "views_found": 2,
+          "views_extra": 0,
+          "dims_with_view": 8,
+          "dims_view_correct": 8,
+          "projection": "third-angle",
+          "latency_s": 14.79
         }
       }
     },
@@ -576,18 +1334,90 @@
       "pdf": "eval/pdfs/hex_nut.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "meta-models/muse-spark-open-1026",
+          "fell_back": false,
+          "latency_s": 17.02,
+          "extraction": {
+            "dims_expected": 4,
+            "dims_found": 3,
+            "dims_correct": 3,
+            "fcfs_expected": 0,
+            "fcfs_found": 0,
+            "fcfs_correct": 0,
+            "datums_expected": 0,
+            "datums_found": 0,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 0,
+            "errors_caught": 0,
+            "caught": [],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 0,
+            "fixes_verified": 0,
+            "rounds": 0
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 11.9,
+          "extraction": {
+            "dims_expected": 4,
+            "dims_found": 4,
+            "dims_correct": 4,
+            "fcfs_expected": 0,
+            "fcfs_found": 0,
+            "fcfs_correct": 0,
+            "datums_expected": 0,
+            "datums_found": 0,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 0,
+            "errors_caught": 0,
+            "caught": [],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 0,
+            "fixes_verified": 0,
+            "rounds": 0
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "fastener",
+          "part_type_correct": true,
+          "views_expected": 2,
+          "views_found": 2,
+          "views_extra": 0,
+          "dims_with_view": 4,
+          "dims_view_correct": 4,
+          "projection": "third-angle",
+          "latency_s": 13.5
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "fastener",
+          "part_type_correct": true,
+          "views_expected": 2,
+          "views_found": 2,
+          "views_extra": 0,
+          "dims_with_view": 4,
+          "dims_view_correct": 4,
+          "projection": "third-angle",
+          "latency_s": 8.63
         }
       }
     },
@@ -616,18 +1446,90 @@
       "pdf": "eval/pdfs/hex_bolt.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "meta-models/muse-spark-open-1026",
+          "fell_back": false,
+          "latency_s": 19.98,
+          "extraction": {
+            "dims_expected": 5,
+            "dims_found": 4,
+            "dims_correct": 4,
+            "fcfs_expected": 0,
+            "fcfs_found": 0,
+            "fcfs_correct": 0,
+            "datums_expected": 0,
+            "datums_found": 0,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 0,
+            "errors_caught": 0,
+            "caught": [],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 0,
+            "fixes_verified": 0,
+            "rounds": 0
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 10.83,
+          "extraction": {
+            "dims_expected": 5,
+            "dims_found": 5,
+            "dims_correct": 5,
+            "fcfs_expected": 0,
+            "fcfs_found": 0,
+            "fcfs_correct": 0,
+            "datums_expected": 0,
+            "datums_found": 0,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 0,
+            "errors_caught": 0,
+            "caught": [],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 0,
+            "fixes_verified": 0,
+            "rounds": 0
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "fastener",
+          "part_type_correct": true,
+          "views_expected": 2,
+          "views_found": 2,
+          "views_extra": 0,
+          "dims_with_view": 5,
+          "dims_view_correct": 5,
+          "projection": "third-angle",
+          "latency_s": 13.33
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "fastener",
+          "part_type_correct": true,
+          "views_expected": 2,
+          "views_found": 2,
+          "views_extra": 0,
+          "dims_with_view": 5,
+          "dims_view_correct": 5,
+          "projection": "third-angle",
+          "latency_s": 8.07
         }
       }
     },
@@ -658,8 +1560,8 @@
           "rule_id": "GDT-001",
           "description": "The hole position frame references datum C, but the drawing defines only A (the back face) and B (the bore).",
           "caught_by": {
-            "baseten": null,
-            "meta": null
+            "baseten": true,
+            "meta": true
           }
         }
       ],
@@ -668,18 +1570,94 @@
       "pdf": "eval/pdfs/flange.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": true,
+          "latency_s": 82.99,
+          "extraction": {
+            "dims_expected": 7,
+            "dims_found": 7,
+            "dims_correct": 7,
+            "fcfs_expected": 2,
+            "fcfs_found": 2,
+            "fcfs_correct": 2,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "GDT-001"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 1,
+            "fixes_verified": 1,
+            "rounds": 1
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 28.09,
+          "extraction": {
+            "dims_expected": 7,
+            "dims_found": 7,
+            "dims_correct": 7,
+            "fcfs_expected": 2,
+            "fcfs_found": 2,
+            "fcfs_correct": 2,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "GDT-001"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 1,
+            "fixes_verified": 1,
+            "rounds": 1
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "flange",
+          "part_type_correct": true,
+          "views_expected": 2,
+          "views_found": 2,
+          "views_extra": 0,
+          "dims_with_view": 7,
+          "dims_view_correct": 7,
+          "projection": "third-angle",
+          "latency_s": 20.43
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "flange",
+          "part_type_correct": true,
+          "views_expected": 2,
+          "views_found": 2,
+          "views_extra": 0,
+          "dims_with_view": 7,
+          "dims_view_correct": 7,
+          "projection": "third-angle",
+          "latency_s": 15.99
         }
       }
     },
@@ -710,8 +1688,8 @@
           "rule_id": "DIM-001",
           "description": "The title block gives no general tolerance, and the collar diameter Ø40 prints no tolerance of its own.",
           "caught_by": {
-            "baseten": null,
-            "meta": null
+            "baseten": true,
+            "meta": true
           }
         }
       ],
@@ -720,18 +1698,94 @@
       "pdf": "eval/pdfs/stepped_shaft.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": true,
+          "latency_s": 97.93,
+          "extraction": {
+            "dims_expected": 12,
+            "dims_found": 12,
+            "dims_correct": 12,
+            "fcfs_expected": 1,
+            "fcfs_found": 0,
+            "fcfs_correct": 0,
+            "datums_expected": 1,
+            "datums_found": 1,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "DIM-001"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 1,
+            "fixes_verified": 1,
+            "rounds": 1
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 56.96,
+          "extraction": {
+            "dims_expected": 12,
+            "dims_found": 12,
+            "dims_correct": 12,
+            "fcfs_expected": 1,
+            "fcfs_found": 0,
+            "fcfs_correct": 0,
+            "datums_expected": 1,
+            "datums_found": 1,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "DIM-001"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 1,
+            "fixes_verified": 1,
+            "rounds": 1
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "shaft",
+          "part_type_correct": true,
+          "views_expected": 3,
+          "views_found": 3,
+          "views_extra": 0,
+          "dims_with_view": 12,
+          "dims_view_correct": 12,
+          "projection": "third-angle",
+          "latency_s": 15.24
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "shaft",
+          "part_type_correct": true,
+          "views_expected": 3,
+          "views_found": 3,
+          "views_extra": 0,
+          "dims_with_view": 12,
+          "dims_view_correct": 12,
+          "projection": "third-angle",
+          "latency_s": 16.03
         }
       }
     },
@@ -762,18 +1816,94 @@
       "pdf": "eval/pdfs/gripper_claw.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": true,
+          "latency_s": 70.82,
+          "extraction": {
+            "dims_expected": 13,
+            "dims_found": 13,
+            "dims_correct": 13,
+            "fcfs_expected": 1,
+            "fcfs_found": 0,
+            "fcfs_correct": 0,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 0,
+            "errors_caught": 0,
+            "caught": [],
+            "missed": [],
+            "false_alarms": [
+              "MFG-001"
+            ]
+          },
+          "fixes": {
+            "errors_before": 0,
+            "fixes_verified": 0,
+            "rounds": 0
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 13.42,
+          "extraction": {
+            "dims_expected": 13,
+            "dims_found": 13,
+            "dims_correct": 13,
+            "fcfs_expected": 1,
+            "fcfs_found": 0,
+            "fcfs_correct": 0,
+            "datums_expected": 2,
+            "datums_found": 2,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 0,
+            "errors_caught": 0,
+            "caught": [],
+            "missed": [],
+            "false_alarms": [
+              "MFG-001"
+            ]
+          },
+          "fixes": {
+            "errors_before": 0,
+            "fixes_verified": 0,
+            "rounds": 0
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "other",
+          "part_type_correct": true,
+          "views_expected": 2,
+          "views_found": 2,
+          "views_extra": 0,
+          "dims_with_view": 13,
+          "dims_view_correct": 13,
+          "projection": "third-angle",
+          "latency_s": 18.94
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "plate",
+          "part_type_correct": false,
+          "views_expected": 2,
+          "views_found": 2,
+          "views_extra": 0,
+          "dims_with_view": 13,
+          "dims_view_correct": 13,
+          "projection": "third-angle",
+          "latency_s": 18.98
         }
       }
     },
@@ -808,8 +1938,8 @@
           "rule_id": "GDT-003",
           "description": "The flatness frame on the bottom face references datum A. Flatness is a form control and takes no datum.",
           "caught_by": {
-            "baseten": null,
-            "meta": null
+            "baseten": true,
+            "meta": true
           }
         }
       ],
@@ -818,18 +1948,94 @@
       "pdf": "eval/pdfs/block_3view.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": true,
+          "latency_s": 71.06,
+          "extraction": {
+            "dims_expected": 24,
+            "dims_found": 10,
+            "dims_correct": 10,
+            "fcfs_expected": 2,
+            "fcfs_found": 2,
+            "fcfs_correct": 2,
+            "datums_expected": 1,
+            "datums_found": 1,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "GDT-003"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 1,
+            "fixes_verified": 1,
+            "rounds": 1
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 24.25,
+          "extraction": {
+            "dims_expected": 24,
+            "dims_found": 10,
+            "dims_correct": 10,
+            "fcfs_expected": 2,
+            "fcfs_found": 2,
+            "fcfs_correct": 2,
+            "datums_expected": 1,
+            "datums_found": 1,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 1,
+            "errors_caught": 1,
+            "caught": [
+              "GDT-003"
+            ],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 1,
+            "fixes_verified": 1,
+            "rounds": 1
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "block",
+          "part_type_correct": true,
+          "views_expected": 4,
+          "views_found": 3,
+          "views_extra": 1,
+          "dims_with_view": 24,
+          "dims_view_correct": 23,
+          "projection": "third-angle",
+          "latency_s": 20.24
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "block",
+          "part_type_correct": true,
+          "views_expected": 4,
+          "views_found": 4,
+          "views_extra": 0,
+          "dims_with_view": 24,
+          "dims_view_correct": 24,
+          "projection": "third-angle",
+          "latency_s": 19.44
         }
       }
     },
@@ -860,18 +2066,90 @@
       "pdf": "eval/pdfs/bolted_joint.pdf",
       "runs": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "model": "meta-models/muse-spark-open-1026",
+          "fell_back": false,
+          "latency_s": 21.72,
+          "extraction": {
+            "dims_expected": 3,
+            "dims_found": 3,
+            "dims_correct": 3,
+            "fcfs_expected": 0,
+            "fcfs_found": 0,
+            "fcfs_correct": 0,
+            "datums_expected": 0,
+            "datums_found": 0,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 0,
+            "errors_caught": 0,
+            "caught": [],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 0,
+            "fixes_verified": 0,
+            "rounds": 0
+          }
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "model": "muse-spark-1.2",
+          "fell_back": false,
+          "latency_s": 10.28,
+          "extraction": {
+            "dims_expected": 3,
+            "dims_found": 3,
+            "dims_correct": 3,
+            "fcfs_expected": 0,
+            "fcfs_found": 0,
+            "fcfs_correct": 0,
+            "datums_expected": 0,
+            "datums_found": 0,
+            "units_correct": true,
+            "general_tolerance_correct": true
+          },
+          "errors": {
+            "errors_expected": 0,
+            "errors_caught": 0,
+            "caught": [],
+            "missed": [],
+            "false_alarms": []
+          },
+          "fixes": {
+            "errors_before": 0,
+            "fixes_verified": 0,
+            "rounds": 0
+          }
         }
       },
       "explain": {
         "baseten": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "assembly",
+          "part_type_correct": true,
+          "views_expected": 2,
+          "views_found": 1,
+          "views_extra": 1,
+          "dims_with_view": 3,
+          "dims_view_correct": 2,
+          "projection": "third-angle",
+          "latency_s": 14.29
         },
         "meta": {
-          "status": "not run"
+          "status": "ok",
+          "part_type": "assembly",
+          "part_type_correct": true,
+          "views_expected": 2,
+          "views_found": 1,
+          "views_extra": 1,
+          "dims_with_view": 3,
+          "dims_view_correct": 2,
+          "projection": "third-angle",
+          "latency_s": 8.63
         }
       }
     }

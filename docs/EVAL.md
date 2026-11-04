@@ -14,28 +14,116 @@ Each drawing in `samples/generated/` runs through the real pipeline — extract,
 
 | Drawing | Provider | Status | Dims found | Dims correct | FCFs correct | Datums | Errors caught | False alarms | Fixes verified | Rounds | Latency (s) | Fallback |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| plate_001 | baseten | ok | 6/6 | 6/6 | 1/1 | 2/2 | 1/1 | 0 | 1/1 | 1 | 32.6 | no |
-| plate_001 | meta | ok | 6/6 | 6/6 | 1/1 | 2/2 | 1/1 | 0 | 1/1 | 1 | 21.2 | no |
-| plate_clean | baseten | ok | 6/6 | 6/6 | 1/1 | 2/2 | 0/0 | 0 | n/a | 0 | 21.0 | no |
-| plate_clean | meta | ok | 6/6 | 6/6 | 1/1 | 2/2 | 0/0 | 0 | n/a | 0 | 12.2 | no |
-| plate_dup_datum | baseten | ok | 6/6 | 6/6 | 1/1 | 3/3 | 1/1 | 0 | 1/1 | 1 | 83.7 | yes |
-| plate_dup_datum | meta | ok | 6/6 | 6/6 | 1/1 | 3/3 | 1/1 | 0 | 1/1 | 1 | 27.6 | no |
-| plate_flatness_datum | baseten | ok | 6/6 | 6/6 | 2/2 | 2/2 | 1/1 | 0 | 1/1 | 1 | 67.4 | yes |
-| plate_flatness_datum | meta | ok | 6/6 | 6/6 | 2/2 | 2/2 | 1/1 | 0 | 1/1 | 1 | 24.6 | no |
-| plate_no_basic | baseten | ok | 6/6 | 6/6 | 1/1 | 2/2 | 1/1 | 0 | 1/1 | 1 | 37.2 | no |
-| plate_no_basic | meta | ok | 6/6 | 6/6 | 1/1 | 2/2 | 1/1 | 0 | 1/1 | 1 | 22.1 | no |
-| plate_no_gentol | baseten | ok | 5/6 | 5/6 | 1/1 | 2/2 | 1/1 | 0 | 1/1 | 1 | 49.1 | no |
-| plate_no_gentol | meta | ok | 6/6 | 6/6 | 1/1 | 2/2 | 1/1 | 0 | 1/1 | 1 | 32.8 | no |
-| plate_edge_hole | baseten | ok | 9/9 | 9/9 | 1/1 | 2/2 | 1/1 | 0 | n/a | 0 | 65.4 | yes |
-| plate_edge_hole | meta | ok | 9/9 | 9/9 | 1/1 | 2/2 | 1/1 | 0 | n/a | 0 | 14.8 | no |
-| bracket_01 | baseten | ok | 11/11 | 11/11 | 2/2 | 2/2 | 3/3 | 0 | 2/2 | 1 | 149.0 | yes |
-| bracket_01 | meta | ok | 11/11 | 11/11 | 2/2 | 2/2 | 2/3 | 0 | 2/2 | 1 | 40.0 | no |
-| plate_inch_multi | baseten | ok | 7/7 | 7/7 | 2/2 | 3/3 | 1/1 | 0 | 1/1 | 1 | 40.5 | no |
-| plate_inch_multi | meta | ok | 7/7 | 7/7 | 2/2 | 3/3 | 1/1 | 0 | 1/1 | 1 | 20.0 | no |
+| plate_001 | baseten | ok | 6/6 | 6/6 | 1/1 | 2/2 | 1/1 | 0 | 1/1 | 1 | 78.1 | yes |
+| plate_001 | meta | ok | 6/6 | 6/6 | 1/1 | 2/2 | 1/1 | 0 | 1/1 | 1 | 26.3 | no |
+| plate_clean | baseten | ok | 6/6 | 6/6 | 1/1 | 2/2 | 0/0 | 0 | n/a | 0 | 19.9 | no |
+| plate_clean | meta | ok | 6/6 | 6/6 | 1/1 | 2/2 | 0/0 | 0 | n/a | 0 | 12.4 | no |
+| plate_dup_datum | baseten | ok | 6/6 | 6/6 | 1/1 | 2/3 | 0/1 | 0 | n/a | 0 | 27.6 | no |
+| plate_dup_datum | meta | ok | 6/6 | 6/6 | 1/1 | 3/3 | 1/1 | 0 | 1/1 | 1 | 35.3 | no |
+| plate_flatness_datum | baseten | ok | 6/6 | 6/6 | 2/2 | 2/2 | 1/1 | 0 | 1/1 | 1 | 40.8 | no |
+| plate_flatness_datum | meta | ok | 6/6 | 6/6 | 2/2 | 2/2 | 1/1 | 0 | 1/1 | 1 | 16.2 | no |
+| plate_no_basic | baseten | ok | 6/6 | 6/6 | 1/1 | 2/2 | 1/1 | 0 | 1/1 | 1 | 31.0 | no |
+| plate_no_basic | meta | ok | 6/6 | 6/6 | 1/1 | 2/2 | 1/1 | 0 | 1/1 | 1 | 20.4 | no |
+| plate_no_gentol | baseten | ok | 5/6 | 5/6 | 1/1 | 2/2 | 1/1 | 0 | 1/1 | 1 | 48.5 | no |
+| plate_no_gentol | meta | ok | 6/6 | 6/6 | 1/1 | 2/2 | 1/1 | 0 | 1/1 | 1 | 42.8 | no |
+| plate_edge_hole | baseten | ok | 9/9 | 9/9 | 1/1 | 2/2 | 1/1 | 0 | n/a | 0 | 56.5 | yes |
+| plate_edge_hole | meta | ok | 9/9 | 9/9 | 1/1 | 2/2 | 1/1 | 0 | n/a | 0 | 14.9 | no |
+| bracket_01 | baseten | ok | 11/11 | 11/11 | 2/2 | 2/2 | 2/3 | 0 | 2/2 | 1 | 136.9 | yes |
+| bracket_01 | meta | ok | 11/11 | 11/11 | 2/2 | 2/2 | 2/3 | 0 | 2/2 | 1 | 53.9 | no |
+| plate_inch_multi | baseten | ok | 7/7 | 7/7 | 2/2 | 3/3 | 1/1 | 0 | 1/1 | 1 | 38.6 | no |
+| plate_inch_multi | meta | ok | 7/7 | 7/7 | 2/2 | 2/3 | 0/1 | 0 | n/a | 0 | 23.1 | no |
+| gear_spur | baseten | ok | 8/8 | 8/8 | 0/1 | 1/1 | 0/0 | 0 | n/a | 0 | 60.3 | yes |
+| gear_spur | meta | ok | 8/8 | 8/8 | 0/1 | 1/1 | 0/0 | 0 | n/a | 0 | 13.2 | no |
+| hex_nut | baseten | ok | 3/4 | 3/4 | 0/0 | 0/0 | 0/0 | 0 | n/a | 0 | 17.0 | no |
+| hex_nut | meta | ok | 4/4 | 4/4 | 0/0 | 0/0 | 0/0 | 0 | n/a | 0 | 11.9 | no |
+| hex_bolt | baseten | ok | 4/5 | 4/5 | 0/0 | 0/0 | 0/0 | 0 | n/a | 0 | 20.0 | no |
+| hex_bolt | meta | ok | 5/5 | 5/5 | 0/0 | 0/0 | 0/0 | 0 | n/a | 0 | 10.8 | no |
+| flange | baseten | ok | 7/7 | 7/7 | 2/2 | 2/2 | 1/1 | 0 | 1/1 | 1 | 83.0 | yes |
+| flange | meta | ok | 7/7 | 7/7 | 2/2 | 2/2 | 1/1 | 0 | 1/1 | 1 | 28.1 | no |
+| stepped_shaft | baseten | ok | 12/12 | 12/12 | 0/1 | 1/1 | 1/1 | 0 | 1/1 | 1 | 97.9 | yes |
+| stepped_shaft | meta | ok | 12/12 | 12/12 | 0/1 | 1/1 | 1/1 | 0 | 1/1 | 1 | 57.0 | no |
+| gripper_claw | baseten | ok | 13/13 | 13/13 | 0/1 | 2/2 | 0/0 | 1 (MFG-001) | n/a | 0 | 70.8 | yes |
+| gripper_claw | meta | ok | 13/13 | 13/13 | 0/1 | 2/2 | 0/0 | 1 (MFG-001) | n/a | 0 | 13.4 | no |
+| block_3view | baseten | ok | 10/24 | 10/24 | 2/2 | 1/1 | 1/1 | 0 | 1/1 | 1 | 71.1 | yes |
+| block_3view | meta | ok | 10/24 | 10/24 | 2/2 | 1/1 | 1/1 | 0 | 1/1 | 1 | 24.2 | no |
+| bolted_joint | baseten | ok | 3/3 | 3/3 | 0/0 | 0/0 | 0/0 | 0 | n/a | 0 | 21.7 | no |
+| bolted_joint | meta | ok | 3/3 | 3/3 | 0/0 | 0/0 | 0/0 | 0 | n/a | 0 | 10.3 | no |
 
 ## Totals
 
 | Provider | Runs ok | Skipped | Failed | Dims found | Dims correct | FCFs correct | Datums | Errors caught | False alarms | Fixes verified | Rounds | Latency (s) | Fallbacks |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| baseten | 9 | 0 | 0 | 62/63 | 62/63 | 12/12 | 20/20 | 10/10 | 0 | 8/8 | 7 | 545.8 | 4 |
-| meta | 9 | 0 | 0 | 63/63 | 63/63 | 12/12 | 20/20 | 9/10 | 0 | 8/8 | 7 | 215.1 | 0 |
+| baseten | 17 | 0 | 0 | 122/139 | 122/139 | 16/19 | 26/27 | 11/13 | 1 | 10/10 | 9 | 919.6 | 8 |
+| meta | 17 | 0 | 0 | 125/139 | 125/139 | 16/19 | 26/27 | 11/13 | 1 | 10/10 | 9 | 414.3 | 0 |
+
+## Drawing features
+
+Counted from each drawing's ground truth, so they describe the sheet, not a model's reading of it.
+
+| Drawing | Part | Views | Sections | Details | GD&T frames | Datums | Dimensions | Tables | Balloons | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `plate_001` | plate | 1 (front) | 0 | 0 | position | 2 | 6 | — | 0 | 0 |
+| `plate_clean` | plate | 1 (front) | 0 | 0 | position | 2 | 6 | — | 0 | 0 |
+| `plate_dup_datum` | plate | 1 (front) | 0 | 0 | position | 3 | 6 | — | 0 | 0 |
+| `plate_flatness_datum` | plate | 1 (front) | 0 | 0 | flatness, position | 2 | 6 | — | 0 | 0 |
+| `plate_no_basic` | plate | 1 (front) | 0 | 0 | position | 2 | 6 | — | 0 | 0 |
+| `plate_no_gentol` | plate | 1 (front) | 0 | 0 | position | 2 | 6 | — | 0 | 0 |
+| `plate_edge_hole` | plate | 1 (front) | 0 | 0 | position | 2 | 9 | — | 0 | 0 |
+| `bracket_01` | bracket | 2 (front, right_side) | 0 | 0 | flatness, position | 2 | 11 | — | 0 | 3 |
+| `plate_inch_multi` | plate | 1 (front) | 0 | 0 | perpendicularity, position | 3 | 7 | — | 0 | 0 |
+| `gear_spur` | spur_gear | 2 (front, right_side) | 0 | 0 | circular_runout | 1 | 8 | — | 0 | 4 |
+| `hex_nut` | hex_nut | 2 (top, front) | 0 | 0 | — | 0 | 4 | — | 0 | 4 |
+| `hex_bolt` | hex_bolt | 2 (front, left_side) | 0 | 0 | — | 0 | 5 | — | 0 | 4 |
+| `flange` | flange | 2 (front, section) | 1 | 0 | perpendicularity, position | 2 | 7 | — | 0 | 4 |
+| `stepped_shaft` | stepped_shaft | 3 (front, section, detail) | 1 | 1 | circular_runout | 1 | 12 | — | 0 | 3 |
+| `gripper_claw` | gripper_claw | 2 (front, top) | 0 | 0 | profile_surface | 2 | 13 | — | 0 | 3 |
+| `block_3view` | machined_block | 4 (front, top, right_side, isometric) | 0 | 0 | flatness, parallelism | 1 | 24 | hole_table | 0 | 3 |
+| `bolted_joint` | bolted_joint_assembly | 2 (front, section) | 1 | 0 | — | 0 | 3 | parts_list | 5 | 3 |
+
+## Explanations
+
+Explanations are scored on the ground-truth drawing, so reading errors don't affect them.
+
+The "About this drawing" explanation of each drawing's ground truth, scored in Python: part type right, view names found against the sheet's views (extra names in brackets), and dimensions placed in the right view.
+
+| Drawing | Provider | Status | Part type | Views found | Dims in right view | Projection | Latency (s) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `plate_001` | baseten | ok | bracket (no) | 1/1 | 6/6 | unclear | 16.2 |
+| `plate_001` | meta | ok | plate (yes) | 1/1 | 6/6 | unclear | 9.6 |
+| `plate_clean` | baseten | ok | plate (yes) | 1/1 | 6/6 | unclear | 13.0 |
+| `plate_clean` | meta | ok | plate (yes) | 0/1 (+1) | 0/6 | unclear | 10.3 |
+| `plate_dup_datum` | baseten | ok | plate (yes) | 1/1 | 6/6 | unclear | 14.7 |
+| `plate_dup_datum` | meta | ok | plate (yes) | 0/1 (+1) | 0/6 | unclear | 16.3 |
+| `plate_flatness_datum` | baseten | ok | plate (yes) | 1/1 | 6/6 | unclear | 14.2 |
+| `plate_flatness_datum` | meta | ok | plate (yes) | 0/1 (+1) | 0/6 | unclear | 12.7 |
+| `plate_no_basic` | baseten | ok | plate (yes) | 1/1 | 6/6 | unclear | 42.5 |
+| `plate_no_basic` | meta | ok | plate (yes) | 0/1 (+1) | 0/6 | unclear | 10.8 |
+| `plate_no_gentol` | baseten | ok | plate (yes) | 1/1 | 6/6 | unclear | 14.3 |
+| `plate_no_gentol` | meta | ok | plate (yes) | 0/1 (+1) | 0/6 | unclear | 11.6 |
+| `plate_edge_hole` | baseten | ok | plate (yes) | 1/1 | 9/9 | unclear | 17.5 |
+| `plate_edge_hole` | meta | ok | plate (yes) | 0/1 (+1) | 0/9 | unclear | 17.5 |
+| `bracket_01` | baseten | ok | bracket (yes) | 2/2 | 11/11 | unclear | 17.9 |
+| `bracket_01` | meta | ok | bracket (yes) | 2/2 | 11/11 | unclear | 15.4 |
+| `plate_inch_multi` | baseten | ok | cover (no) | 1/1 | 7/7 | unclear | 24.4 |
+| `plate_inch_multi` | meta | ok | cover (no) | 1/1 | 7/7 | unclear | 14.6 |
+| `gear_spur` | baseten | ok | gear (yes) | 2/2 | 8/8 | third-angle | 16.6 |
+| `gear_spur` | meta | ok | gear (yes) | 2/2 | 8/8 | third-angle | 14.8 |
+| `hex_nut` | baseten | ok | fastener (yes) | 2/2 | 4/4 | third-angle | 13.5 |
+| `hex_nut` | meta | ok | fastener (yes) | 2/2 | 4/4 | third-angle | 8.6 |
+| `hex_bolt` | baseten | ok | fastener (yes) | 2/2 | 5/5 | third-angle | 13.3 |
+| `hex_bolt` | meta | ok | fastener (yes) | 2/2 | 5/5 | third-angle | 8.1 |
+| `flange` | baseten | ok | flange (yes) | 2/2 | 7/7 | third-angle | 20.4 |
+| `flange` | meta | ok | flange (yes) | 2/2 | 7/7 | third-angle | 16.0 |
+| `stepped_shaft` | baseten | ok | shaft (yes) | 3/3 | 12/12 | third-angle | 15.2 |
+| `stepped_shaft` | meta | ok | shaft (yes) | 3/3 | 12/12 | third-angle | 16.0 |
+| `gripper_claw` | baseten | ok | other (yes) | 2/2 | 13/13 | third-angle | 18.9 |
+| `gripper_claw` | meta | ok | plate (no) | 2/2 | 13/13 | third-angle | 19.0 |
+| `block_3view` | baseten | ok | block (yes) | 3/4 (+1) | 23/24 | third-angle | 20.2 |
+| `block_3view` | meta | ok | block (yes) | 4/4 | 24/24 | third-angle | 19.4 |
+| `bolted_joint` | baseten | ok | assembly (yes) | 1/2 (+1) | 2/3 | third-angle | 14.3 |
+| `bolted_joint` | meta | ok | assembly (yes) | 1/2 (+1) | 2/3 | third-angle | 8.6 |
+
+| Provider | Runs ok | Part type right | Views found | Dims in right view |
+| --- | --- | --- | --- | --- |
+| baseten | 17 | 15/17 | 27/29 | 137/139 |
+| meta | 17 | 15/17 | 22/29 | 99/139 |

@@ -67,20 +67,26 @@ Safeguards that enforce it:
 
 ## Results
 
-Each generated drawing runs end to end (read → rules → correction loop) once per model. Scores are computed in Python against each drawing's ground truth. The totals below are from [docs/EVAL.md](docs/EVAL.md) for the first nine drawings; the eight added later (gears, fasteners, sections, an assembly) are not scored yet and will be included in the next eval run:
+Seventeen generated drawings, each run end to end (read → rules → correction loop) once per model, with known answers. They cover ten part types: eight plates, a bracket, a spur gear, a hex nut, a hex bolt, a flange, a stepped shaft, a gripper claw, a machined block, and a bolted-joint assembly. Together they have 29 views (including three sections, a detail, and an isometric), 19 GD&T frames, and 13 seeded issues. Scores are computed in Python against each drawing's ground truth. Totals from [docs/EVAL.md](docs/EVAL.md):
 
 | | Muse Spark Open (Baseten) | Muse Spark (Meta Model API) |
 | --- | --- | --- |
-| Dimensions correct | 62/63 | 63/63 |
-| Feature control frames correct | 12/12 | 12/12 |
-| Datums found | 20/20 | 20/20 |
-| Seeded issues caught | 10/10 | 9/10 |
-| False alarms | 0 | 0 |
-| Fixes verified by the rules | 8/8 | 8/8 |
-| Average latency per drawing* | 60.6 s | 23.9 s |
-| Runs that used the fallback | 4 of 9 | 0 of 9 |
+| Dimensions correct | 122/139 | 125/139 |
+| Feature control frames correct | 16/19 | 16/19 |
+| Datums found | 26/27 | 26/27 |
+| Seeded issues caught | 11/13 | 11/13 |
+| False alarms | 1 | 1 |
+| Fixes verified by the rules | 10/10 | 10/10 |
+| Part type recognized† | 15/17 | 15/17 |
+| Views named correctly† | 27/29 | 22/29 |
+| Dimensions placed in the right view† | 137/139 | 99/139 |
+| Average latency per drawing* | 54.1 s | 24.4 s |
+| Runs that used the fallback | 8 of 17 | 0 of 17 |
 
-\* Total latency in EVAL.md divided by 9 runs (545.8 s and 215.1 s).
+\* Total latency in EVAL.md divided by 17 runs (919.6 s and 414.3 s), for reading, rules, and the correction loop.
+† From the "About this drawing" explanation (`python -m scripts.run_eval --explain`), which is scored on the ground-truth drawing, so reading errors don't affect it.
+
+Browse every drawing, its scores, and which model caught each seeded issue on the live dashboard: **[draftcheck.onrender.com/eval.html](https://draftcheck.onrender.com/eval.html)**.
 
 The drawings:
 
@@ -104,9 +110,17 @@ The drawings:
 | block_3view | A machined block in three views and an isometric, with a counterbored hole, a hole table and parallelism; a flatness tolerance references a datum |
 | bolted_joint | An assembly: two plates, bolt, washer and nut, in a front view and a hatched section, with balloons and a parts list. No errors |
 
-`python -m scripts.run_eval --explain` also scores the "About this drawing" explanation (part type, views found, dimensions placed in the right view), and EVAL.md lists each drawing's features (views, sections, details, frames, datums, dimensions, tables, balloons, notes).
+Where the models missed:
 
-**Be aware:** these are drawings I generated with a script, not real production drawings, so they are cleaner than what a shop sees. Muse Spark's one miss was the MFG-001 hole-to-edge warning on the complex bracket (bracket_01); it caught both errors on that drawing. Muse Spark Open's one wrong dimension was on plate_no_gentol.
+- **Seeded issues (11/13 each).** Both models missed the MFG-001 hole-to-edge warning on bracket_01; both caught and fixed the two errors on that drawing. Each also missed one duplicate datum: Muse Spark Open on plate_dup_datum and Muse Spark on plate_inch_multi. In both cases the model read only one of the two symbols that share a letter, so the rules never saw the duplicate.
+- **False alarms (1 each).** Both models' readings of gripper_claw, a clean drawing, triggered an MFG-001 hole-to-edge warning that the ground truth does not.
+- **Frames (16/19 each).** Neither model read the circular runout frames (gear_spur, stepped_shaft) or the profile-of-a-surface frame (gripper_claw) correctly. Every other frame was read correctly by both.
+- **Dimensions.** Both models matched only 10 of block_3view's 24 dimensions; 12 of those 24 are the hole table's entries (X, Y, and size for four holes). Muse Spark Open also missed one dimension each on plate_no_gentol, hex_nut, and hex_bolt. Every dimension either model found also had the right tolerances and basic flag.
+- **Part type (15/17 each).** Muse Spark Open called plate_001 a bracket and plate_inch_multi a cover; Muse Spark called plate_inch_multi a cover and gripper_claw a plate.
+- **Views.** Muse Spark's 22/29 comes from six of the single-view plates, where it named the one view something other than "front", so none of their dimensions counted as placed in the right view (99/139). On bolted_joint both models found one of the two views and named the other something else; Muse Spark Open did the same with one of block_3view's four views. Muse Spark Open's two dimension-view misses are one on each of those drawings.
+- **Fallback.** Muse Spark Open needed the Meta fallback on 8 of its 17 runs; Muse Spark never did.
+
+**Be aware:** these are drawings I generated with a script, not real production drawings, so they are cleaner than what a shop sees.
 
 ## Architecture
 
@@ -228,6 +242,8 @@ ruff check .
 - The bounding boxes the model returns vary in accuracy, so a highlight box may be slightly off its callout.
 - Rules that depend on what a dimension measures between (MFG-001) rely on the model's endpoint labels.
 - MFG-001 checks every hole against the largest hole diameter on the drawing, which is conservative but not exact.
+- Circular runout and profile-of-a-surface frames are not yet read reliably (0 of 3 in the eval).
+- Hole tables are not yet extracted as dimensions (block_3view: 10 of 24 dimensions read).
 - Baseten calls occasionally hang. The fallback handles it, but those runs are slower.
 - The free host sleeps when idle, so the first visit can take up to a minute.
 - Fixes are proposals for an engineer to review, not edits to the CAD model.
