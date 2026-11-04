@@ -4,6 +4,7 @@ Run with:
     python -m scripts.run_eval                         # every drawing, both providers
     python -m scripts.run_eval --drawings plate_clean --providers baseten
     python -m scripts.run_eval --force                 # ignore the cache, run everything
+    python -m scripts.run_eval --explain               # also explain each drawing and score it
 
 For each (drawing, provider) it does what the web server does: render page 1, extract with
 the model, run the rules, then run the correction loop. Model calls go through the
@@ -22,6 +23,18 @@ Scoring is plain Python against the drawing's ground truth (``<stem>.gt.json``):
   own way (``F1`` rather than ``fcf_position_holes``).
 * **Fixes verified**: original findings the correction loop cleared, as decided by
   re-running the rules (``CorrectionReport.statuses``), never by the model's own claim.
+
+**Explanations** (``--explain``): for each (drawing, provider) the "About this drawing"
+explanation is also requested, on the drawing's *ground truth* and the rules' findings on
+it, so it cites the ground-truth ids and does not depend on how well the drawing was read.
+It is scored in plain Python: whether the part type is right, which view names it found
+against the sheet's views, and the share of dimensions it placed in the right view. These
+results live under their own ``explain`` key with their own version, so the extraction
+results already cached stay valid.
+
+**Drawing features**: a count, per drawing, of what its ground truth contains (views,
+sections, details, frames by type, datums, dimensions, tables, balloons, notes). Derived
+from the ground truth, so it is recomputed on every run rather than cached.
 
 Runs happen one at a time. Each finished run is written to ``outputs/eval/results.json``
 as soon as it ends, and a rerun skips it. A provider that cannot be reached (not
@@ -45,11 +58,12 @@ from typing import Any
 
 from draftcheck.agent import CorrectionReport, correct
 from draftcheck.config import SUPPORTED_PROVIDERS, ConfigError
+from draftcheck.explain import Explanation, explain_drawing
 from draftcheck.pipeline import ExtractionResult, SupportsChatJSON, extract_page
 from draftcheck.render import load_pages
 from draftcheck.rules import run_rules
 from draftcheck.schema import Dimension, Drawing, Finding, finding_key
-from scripts.drawing_suite import SUITE
+from scripts.drawing_suite import SUITE, DrawingSpec
 
 SAMPLES_DIR = Path("samples/generated")
 RESULTS_PATH = Path("outputs/eval/results.json")
@@ -71,12 +85,18 @@ CACHED_STATUSES = frozenset({"ok", "failed"})
 SCORE_VERSION = 2
 
 
-def is_cached(entry: dict | None) -> bool:
+#: The same, for explanation results (``results["explain"]``), kept apart so adding or
+#: changing explanation scoring never invalidates a cached extraction run.
+#: 2: "fastener" and "assembly" part types (the prompt offers them; scoring expects them).
+EXPLAIN_SCORE_VERSION = 2
+
+
+def is_cached(entry: dict | None, version: int = SCORE_VERSION) -> bool:
     """True when ``entry`` is a finished result under the current scoring."""
     return (
         entry is not None
         and entry.get("status") in CACHED_STATUSES
-        and entry.get("score_version") == SCORE_VERSION
+        and entry.get("score_version") == version
     )
 
 
@@ -258,6 +278,131 @@ def score_run(
     }
 
 
+# --- Layout, features, and explanation scoring -------------------------------------------
+
+#: Ground-truth view kinds, as the explanation names views (``prompts.VIEW_NAMES``).
+VIEW_KIND_NAMES = {
+    "front": "front",
+    "top": "top",
+    "bottom": "bottom",
+    "rear": "rear",
+    "right_side": "right",
+    "left_side": "left",
+    "section": "section",
+    "detail": "detail",
+    "isometric": "isometric",
+}
+
+#: Which explanation part types (``prompts.PART_TYPES``) count as right for each ground
+#: truth ``expected_part_type``. A nut and a bolt expect "fastener" and the bolted joint
+#: "assembly"; "other" is still accepted for those three as a fallback. A gripper claw may
+#: fairly be called a bracket.
+PART_TYPE_MATCHES: dict[str, frozenset[str]] = {
+    "plate": frozenset({"plate"}),
+    "bracket": frozenset({"bracket"}),
+    "spur_gear": frozenset({"gear"}),
+    "hex_nut": frozenset({"fastener", "other"}),
+    "hex_bolt": frozenset({"fastener", "other"}),
+    "flange": frozenset({"flange"}),
+    "stepped_shaft": frozenset({"shaft"}),
+    "gripper_claw": frozenset({"bracket", "other"}),
+    "machined_block": frozenset({"block"}),
+    "bolted_joint_assembly": frozenset({"assembly", "other"}),
+}
+
+
+def drawing_layout(stem: str, ground_truth: dict) -> dict:
+    """The part type, views, and each dimension's view, for scoring an explanation.
+
+    Part sheets record these in their ground truth. The first nine drawings predate those
+    fields and their ground truth is kept unchanged, so their layout is read from their
+    recipe instead: a plate is one front view; bracket_01 adds a right side view.
+    """
+    if "views" in ground_truth:
+        return {
+            "part_type": ground_truth.get("expected_part_type"),
+            "views": [(v["name"], v["kind"]) for v in ground_truth["views"]],
+            "dim_views": {
+                d["id"]: d["view"] for d in ground_truth.get("dimensions", []) if d.get("view")
+            },
+        }
+    spec = SUITE.get(stem)
+    ids = [d["id"] for d in ground_truth.get("dimensions", []) if d.get("id")]
+    dim_views = dict.fromkeys(ids, "front")
+    views = [("front", "front")]
+    if isinstance(spec, DrawingSpec):
+        dim_views.update({d.id: d.view for d in spec.dims})
+        if spec.side is not None:
+            views.append(("side", "right_side"))
+    part_type = "bracket" if stem.startswith("bracket") else "plate"
+    return {"part_type": part_type, "views": views, "dim_views": dim_views}
+
+
+def drawing_features(stem: str, ground_truth: dict) -> dict:
+    """What one drawing contains, counted from its ground truth."""
+    layout = drawing_layout(stem, ground_truth)
+    kinds = [kind for _, kind in layout["views"]]
+    frames = Counter(f["characteristic"] for f in ground_truth.get("fcfs", []))
+    tables = [
+        kind for kind in ("hole_table", "parts_list") if ground_truth.get(kind)
+    ]
+    return {
+        "part_type": layout["part_type"],
+        "views": len(kinds),
+        "view_kinds": kinds,
+        "sections": kinds.count("section"),
+        "details": kinds.count("detail"),
+        "gdt_frames": dict(sorted(frames.items())),
+        "datums": len(ground_truth.get("datums", [])),
+        "dimensions": len(ground_truth.get("dimensions", [])),
+        "tables": tables,
+        "balloons": len(ground_truth.get("balloons", [])),
+        "notes": len(ground_truth.get("notes", [])),
+    }
+
+
+def score_explanation(stem: str, ground_truth: dict, explanation: Explanation) -> dict:
+    """How well an explanation describes the sheet's layout. Pure: no model, no files.
+
+    * Part type: right when it is one of :data:`PART_TYPE_MATCHES` for the drawing.
+    * Views: the explanation's view names against the sheet's, as multisets (two sections
+      need two "section" entries); extra names are views the sheet does not have.
+    * Dimensions in the right view: of the dimensions with a known view, those whose note
+      names that view. A dimension with no note, or a note with no view, counts as wrong.
+    """
+    layout = drawing_layout(stem, ground_truth)
+    expected_type = layout["part_type"]
+    accepted = PART_TYPE_MATCHES.get(expected_type or "", frozenset())
+    got_type = explanation.part.type if explanation.part else None
+
+    names = {name: VIEW_KIND_NAMES.get(kind, "other") for name, kind in layout["views"]}
+    want = Counter(names.values())
+    got = Counter(view.name for view in explanation.views)
+    found = sum((want & got).values())
+
+    notes = {note.id: note for note in explanation.dimensions}
+    placed = layout["dim_views"]
+    right = sum(
+        1
+        for dim_id, view in placed.items()
+        if dim_id in notes and notes[dim_id].view == names.get(view)
+    )
+    return {
+        "part_type": got_type,
+        "part_type_expected": expected_type,
+        "part_type_correct": got_type in accepted if accepted else None,
+        "views_expected": sum(want.values()),
+        "views_found": found,
+        "views_extra": sum(got.values()) - found,
+        "view_names": [view.name for view in explanation.views],
+        "dims_with_view": len(placed),
+        "dims_view_correct": right,
+        "projection": explanation.projection,
+        "tables": [table.kind for table in explanation.tables],
+        "parse_issues": list(explanation.parse_issues),
+    }
+
+
 # --- Running ----------------------------------------------------------------------------
 
 ClientFactory = Callable[[str], SupportsChatJSON]
@@ -305,6 +450,34 @@ def run_one(
     }
 
 
+def run_explain_one(
+    stem: str,
+    provider: str,
+    *,
+    samples_dir: Path = SAMPLES_DIR,
+    client_for: ClientFactory = _real_guard,
+) -> dict:
+    """Explain one drawing's ground truth with one provider, and score the explanation."""
+    from draftcheck.api import render_settings
+
+    ground_truth = load_ground_truth(stem, samples_dir)
+    truth = Drawing.model_validate(ground_truth)
+    dpi, max_side = render_settings()
+    png = load_pages(samples_dir / f"{stem}.pdf", dpi=dpi, max_side=max_side, max_pages=1)[0]
+
+    started = time.monotonic()
+    explanation, result = explain_drawing(
+        truth, run_rules(truth), png.png_bytes, client_for(provider)
+    )
+    return {
+        "status": "ok",
+        **score_explanation(stem, ground_truth, explanation),
+        "model": result.model,
+        "fell_back": bool(getattr(result, "fell_back", False)),
+        "latency_s": {"total": round(time.monotonic() - started, 2)},
+    }
+
+
 def _unreachable(exc: BaseException) -> str | None:
     """Why a provider could not be used at all, or ``None`` for a real failure."""
     from draftcheck.api import outage_reason
@@ -332,6 +505,25 @@ def save_results(results: dict, path: Path) -> None:
     tmp.replace(path)
 
 
+def _attempt(
+    job: Callable[[str, str], dict], stem: str, provider: str, unreachable: dict[str, str]
+) -> dict:
+    """Run one scored job; a provider that cannot be reached is remembered and skipped."""
+    started = time.monotonic()
+    try:
+        return job(stem, provider)
+    except Exception as exc:  # noqa: BLE001 - recorded, and the eval moves on
+        reason = _unreachable(exc)
+        if reason is not None:
+            unreachable[provider] = reason
+            return {"status": "skipped", "reason": reason}
+        return {
+            "status": "failed",
+            "reason": f"{type(exc).__name__}: {exc}"[:500],
+            "latency_s": {"total": round(time.monotonic() - started, 2)},
+        }
+
+
 def run_eval(
     drawings: Iterable[str],
     providers: Iterable[str],
@@ -340,49 +532,58 @@ def run_eval(
     samples_dir: Path = SAMPLES_DIR,
     client_for: ClientFactory = _real_guard,
     force: bool = False,
+    explain: bool = False,
     log: Callable[[str], None] = print,
 ) -> dict:
-    """Run every (drawing, provider) pair one at a time, skipping cached ones."""
+    """Run every (drawing, provider) pair one at a time, skipping cached ones.
+
+    With ``explain``, each pair's explanation is run and scored too, cached separately
+    under ``results["explain"]``. ``results["drawing_features"]`` is refreshed for every
+    drawing in ``drawings`` from its ground truth.
+    """
     results = load_results(results_path)
     runs: dict = results.setdefault("runs", {})
     drawings, providers = list(drawings), list(providers)
     unreachable: dict[str, str] = {}
 
+    refresh_features(results, drawings, samples_dir)
+    save_results(results, results_path)
+
+    jobs: list[tuple[str, dict, int, Callable[[str, str], dict]]] = [
+        ("", runs, SCORE_VERSION,
+         lambda stem, provider: run_one(stem, provider, samples_dir=samples_dir,
+                                        client_for=client_for)),
+    ]
+    if explain:
+        jobs.append(
+            ("explain ", results.setdefault("explain", {}), EXPLAIN_SCORE_VERSION,
+             lambda stem, provider: run_explain_one(stem, provider, samples_dir=samples_dir,
+                                                    client_for=client_for)),
+        )
+
     for stem in drawings:
         for provider in providers:
             key = run_key(stem, provider)
-            cached = runs.get(key)
-            if not force and is_cached(cached):
-                log(f"{key}: cached ({cached['status']})")
-                continue
-            if provider in unreachable:
-                # Already failed to connect this session; do not wait on it eight more times.
-                runs[key] = {"status": "skipped", "reason": unreachable[provider]}
-                log(f"{key}: skipped ({unreachable[provider]})")
-                save_results(results, results_path)
-                continue
+            for label, store, version, job in jobs:
+                cached = store.get(key)
+                if not force and is_cached(cached, version):
+                    log(f"{label}{key}: cached ({cached['status']})")
+                    continue
+                if provider in unreachable:
+                    # Already failed to connect this session; do not wait on it again.
+                    store[key] = {"status": "skipped", "reason": unreachable[provider]}
+                    log(f"{label}{key}: skipped ({unreachable[provider]})")
+                    save_results(results, results_path)
+                    continue
 
-            log(f"{key}: running...")
-            started = time.monotonic()
-            try:
-                entry = run_one(stem, provider, samples_dir=samples_dir, client_for=client_for)
-            except Exception as exc:  # noqa: BLE001 - recorded, and the eval moves on
-                reason = _unreachable(exc)
-                if reason is not None:
-                    unreachable[provider] = reason
-                    entry = {"status": "skipped", "reason": reason}
-                else:
-                    entry = {
-                        "status": "failed",
-                        "reason": f"{type(exc).__name__}: {exc}"[:500],
-                        "latency_s": {"total": round(time.monotonic() - started, 2)},
-                    }
-            entry["score_version"] = SCORE_VERSION
-            entry["finished_at"] = datetime.now(UTC).isoformat(timespec="seconds")
-            runs[key] = entry
-            save_results(results, results_path)
-            reason = f" ({entry['reason']})" if "reason" in entry else ""
-            log(f"{key}: {entry['status']}{reason}")
+                log(f"{label}{key}: running...")
+                entry = _attempt(job, stem, provider, unreachable)
+                entry["score_version"] = version
+                entry["finished_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+                store[key] = entry
+                save_results(results, results_path)
+                reason = f" ({entry['reason']})" if "reason" in entry else ""
+                log(f"{label}{key}: {entry['status']}{reason}")
 
     return results
 
@@ -518,14 +719,131 @@ def summary_markdown(results: dict, drawings: list[str], providers: list[str]) -
             f"| {t['rounds']} | {t['latency_s']} | {t['fallbacks']} |"
         )
 
+    lines += _features_section(results.get("drawing_features", {}), drawings)
+    lines += _explain_section(results.get("explain", {}), drawings, providers)
+
     skipped = [
         f"- `{key}`: {run.get('reason', '')}"
         for key, run in runs.items()
         if run.get("status") in {"skipped", "failed"}
     ]
+    skipped += [
+        f"- `{key}` (explanation): {run.get('reason', '')}"
+        for key, run in results.get("explain", {}).items()
+        if run.get("status") in {"skipped", "failed"}
+    ]
     if skipped:
         lines += ["", "## Skipped and failed runs", "", *skipped]
     return "\n".join(lines) + "\n"
+
+
+def _frames_text(frames: dict[str, int]) -> str:
+    """{"flatness": 1, "position": 2} -> "position ×2, flatness"."""
+    if not frames:
+        return "—"
+    ordered = sorted(frames.items(), key=lambda item: (-item[1], item[0]))
+    return ", ".join(name if n == 1 else f"{name} ×{n}" for name, n in ordered)
+
+
+def _features_section(features: dict, drawings: list[str]) -> list[str]:
+    """The "Drawing features" table: what each drawing contains, from its ground truth."""
+    lines = [
+        "",
+        "## Drawing features",
+        "",
+        "Counted from each drawing's ground truth, so they describe the sheet, not a model's "
+        "reading of it.",
+        "",
+        "| Drawing | Part | Views | Sections | Details | GD&T frames | Datums | Dimensions "
+        "| Tables | Balloons | Notes |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for stem in drawings:
+        f = features.get(stem)
+        if f is None:
+            lines.append(f"| `{stem}` | not counted |" + " |" * 9)
+            continue
+        views = f"{f['views']} ({', '.join(f['view_kinds'])})"
+        lines.append(
+            f"| `{stem}` | {f['part_type']} | {views} | {f['sections']} | {f['details']} "
+            f"| {_frames_text(f['gdt_frames'])} | {f['datums']} | {f['dimensions']} "
+            f"| {', '.join(f['tables']) or '—'} | {f['balloons']} | {f['notes']} |"
+        )
+    return lines
+
+
+#: Printed at the top of EVAL.md's explanation section.
+EXPLAIN_GROUND_TRUTH_NOTE = (
+    "Explanations are scored on the ground-truth drawing, so reading errors don't affect them."
+)
+
+
+def _explain_section(explains: dict, drawings: list[str], providers: list[str]) -> list[str]:
+    """The "Explanations" table, when ``--explain`` has been run."""
+    lines = ["", "## Explanations", "", EXPLAIN_GROUND_TRUTH_NOTE, ""]
+    if not explains:
+        return [*lines, "Not run. Use `python -m scripts.run_eval --explain`."]
+    lines += [
+        "The \"About this drawing\" explanation of each drawing's ground truth, scored in "
+        "Python: part type right, view names found against the sheet's views (extra names in "
+        "brackets), and dimensions placed in the right view.",
+        "",
+        "| Drawing | Provider | Status | Part type | Views found | Dims in right view "
+        "| Projection | Latency (s) |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    totals_by: dict[str, Counter] = {p: Counter() for p in providers}
+    for stem in drawings:
+        for provider in providers:
+            run = explains.get(run_key(stem, provider))
+            if run is None:
+                lines.append(f"| `{stem}` | {provider} | not run |" + " |" * 5)
+                continue
+            if run["status"] == "ok" and run.get("score_version") != EXPLAIN_SCORE_VERSION:
+                lines.append(f"| `{stem}` | {provider} | stale (rerun) |" + " |" * 5)
+                continue
+            if run["status"] != "ok":
+                lines.append(f"| `{stem}` | {provider} | {run['status']} |" + " |" * 5)
+                continue
+            correct = run["part_type_correct"]
+            mark = "n/a" if correct is None else ("yes" if correct else "no")
+            views = _frac(run["views_found"], run["views_expected"])
+            if run["views_extra"]:
+                views += f" (+{run['views_extra']})"
+            lines.append(
+                f"| `{stem}` | {provider} | ok | {run['part_type']} ({mark}) | {views} "
+                f"| {_frac(run['dims_view_correct'], run['dims_with_view'])} "
+                f"| {run['projection']} | {run['latency_s']['total']:.1f} |"
+            )
+            t = totals_by[provider]
+            t["ok"] += 1
+            t["type_right"] += bool(correct)
+            t["type_scored"] += correct is not None
+            for field in ("views_found", "views_expected", "dims_view_correct",
+                          "dims_with_view"):
+                t[field] += run[field]
+    lines += [
+        "",
+        "| Provider | Runs ok | Part type right | Views found | Dims in right view |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for provider in providers:
+        t = totals_by[provider]
+        lines.append(
+            f"| {provider} | {t['ok']} | {_frac(t['type_right'], t['type_scored'])} "
+            f"| {_frac(t['views_found'], t['views_expected'])} "
+            f"| {_frac(t['dims_view_correct'], t['dims_with_view'])} |"
+        )
+    return lines
+
+
+def refresh_features(
+    results: dict, drawings: Iterable[str], samples_dir: Path = SAMPLES_DIR
+) -> None:
+    """Recount ``results["drawing_features"]`` for ``drawings`` from their ground truth."""
+    features = results.setdefault("drawing_features", {})
+    for stem in drawings:
+        features[stem] = drawing_features(stem, load_ground_truth(stem, samples_dir))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -537,9 +855,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--results", type=Path, default=RESULTS_PATH)
     parser.add_argument("--summary", type=Path, default=SUMMARY_PATH)
     parser.add_argument("--force", action="store_true", help="rerun cached results too")
+    parser.add_argument(
+        "--explain",
+        action="store_true",
+        help="also run and score the 'About this drawing' explanation (one more call each)",
+    )
     args = parser.parse_args(argv)
 
-    results = run_eval(args.drawings, args.providers, results_path=args.results, force=args.force)
+    results = run_eval(
+        args.drawings, args.providers, results_path=args.results, force=args.force,
+        explain=args.explain,
+    )
+    # The summary covers the whole suite, so every drawing's features are counted.
+    refresh_features(results, DRAWINGS)
+    save_results(results, args.results)
     # The summary always covers the whole suite, so a partial run does not hide old rows.
     args.summary.parent.mkdir(parents=True, exist_ok=True)
     args.summary.write_text(

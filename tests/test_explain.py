@@ -46,6 +46,7 @@ from draftcheck.pipeline import check
 from draftcheck.prompts import (
     EXPLAIN_SYSTEM,
     EXTRACTION_SYSTEM,
+    PART_TYPES,
     TABLE_KINDS,
     VIEW_NAMES,
     explain_user,
@@ -564,3 +565,21 @@ def test_fake_model_mode_explains_plate_001(tmp_path: Path, monkeypatch) -> None
         assert body["explanation"]["findings"][0]["key"] == EXPLAINED_FINDING
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize("part_type", ["fastener", "Assembly"])
+def test_fastener_and_assembly_are_part_types(part_type: str) -> None:
+    explanation = parse_explanation({"part": {"type": part_type}}, fixture_drawing(), [])
+    assert explanation.part.type == part_type.lower()
+
+
+def test_an_unlisted_part_type_is_still_other() -> None:
+    explanation = parse_explanation({"part": {"type": "widget"}}, fixture_drawing(), [])
+    assert explanation.part.type == "other"
+
+
+def test_the_prompt_offers_fastener_and_assembly() -> None:
+    prompt = explain_user("{}", [])
+    assert "fastener | assembly | other" in prompt
+    assert '"fastener" is a bolt, nut' in prompt
+    assert {"fastener", "assembly"} <= set(PART_TYPES)

@@ -2835,6 +2835,22 @@ function joinWords(words) {
   return `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
 }
 
+/** The chip for each part type the explanation can give (prompts.PART_TYPES). */
+const PART_TYPE_LABELS = {
+  plate: "Plate",
+  bracket: "Bracket",
+  flange: "Flange",
+  shaft: "Shaft",
+  gear: "Gear",
+  housing: "Housing",
+  cover: "Cover",
+  spacer: "Spacer",
+  block: "Block",
+  fastener: "Fastener",
+  assembly: "Assembly",
+  other: "Other",
+};
+
 /** How the page names each table kind and projection the explanation can give. */
 const TABLE_LABELS = {
   parts_list: "Parts list",
@@ -2924,7 +2940,7 @@ function renderAbout(result) {
   aboutIntro.hidden = Boolean(part);
   aboutResult.hidden = !part;
   if (part) {
-    $("about-type").textContent = capitalize(part.type || "other");
+    $("about-type").textContent = PART_TYPE_LABELS[part.type] || PART_TYPE_LABELS.other;
     $("about-name").textContent = part.name_guess || "Unnamed part";
     $("about-summary").textContent = part.summary || "";
     const features = document.createDocumentFragment();

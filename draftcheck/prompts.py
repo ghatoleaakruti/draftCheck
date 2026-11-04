@@ -302,6 +302,8 @@ PART_TYPES = (
     "cover",
     "spacer",
     "block",
+    "fastener",
+    "assembly",
     "other",
 )
 
@@ -403,6 +405,9 @@ matters for how the part works"}}
       "how_to_think_about_fixing": "one sentence"}}
   ]
 }}
+
+Part type: "fastener" is a bolt, nut, screw, stud, washer, or pin drawn on its own; \
+"assembly" is a drawing of several parts together, usually with balloons and a parts list.
 
 Kinds: "size" gives the size of a feature (a diameter, a thickness); "location" places a \
 feature relative to an edge, a datum, or another feature; "form" describes shape (a \

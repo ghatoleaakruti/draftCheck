@@ -67,7 +67,7 @@ Safeguards that enforce it:
 
 ## Results
 
-Nine generated drawings, each run end to end (read → rules → correction loop) once per model. Scores are computed in Python against each drawing's ground truth. Totals from [docs/EVAL.md](docs/EVAL.md):
+Each generated drawing runs end to end (read → rules → correction loop) once per model. Scores are computed in Python against each drawing's ground truth. The totals below are from [docs/EVAL.md](docs/EVAL.md) for the first nine drawings; the eight added later (gears, fasteners, sections, an assembly) are not scored yet and will be included in the next eval run:
 
 | | Muse Spark Open (Baseten) | Muse Spark (Meta Model API) |
 | --- | --- | --- |
@@ -95,6 +95,16 @@ The drawings:
 | plate_edge_hole | A Ø6 hole centred 5 mm from an edge |
 | bracket_01 | Front and side views, notes, full title block, with three seeded issues (undefined datum, flatness with a datum, hole near an edge) |
 | plate_inch_multi | Inch units, four holes, two frames, datum B defined twice |
+| gear_spur | A spur gear (24 teeth, module 2) in front and side views, with circular runout on the outside diameter to the bore. No errors |
+| hex_nut | An M10 hex nut in top and front views, across flats and across corners (reference). No errors |
+| hex_bolt | An M8 hex bolt in front and end views, with head height, thread length and length. No errors |
+| flange | A 6-bolt flange with a hatched SECTION A-A, a basic bolt circle and perpendicularity of the bore; the hole position frame references datum C, which is never defined |
+| stepped_shaft | A three-diameter shaft with a keyway, SECTION B-B and a 4:1 DETAIL C of the fillet; no general tolerance, and one diameter with no tolerance of its own |
+| gripper_claw | An irregular claw in front and top views, with a 15° taper, a curved jaw on basic dimensions and a profile tolerance. No errors |
+| block_3view | A machined block in three views and an isometric, with a counterbored hole, a hole table and parallelism; a flatness tolerance references a datum |
+| bolted_joint | An assembly: two plates, bolt, washer and nut, in a front view and a hatched section, with balloons and a parts list. No errors |
+
+`python -m scripts.run_eval --explain` also scores the "About this drawing" explanation (part type, views found, dimensions placed in the right view), and EVAL.md lists each drawing's features (views, sections, details, frames, datums, dimensions, tables, balloons, notes).
 
 **Be aware:** these are drawings I generated with a script, not real production drawings, so they are cleaner than what a shop sees. Muse Spark's one miss was the MFG-001 hole-to-edge warning on the complex bracket (bracket_01); it caught both errors on that drawing. Muse Spark Open's one wrong dimension was on plate_no_gentol.
 
@@ -189,6 +199,12 @@ Run the evaluation (calls both models and rewrites `docs/EVAL.md`):
 python -m scripts.run_eval
 ```
 
+Add `--explain` to also run and score the "About this drawing" explanation for each drawing (one more model call per drawing and model):
+
+```bash
+python -m scripts.run_eval --explain
+```
+
 For UI work with no model calls, start the app with the fake model. It only answers requests from your own machine:
 
 ```bash
@@ -220,6 +236,7 @@ ruff check .
 
 - Check the notes on the drawing.
 - Check BOM tables.
+- Assembly checks: parts lists, balloons, BOM consistency, fits between parts.
 - More rules.
 - Per-hole diameters for MFG-001.
 - SAM 3.1 for precise regions around each callout.

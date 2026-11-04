@@ -1235,7 +1235,7 @@ exactly the seeded findings — by `finding_key`, so the right items too — and
 That validates the generator and the rules before a model is involved. plate_001's ground
 truth predates `rule_id`, so `run_eval.LEGACY_ERROR_RULES` maps its error type to GDT-001.
 
-**Running.** `python -m scripts.run_eval [--drawings …] [--providers …] [--force]`. For each
+**Running.** `python -m scripts.run_eval [--drawings …] [--providers …] [--force] [--explain]`. For each
 pair it renders page 1 with the server's `render_settings`, calls `extract_page`, runs the
 rules, and runs `agent.correct`, all through `api.guard_for` — the same time limit and
 Baseten→Meta fallback as a live request. Pairs run strictly one after another. Each result
@@ -1260,6 +1260,34 @@ of that run.
   older scoring is run again rather than mixed in (the summary shows it as stale).
   Rounds, edits applied and rejected, latency (extract, fix, total), and whether any call
   fell back are recorded alongside.
+
+**Explanations (`--explain`, step 26e).** For each pair the "About this drawing"
+explanation (§4.20) is also requested — on the drawing's *ground truth* and the rules'
+findings on it, so it cites the ground-truth ids and its score does not depend on the
+extraction (`run_explain_one`). `score_explanation` scores it in plain Python:
+
+- Part type: right when it is in `PART_TYPE_MATCHES` for the drawing's
+  `expected_part_type`. The nut and bolt expect "fastener" and the bolted joint
+  "assembly", with "other" still accepted for those three as a fallback.
+- Views: the explanation's view names against the sheet's view kinds (mapped by
+  `VIEW_KIND_NAMES`, e.g. `right_side` → "right"), as multisets; extra names are counted.
+- Dimensions in the right view: of the dimensions with a known view, those whose note names
+  it; a missing note or view counts as wrong.
+
+The first nine drawings' ground truth has no views or part type and is kept unchanged, so
+`drawing_layout` reads theirs from the recipe (a plate is one front view; bracket_01 adds a
+right side view and its thickness is placed there). Explanation results are cached under
+`results["explain"]` with their own `EXPLAIN_SCORE_VERSION`; `SCORE_VERSION` and the
+`runs` entries are untouched, so existing cached results stay valid. EVAL.md gains an
+"Explanations" table with per-provider totals, or a line saying it has not been run; the
+section opens by saying explanations are scored on the ground-truth drawing, so reading
+errors don't affect them.
+
+**Drawing features.** `drawing_features` counts what each drawing's ground truth contains:
+part type, views and their kinds, sections, details, GD&T frames by characteristic, datums,
+dimensions, tables, balloons, and notes. It is written to `results["drawing_features"]` and
+to a "Drawing features" table in EVAL.md, and recomputed on every run (it comes from the
+ground truth, not a model). Rows in the two new tables put the drawing name in backticks.
 
 `docs/EVAL.md` is regenerated from the results file at the end of every run, with one row
 per drawing and provider and a totals row per provider.
@@ -1348,8 +1376,10 @@ one entry at a time, and drops any entry whose id (dimensions, frames), label (d
 key (findings) is not on the drawing or among the findings that were sent — and any second
 entry for the same item. Each drop is a line in the explanation's `parse_issues`, which the
 card lists. Datum notes are accepted only for labels a datum feature symbol on the drawing
-actually carries: a letter cited in a frame but never defined gets no story. An unknown part
-type becomes `other`; a confidence is clamped to 0–1. A view whose name is not in
+actually carries: a letter cited in a frame but never defined gets no story. The part type
+is one of `prompts.PART_TYPES` (plate, bracket, flange, shaft, gear, housing, cover, spacer,
+block, fastener, assembly, other), each with its own chip on the page; an unknown one becomes
+`other`; a confidence is clamped to 0–1. A view whose name is not in
 `VIEW_NAMES` is dropped. A dimension's `view` and `also_seen_in` may only name views the
 explanation's own `views` list describes: any other name is cleared and recorded (the
 dimension's note itself is kept, since its purpose is about a real dimension), and a repeat

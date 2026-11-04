@@ -340,3 +340,15 @@ def test_dimension_notes_say_which_views_show_them() -> None:
     assert "${whereSeen(note)}" in source
     assert "also seen in ${joinWords(also)}" in source
     assert "` · in ${named(note.view)}${tail}`" in source
+
+
+def test_every_part_type_has_a_chip_label() -> None:
+    """The chip names each type the explanation can give, and nothing else."""
+    from draftcheck.prompts import PART_TYPES
+
+    source = read_app_js()
+    block = source[source.index("const PART_TYPE_LABELS = {"):]
+    block = block[: block.index("};")]
+    labels = re.findall(r"^\s+(\w+): \"", block, flags=re.M)
+    assert labels == list(PART_TYPES)
+    assert "PART_TYPE_LABELS[part.type] || PART_TYPE_LABELS.other" in source
