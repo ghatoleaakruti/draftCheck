@@ -75,7 +75,7 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/redline.py` | `render_redline(page_png, findings, report=None, model_name=None, when=None)` → two pillow pages, and `save_redline(pages, path_pdf, path_png)` → a 2-page PDF plus page 1 as a PNG. Pillow only, drawn on the rendered page image. Markers are numbered in `run_rules` order, so a number means the same finding on page 1, on page 2, and in `findings.json`. `findings_text(findings, report)` returns page 2's wording as styled lines, so the text can be tested without reading pixels — see §4.7 | **BUILT** |
 | `draftcheck/api.py` | FastAPI app over the same four modules the CLI drives: upload + extract, check the confirmed data, run the correction loop, serve the page image and the redline. One run is one folder under `outputs/web/<uuid4>/`, so each request reads what the previous one wrote — see §4.8. Decides nothing itself | **BUILT** |
 | `draftcheck/limits.py` | What one demo deployment is willing to spend, and on whom. `Limits.from_env()` holds every number (per-IP uploads and fixes per hour, model calls per day, run retention, sweep interval, `TRUST_PROXY`); `UsageLimiter` counts them in memory over sliding windows and raises `LimitExceeded`, which `api.py` turns into a `429`; `client_ip(...)` decides which address a request is counted against; `sweep_runs(root, max_age_hours)` deletes stale run folders and `Cleaner` keeps that to once an hour — see §4.12 | **BUILT** |
-| `draftcheck/static/` | The browser page, served at `/`: `index.html`, `style.css`, `app.js`. Plain HTML, CSS, and JavaScript — no framework, no build step, nothing loaded from a CDN. The upload area is a drag-and-drop zone (click, Enter, or Space opens the file dialog; a dropped file starts reading at once) that rejects a wrong type or a file over 10 MB in the page before any request, beside the provider selector. It uploads the drawing (`POST /api/runs`) and shows what came back: the rendered page beside tables of units, datums, dimensions, and frames, plus model, latency, and any `parse_issues`. **The tables are editable** — see §4.9 — and a Check drawing button posts the edited drawing to `POST /api/runs/{id}/check` and lists the findings underneath. The tables and the drawing are linked by item id: every item with a `bbox` gets a faint box drawn over the page image (positioned in percentages, so it stays aligned at any size), hovering a row or a box lights both, and clicking either scrolls the other into view and keeps it lit until the next click; clicking a finding lights every item in its `item_ids`. A "Show what Muse Spark read" toggle, on by default, hides the boxes; a row whose item came back without a `bbox` is marked "no location". Cells are written with `textContent` or as an input's `value`, so model output is never treated as markup | **BUILT** (upload + view + edit + check) |
+| `draftcheck/static/` | The browser page, served at `/`: `index.html`, `style.css`, `app.js`, and `fonts/` (Archivo, JetBrains Mono, Nanum Pen Script, each with its OFL licence). Plain HTML, CSS, and JavaScript — no framework, no build step, nothing loaded from a CDN. Laid out as "the checker's desk" (§4.15): a header with a five-stage stepper and a model pill, the drawing as paper on a dark desk with an SVG overlay in image pixels, and a tabbed review panel (Extracted, Issues, Corrections) with one primary button whose label follows the stage. The tables are editable (§4.9), linked to the drawing by item id, and checked and fixed through the same endpoints as before. Cells are written with `textContent` or as an input's `value`, so model output is never treated as markup | **BUILT** (upload + view + edit + check + fix + redline) |
 | `frontend/` | Driving `/fix` from the page and showing the correction report and the redline | PLANNED |
 | `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch. The ground truth is written in `schema.py`'s field names — plus `bbox_convention` and `seeded_errors` — so it parses as a `Drawing` and doubles as the target an extraction is scored against | **BUILT** |
 | `scripts/smoke_test.py` | One-shot check that the configured model answers over the network; `--provider baseten\|meta` picks which one | **BUILT** |
@@ -427,11 +427,13 @@ looking.
 | --- | --- | --- | --- |
 | `POST` | `/api/runs` | Multipart upload of a PDF/PNG/JPG, plus an optional `provider` field. Creates the run folder, saves the file, renders page 1, and extracts. Returns `run_id`, the drawing, `parse_issues`, `model`, `latency_s` | `415` unsupported type, `413` over 10 MB, `400` unreadable or empty, `422` unknown provider, `429` over a demo limit (§4.12), `502` the model failed or returned something unusable, `500` missing configuration |
 | `GET` | `/api/runs/{run_id}/page.png` | The rendered page, for the review screen to draw on | `404` |
-| `POST` | `/api/runs/{run_id}/check` | Body is the confirmed (possibly edited) drawing JSON. Validates it with `parse_drawing`, saves `confirmed.json`, runs the rules. Returns the findings, `parse_issues`, and the error/warning counts | `404` unknown run, `422` not a drawing object |
+| `POST` | `/api/runs/{run_id}/check` | Body is the confirmed (possibly edited) drawing JSON. Validates it with `parse_drawing`, saves `confirmed.json`, runs the rules. Returns the findings (each with its rule's short `title`, for the Issues card), `parse_issues`, and the error/warning counts | `404` unknown run, `422` not a drawing object |
 | `POST` | `/api/runs/{run_id}/fix` | Runs the correction loop on `confirmed.json` with the page image, writes `corrections.json` and the redline. Returns the rounds in plain English (see below), the per-finding status, the final findings, and the corrected drawing | `404` unknown run, `409` `/check` has not run, `429` over a demo limit (§4.12) |
 | `GET` | `/api/runs/{run_id}/redline.pdf` | The two-page redline | `404` |
 | `GET` | `/api/runs/{run_id}/redline.png` | Page 1 of the redline | `404` |
 | `POST` | `/api/demo/low-confidence` | Builds a run out of `tests/fixtures/plate_001.model.json` and `samples/generated/plate_001.png`, with the first dimension and the frame lowered to `confidence: 0.6`. No model call. Same reply shape as `POST /api/runs`. **Off unless `DRAFTCHECK_ENABLE_DEMO=1`, and loopback only** | `404` unless both gates are open, or if the two repo files are absent |
+| `GET` | `/samples/plate_001.pdf` | The generated sample drawing, for the page's "Try the sample drawing" button, which then uploads it through `POST /api/runs` like any picked file. Only this one file is served — the answer key beside it is not | `404` if the file is absent |
+| — | (all model calls) | With `DRAFTCHECK_FAKE_MODEL=1` and a loopback caller, answered by the development fake (§4.16); the upload and fix replies then carry `"fake_model": true` | — |
 | `GET` | `/healthz` | `{"status": "ok"}`. No model, no key, no disk — see §4.12 | — |
 | `GET` | `/` | Static files from `draftcheck/static/`, mounted last so every `/api` route wins | — |
 
@@ -898,6 +900,66 @@ is the same 504 as before. If the backup cannot be built (for example, its key i
 missing), a warning is logged and the original error is returned. The CLI has no
 fallback.
 
+### 4.15 The page shell: "the checker's desk" — BUILT (step 19a)
+
+The page fills the window (100vh) and only the review panel's body scrolls.
+
+- **Header.** The brand mark; a stepper of five stages (Read, Confirm, Check, Fix, Export);
+  and a model pill that says which model is working ("Reading with Muse Spark Open") or
+  which one actually answered ("Read by `muse-spark-1.2` (fallback)"), taken from the
+  `model` and `fell_back` fields of the reply.
+- **Desk (left).** File name and source, Upload, Try the sample drawing, and the model
+  selector. Before a run, a dashed drop zone; after, the rendered page as paper, scaled to
+  fit, with an `<svg id="overlay">` on top whose `viewBox` is the image's natural size. It
+  holds two layers: `#boxes`, the linked-highlight rectangles, and `#markup`, left empty for
+  step 19b. A status bar gives the phase and the colour legend. The whole desk takes a drop.
+- **Panel (right).** Tabs for Extracted (the editable tables, now with an id column, a
+  Zone column, a confidence column, and a plain-language tip on every column header),
+  Issues (one card per finding: number, rule title, rule id and zone, severity, the
+  message, and its source), and Corrections (rounds, verdicts, and the redline; an empty
+  state until a fix has run).
+- **One primary button.** Its label follows the stage: Read drawing → Confirm and run
+  checks → Let the agent fix them → Running rounds (up to 3)… → Download redlined PDF.
+  Cancel sits beside it while a model call is out. Errors and short confirmations are
+  toasts.
+
+**One state machine.** `currentStage()` in `app.js` reads the run's real state — a request
+out, a check run, the tables edited since — and `updateUI()` paints the stepper, the pill,
+the status line, the button, and the tab badges from it. Nothing sets those directly, so
+they cannot disagree.
+
+**Zones** are worked out in the page from the centre of an item's `bbox`: rows A–D top to
+bottom, columns 1–6 left to right. A finding's zone is its own `bbox`'s, else its first
+located item's.
+
+**"Up to 3", not "Round N of 3".** `/fix` answers once, when every round is done, so while it
+runs the page cannot know which round it is on. The button says what is true — the loop
+is running and will stop after three — and the round count appears once the reply lands.
+
+### 4.16 Development fake model — BUILT
+
+For working on the page when Baseten and Meta are slow or down. With
+`DRAFTCHECK_FAKE_MODEL=1` set **and** the request arriving from loopback,
+`get_client_factory` hands out `draftcheck.fake_model.fake_client_factory` instead of the
+real one. The fake replaces the model call and nothing else:
+
+- **Extraction** returns `tests/fixtures/plate_001.model.json` (a saved live reading of the
+  sample drawing) after about 2 s.
+- **Each correction round** returns one scripted edit — remove datum C from `fcf_1` —
+  after about 2 s.
+
+The rules, the correction loop, the redline, and the usage limits all run for real on
+what it returns, so a fake run exercises everything the page depends on. It answers as
+`fake-model (dev)`, the upload and fix replies carry `"fake_model": true`, and the page
+shows a **Fake model (dev)** badge in the model pill whenever that is so — from page load,
+because it asks `GET /api/model-mode` (`{"fake_model": bool}`, same gates) before any upload. Cancel works:
+the fake's pause waits on an event that `abort()` sets.
+
+**Off by default, never in production.** Same two gates as the demo route (§4.8,
+`demo_is_allowed`): the variable must be exactly `"1"`, and a request from anywhere but this
+machine gets the real model even when it is set. `tests/test_api.py` checks both gates
+each way; `tests/test_fake_model.py` checks the fake itself.
+
 ## 5. Repo layout (what exists today)
 
 ```
@@ -922,12 +984,14 @@ draftCheck/
 │   ├── prompts.py              # BUILT
 │   ├── render.py               # BUILT
 │   ├── redline.py              # BUILT  two-page redline, pillow only
+│   ├── fake_model.py           # BUILT  dev-only stand-in model (§4.16)
 │   ├── rules.py                # BUILT
 │   ├── schema.py               # BUILT
 │   └── static/                 # BUILT  the whole flow at /: upload, edit, check, propose fixes, redline
 │       ├── index.html
 │       ├── style.css
-│       └── app.js
+│       ├── app.js
+│       └── fonts/              # Archivo, JetBrains Mono, Nanum Pen Script + OFL.txt each
 ├── samples/
 │   └── generated/              # synthetic drawings, regenerable from scripts/
 │       ├── plate_001.pdf       # the drawing

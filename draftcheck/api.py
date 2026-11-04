@@ -57,6 +57,7 @@ from starlette.concurrency import run_in_threadpool
 from draftcheck.agent import CorrectionReport, RoundRecord, correct
 from draftcheck.config import DEFAULT_PROVIDER, SUPPORTED_PROVIDERS, ConfigError, get_provider
 from draftcheck.edits import RejectedEdit, parse_edit
+from draftcheck.fake_model import fake_client_factory
 from draftcheck.limits import Cleaner, LimitExceeded, Limits, UsageLimiter, client_ip
 from draftcheck.llm_client import (
     MODEL_TIMEOUT_MESSAGE,
@@ -70,6 +71,7 @@ from draftcheck.memory import memory_mb
 from draftcheck.pipeline import ExtractionResult, SupportsChatJSON, check, extract_page
 from draftcheck.redline import EditNames, plain_edit, render_redline, save_redline
 from draftcheck.render import RenderError, load_pages
+from draftcheck.rules import RULES
 from draftcheck.schema import Finding, finding_key, parse_drawing
 
 #: Where run folders are created. A dependency, so tests point it at a tmp folder.
@@ -117,6 +119,10 @@ REDLINE_PNG = "redline.png"
 DEMO_EXTRACTION = REPO_ROOT / "tests" / "fixtures" / "plate_001.model.json"
 DEMO_PAGE = REPO_ROOT / "samples" / "generated" / "plate_001.png"
 
+#: The sample drawing the page's "Try the sample drawing" button uploads. Only this one
+#: file is served — the folder beside it also holds the answer key (``plate_001.gt.json``).
+SAMPLE_PDF = REPO_ROOT / "samples" / "generated" / "plate_001.pdf"
+
 #: What the demo lowers two items to, far enough under the page's threshold to be obvious.
 DEMO_CONFIDENCE = 0.6
 
@@ -125,6 +131,10 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 #: Set this to ``"1"`` in the environment to turn the demo route on. Off by default.
 DEMO_ENV_VAR = "DRAFTCHECK_ENABLE_DEMO"
+
+#: Set this to ``"1"`` to answer model calls from this machine with the fake model
+#: (:mod:`draftcheck.fake_model`) instead of Baseten or Meta. Off by default; development only.
+FAKE_MODEL_ENV_VAR = "DRAFTCHECK_FAKE_MODEL"
 
 #: Stage lines for the server log — sizes and memory only, never images, prompts, or keys.
 logger = logging.getLogger(__name__)
@@ -435,14 +445,35 @@ def guard_for(
     )
 
 
-def get_client_factory() -> ClientFactory:
+def fake_model_is_allowed(request: Request) -> bool:
+    """True when this request's model calls go to the fake model instead of a real one.
+
+    The same two gates as the demo route, for the same reasons: ``DRAFTCHECK_FAKE_MODEL=1``
+    is the deliberate act, off unless somebody set it, and loopback is the backstop for the
+    variable being inherited somewhere nobody meant it to be. A request from anywhere else
+    gets the real model even with the variable set.
+    """
+    if os.environ.get(FAKE_MODEL_ENV_VAR, "").strip() != "1":
+        return False
+    return bool(request.client) and request.client.host in LOOPBACK_HOSTS
+
+
+def get_client_factory(request: Request) -> ClientFactory:
     """The LLM client, as a dependency.
 
     A *factory* rather than a client, because the provider is chosen per request. Tests
     override this one function with a factory that returns a scripted client, and no
-    request anywhere in the app reaches the network.
+    request anywhere in the app reaches the network. In development the fake model can
+    stand in for the real ones (:func:`fake_model_is_allowed`).
     """
+    if fake_model_is_allowed(request):
+        return fake_client_factory
     return build_client
+
+
+def is_fake(client: object) -> bool:
+    """Whether a client is the development fake, so the page can say so."""
+    return bool(getattr(client, "fake", False))
 
 
 #: Asks whether the browser that sent ``request`` has gone away.
@@ -837,6 +868,7 @@ async def create_run(
         "latency_s": result.latency_s,
         "attempts": result.attempts,
         "page_url": f"/api/runs/{run_id}/page.png",
+        "fake_model": is_fake(client),
     }
 
 
@@ -875,11 +907,27 @@ def check_run(
     errors = sum(1 for finding in findings if finding.severity == "error")
     return {
         "run_id": str(run_id),
-        "findings": [finding.model_dump(mode="json") for finding in findings],
+        "findings": [finding_payload(finding) for finding in findings],
         "parse_issues": drawing.parse_issues,
         "error_count": errors,
         "warning_count": len(findings) - errors,
     }
+
+
+#: Each rule's short name, by rule id, for the page to head a finding with.
+RULE_TITLES = {rule.id: rule.title for rule in RULES}
+
+
+def finding_payload(finding: Finding) -> dict:
+    """A finding as the page shows it: the finding itself plus its rule's short title.
+
+    A ``Finding`` carries its rule's id but not its name, and the page should not keep its
+    own copy of the rules to look one up. A rule id the table does not know gets its id as
+    the title, so a card is never headed with nothing.
+    """
+    payload = finding.model_dump(mode="json")
+    payload["title"] = RULE_TITLES.get(finding.rule_id, finding.rule_id)
+    return payload
 
 
 def _rejected_summary(item: RejectedEdit, names: EditNames) -> dict:
@@ -1080,6 +1128,7 @@ async def fix_run(
     summary["model"] = answered[-1].model if answered else None
     summary["fell_back"] = any(record.fell_back for record in report.rounds)
     summary["run_id"] = str(run_id)
+    summary["fake_model"] = is_fake(client)
     summary["redline_pdf_url"] = f"/api/runs/{run_id}/redline.pdf"
     summary["redline_png_url"] = f"/api/runs/{run_id}/redline.png"
     return summary
@@ -1161,6 +1210,31 @@ def create_demo_run(allowed: DemoAllowed, root: RunsRoot) -> dict:
         "attempts": meta["attempts"],
         "page_url": f"/api/runs/{run_id}/page.png",
     }
+
+
+@app.get("/api/model-mode")
+def get_model_mode(request: Request) -> dict:
+    """Whether this browser's model calls go to the development fake.
+
+    Read by the page on load, so its "Fake model (dev)" badge is right before the first
+    upload rather than only after it. Says nothing about keys or providers.
+    """
+    return {"fake_model": fake_model_is_allowed(request)}
+
+
+@app.get("/samples/plate_001.pdf")
+def get_sample_pdf() -> FileResponse:
+    """The generated sample drawing, for the page's "Try the sample drawing" button.
+
+    The page fetches this and uploads it through ``POST /api/runs`` exactly as it would a
+    file the visitor picked, so the sample costs the same model call and the same limits.
+    """
+    if not SAMPLE_PDF.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="The sample drawing is not here. It ships with the repository.",
+        )
+    return FileResponse(SAMPLE_PDF, media_type="application/pdf", filename=SAMPLE_PDF.name)
 
 
 @app.get("/healthz")

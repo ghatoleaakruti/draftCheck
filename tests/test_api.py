@@ -33,11 +33,14 @@ from draftcheck.api import (
     ENV_MODEL_TIMEOUT,
     ENV_PRIMARY_TIMEOUT,
     ENV_RENDER_DPI,
+    FAKE_MODEL_ENV_VAR,
     Fallback,
     FallbackPolicy,
     GuardedClient,
     app,
+    fake_model_is_allowed,
     fallback_policy,
+    finding_payload,
     get_cleaner,
     get_client_factory,
     get_disconnect_probe,
@@ -50,9 +53,11 @@ from draftcheck.api import (
     stamp_model_name,
 )
 from draftcheck.config import ConfigError
+from draftcheck.fake_model import FAKE_MODEL_NAME, fake_client_factory
 from draftcheck.limits import LIMIT_MESSAGE, Cleaner, Limits, UsageLimiter
 from draftcheck.llm_client import MODEL_TIMEOUT_MESSAGE, JSONChatResult, ModelCancelled, Usage
 from draftcheck.prompts import EXTRACTION_SYSTEM
+from draftcheck.schema import Finding
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DRAWING = REPO_ROOT / "samples" / "generated" / "plate_001.pdf"
@@ -622,19 +627,32 @@ def test_static_page_and_its_two_files_are_served(client: TestClient):
     assert 'href="/style.css"' in page.text
 
     # The upload area is the drop zone. app.js looks this id up at load time and attaches
-    # every way in — drop, click, keyboard — to it, so renaming it would leave a page
-    # that cannot take a file at all.
+    # click and keyboard to it (drops are taken anywhere on the desk), so renaming it
+    # would leave an empty state that cannot take a file.
     assert 'id="dropzone"' in page.text
+    assert 'id="desk"' in page.text
 
-    # The overlay on the page image and its toggle. app.js looks both ids up at load
-    # time: without them the boxes that link the tables to the drawing never appear.
-    assert 'id="overlay"' in page.text
+    # The overlay on the page image and its toggle. The overlay is an SVG in image pixels
+    # with a layer for the linked-highlight boxes and one for markup (step 19b).
+    assert '<svg id="overlay"' in page.text
+    assert 'id="boxes"' in page.text
+    assert 'id="markup"' in page.text
     assert 'id="show-overlay"' in page.text
 
-    # The agent half of the page: the button that runs the loop, the section its rounds
-    # are written into, and the redline it ends with. app.js looks all of these up at load
-    # time, so a renamed id leaves a page that can never propose a fix.
-    assert 'id="propose-fix"' in page.text
+    # One primary button and one Cancel drive every stage; the stepper and the model pill
+    # report where the run is. app.js looks all of these up at load time.
+    assert 'id="primary"' in page.text
+    assert 'id="cancel"' in page.text
+    assert 'id="stepper"' in page.text
+    assert 'id="model-pill"' in page.text
+    assert 'id="toasts"' in page.text
+
+    # The three tabs, and the Corrections tab's empty state.
+    for tab in ("tab-extracted", "tab-issues", "tab-corrections"):
+        assert f'id="{tab}"' in page.text
+    assert "Corrections appear here once the agent finishes its rounds." in page.text
+
+    # The agent half: the rounds, the verdicts, and the redline it ends with.
     assert 'id="agent-panel"' in page.text
     assert 'id="agent-rounds"' in page.text
     assert 'id="redline-image"' in page.text
@@ -649,6 +667,7 @@ def test_static_page_and_its_two_files_are_served(client: TestClient):
     script = client.get("/app.js")
     assert script.status_code == 200
     assert "/api/runs" in script.text
+    assert "/samples/plate_001.pdf" in script.text
 
     stylesheet = client.get("/style.css")
     assert stylesheet.status_code == 200
@@ -793,6 +812,123 @@ def test_startup_sweeps_run_folders_older_than_a_day(tmp_path: Path, fake: FakeC
 
     assert not old.exists()
     assert (recent / "page.png").is_file()
+
+
+def test_sample_drawing_is_served_for_the_sample_button(client: TestClient):
+    """The page's "Try the sample drawing" fetches this, then uploads it as usual."""
+    response = client.get("/samples/plate_001.pdf")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.content == DRAWING.read_bytes()
+
+
+def test_only_the_sample_pdf_is_served_from_samples(client: TestClient):
+    """The answer key beside the sample must not be reachable from the page."""
+    assert client.get("/samples/plate_001.gt.json").status_code == 404
+    assert client.get("/samples/plate_001.png").status_code == 404
+
+
+def test_check_findings_carry_their_rule_title(client: TestClient):
+    """Each finding comes back with its rule's short name, for the Issues card heading."""
+    created = upload(client)
+    checked = client.post(f"/api/runs/{created['run_id']}/check", json=created["drawing"])
+    findings = checked.json()["findings"]
+    undefined = next(f for f in findings if f["rule_id"] == "GDT-001")
+    assert undefined["title"] == "Undefined datum"
+
+
+def test_finding_payload_falls_back_to_the_rule_id_for_an_unknown_rule() -> None:
+    finding = Finding(rule_id="XYZ-999", severity="warning", message="m", source="s")
+    payload = finding_payload(finding)
+    assert payload["title"] == "XYZ-999"
+    assert payload["message"] == "m"
+
+
+# ---- The development fake model ---------------------------------------------------
+
+
+def as_request(host: str | None) -> SimpleNamespace:
+    """Just enough of a request for the gate: where it came from."""
+    return SimpleNamespace(client=SimpleNamespace(host=host) if host else None)
+
+
+@pytest.fixture(autouse=True)
+def fake_model_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test sees the variable unless it asks for it, whatever the shell exported."""
+    monkeypatch.delenv(FAKE_MODEL_ENV_VAR, raising=False)
+
+
+def test_fake_model_is_off_without_the_variable() -> None:
+    assert fake_model_is_allowed(as_request("127.0.0.1")) is False
+    assert get_client_factory(as_request("127.0.0.1")) is not fake_client_factory
+
+
+@pytest.mark.parametrize("value", ["0", "true", "yes", ""])
+def test_fake_model_needs_the_variable_to_be_exactly_one(monkeypatch, value: str) -> None:
+    monkeypatch.setenv(FAKE_MODEL_ENV_VAR, value)
+    assert fake_model_is_allowed(as_request("127.0.0.1")) is False
+
+
+@pytest.mark.parametrize("host", ["203.0.113.7", "testclient", None])
+def test_fake_model_is_off_for_a_request_from_elsewhere(monkeypatch, host) -> None:
+    """With the variable set, a request that is not from this machine still gets a real model."""
+    monkeypatch.setenv(FAKE_MODEL_ENV_VAR, "1")
+    assert fake_model_is_allowed(as_request(host)) is False
+    assert get_client_factory(as_request(host)) is not fake_client_factory
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
+def test_fake_model_is_on_only_with_both_gates(monkeypatch, host: str) -> None:
+    monkeypatch.setenv(FAKE_MODEL_ENV_VAR, "1")
+    assert fake_model_is_allowed(as_request(host)) is True
+    assert get_client_factory(as_request(host)) is fake_client_factory
+
+
+def test_fake_model_runs_the_real_check_fix_and_redline(tmp_path: Path, monkeypatch) -> None:
+    """Upload, check, and fix through the fake: rules, loop, and redline all run for real."""
+    monkeypatch.setenv(FAKE_MODEL_ENV_VAR, "1")
+    monkeypatch.setattr("draftcheck.fake_model.FAKE_DELAY_S", 0)
+    app.dependency_overrides[get_limiter] = lambda: UsageLimiter(ROOMY)
+    app.dependency_overrides[get_cleaner] = lambda: Cleaner(ROOMY)
+    app.dependency_overrides[get_fallback_policy] = lambda: NO_FALLBACK
+    try:
+        with local_client(tmp_path) as client:
+            created = upload(client)
+            assert created["fake_model"] is True
+            assert created["model"] == FAKE_MODEL_NAME
+
+            run_id = created["run_id"]
+            checked = client.post(f"/api/runs/{run_id}/check", json=created["drawing"]).json()
+            assert checked["error_count"] == 1
+
+            fixed = client.post(f"/api/runs/{run_id}/fix")
+            assert fixed.status_code == 200, fixed.text
+            body = fixed.json()
+            assert body["fake_model"] is True
+            assert body["resolved_count"] == 1
+            assert client.get(body["redline_pdf_url"]).status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_model_mode_says_fake_only_with_both_gates(tmp_path: Path, monkeypatch) -> None:
+    """The page's badge on load: on for loopback with the variable, off otherwise."""
+    monkeypatch.setenv(FAKE_MODEL_ENV_VAR, "1")
+    try:
+        with local_client(tmp_path) as local:
+            assert local.get("/api/model-mode").json() == {"fake_model": True}
+        with TestClient(app) as remote:  # host "testclient": not loopback
+            assert remote.get("/api/model-mode").json() == {"fake_model": False}
+        monkeypatch.delenv(FAKE_MODEL_ENV_VAR)
+        with local_client(tmp_path) as local:
+            assert local.get("/api/model-mode").json() == {"fake_model": False}
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_a_real_run_says_it_is_not_fake(client: TestClient):
+    """The page's badge reads this flag, so a normal run must say ``false``."""
+    assert upload(client)["fake_model"] is False
 
 
 def test_the_page_says_usage_is_limited(client: TestClient):

@@ -1,141 +1,179 @@
-/* DraftCheck — upload a drawing, correct what the model read, and check it.
+/* DraftCheck — the checker's desk.
  *
- * Two requests. POST /api/runs sends the file and the chosen provider, and the reply
- * carries the run id, the extracted drawing, and the model/latency metadata; the rendered
- * page comes back separately from GET /api/runs/{id}/page.png. POST /api/runs/{id}/check
- * sends the drawing the user confirmed and returns the findings.
+ * Four requests, the same ones the page has always made:
+ *   POST /api/runs               the file and the chosen provider -> run id, extraction, model
+ *   GET  /api/runs/{id}/page.png the rendered page, shown as paper on the desk
+ *   POST /api/runs/{id}/check    the drawing the user confirmed -> findings
+ *   POST /api/runs/{id}/fix      run the correction loop -> rounds, verdicts, redline URLs
+ * plus GET /samples/plate_001.pdf, which "Try the sample drawing" fetches and then uploads
+ * through POST /api/runs exactly like a picked file.
  *
  * Nothing here decides whether the drawing passes. The tables are an editor and a
- * display: the rules run server side, on exactly the JSON this file posts.
+ * display; the rules run server side, on exactly the JSON this file posts.
+ *
+ * The screen is one state machine. `currentStage()` reads the run's real state — is a
+ * request out, has the check run, have the tables moved on since — and `updateUI()`
+ * paints the stepper, the model pill, the status line, and the one primary button from
+ * it. Nothing sets those directly, so they cannot disagree with each other.
  *
  * Two copies of the drawing are kept. `original` is what the model read and is never
  * touched — it is what the "edited" marks compare against and what Reset restores.
- * `working` starts as a copy of it, the inputs write into it, and it is the request body,
- * so every field nobody edited is passed through exactly as extracted.
+ * `working` starts as a copy of it, the inputs write into it, and it is the request body.
  *
- * Every cell is written with textContent or as an input `value`, never innerHTML: the
- * strings below come from a language model reading an uploaded file, so they are treated
- * as text, not markup.
+ * Every string from the server is written with textContent or as an input `value`, never
+ * innerHTML: it comes from a language model reading an uploaded file, so it is text.
  */
 
 "use strict";
 
 const EM_DASH = "—";
+const SVG_NS = "http://www.w3.org/2000/svg";
 
-const form = document.getElementById("upload-form");
-const fileInput = document.getElementById("file");
-const providerSelect = document.getElementById("provider");
-const submitButton = document.getElementById("submit");
+const $ = (id) => document.getElementById(id);
 
-const dropzone = document.getElementById("dropzone");
-const dropMain = document.getElementById("drop-main");
+const fileInput = $("file");
+const providerSelect = $("provider");
+const uploadButton = $("upload-button");
+const sampleButtons = Array.from(document.querySelectorAll(".js-sample"));
 
-const statusLine = document.getElementById("status");
-const errorBox = document.getElementById("error");
-const errorText = document.getElementById("error-text");
-const resultSection = document.getElementById("result");
+const desk = $("desk");
+const stageEl = $("stage");
+const emptyState = $("empty");
+const dropzone = $("dropzone");
+const dropMain = $("drop-main");
+const paper = $("paper");
+const pageImage = $("page-image");
+const overlay = $("overlay");
+const boxLayer = $("boxes");
+const overlayToggle = $("show-overlay");
 
-const parseIssuesBox = document.getElementById("parse-issues");
-const parseIssuesList = document.getElementById("parse-issues-list");
-const pageImage = document.getElementById("page-image");
-const overlay = document.getElementById("overlay");
-const overlayToggle = document.getElementById("show-overlay");
-const dataPanel = document.querySelector(".data-panel");
+const stepper = $("stepper");
+const modelPill = $("model-pill");
+const modelPillText = $("model-pill-text");
+const fileName = $("file-name");
+const fileSub = $("file-sub");
+const phase = $("phase");
 
-const checkButton = document.getElementById("check");
-const resetButton = document.getElementById("reset");
-const addDatumButton = document.getElementById("add-datum");
-const invalidNote = document.getElementById("invalid-note");
+const panelBody = $("panel-body");
+const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+const issueCount = $("issue-count");
 
-const confidenceSummary = document.getElementById("confidence-summary");
+const extractedEmpty = $("extracted-empty");
+const extracted = $("extracted");
+const parseIssuesBox = $("parse-issues");
+const parseIssuesList = $("parse-issues-list");
+const metaFallback = $("meta-fallback");
+const confidenceSummary = $("confidence-summary");
+const resetButton = $("reset");
+const addDatumButton = $("add-datum");
 
-const findingsPanel = document.getElementById("findings-panel");
-const findingsList = document.getElementById("findings-list");
-const findingsNone = document.getElementById("findings-none");
-const checkStatus = document.getElementById("check-status");
-const checkErrorBox = document.getElementById("check-error");
-const checkErrorText = document.getElementById("check-error-text");
-const checkIssuesBox = document.getElementById("check-parse-issues");
-const checkIssuesList = document.getElementById("check-parse-issues-list");
+const issuesEmpty = $("issues-empty");
+const findingsList = $("findings-list");
+const findingsNone = $("findings-none");
+const checkStatus = $("check-status");
+const checkIssuesBox = $("check-parse-issues");
+const checkIssuesList = $("check-parse-issues-list");
 
-const proposeButton = document.getElementById("propose-fix");
-const fixHint = document.getElementById("fix-hint");
-const fixStatus = document.getElementById("fix-status");
-const cancelReadButton = document.getElementById("cancel-read");
-const readCancelled = document.getElementById("read-cancelled");
-const metaFallback = document.getElementById("meta-fallback");
-const cancelFixButton = document.getElementById("cancel-fix");
-const fixCancelled = document.getElementById("fix-cancelled");
+const correctionsEmpty = $("corrections-empty");
+const agentPanel = $("agent-panel");
+const agentStatus = $("agent-status");
+const agentRounds = $("agent-rounds");
+const agentVerdicts = $("agent-verdicts");
+const redlineImage = $("redline-image");
+const redlinePdf = $("redline-pdf");
 
-const agentPanel = document.getElementById("agent-panel");
-const agentStatus = document.getElementById("agent-status");
-const agentErrorBox = document.getElementById("agent-error");
-const agentErrorText = document.getElementById("agent-error-text");
-const agentRounds = document.getElementById("agent-rounds");
-const agentVerdicts = document.getElementById("agent-verdicts");
-const redlineImage = document.getElementById("redline-image");
-const redlinePdf = document.getElementById("redline-pdf");
+const actionHint = $("action-hint");
+const primaryButton = $("primary");
+const cancelButton = $("cancel");
+const toasts = $("toasts");
+const fakeBadge = $("fake-badge");
+const actionBar = document.querySelector(".actionbar");
+const statusBar = document.querySelector(".statusbar");
 
-/* ---- The drop zone ------------------------------------------------------- */
-
-const DROP_PROMPT = "Drop a drawing here, or click to choose a file";
+/* ---- Constants ----------------------------------------------------------- */
 
 /** What the server will open, checked here so an obvious mistake costs no request. */
 const ALLOWED_SUFFIXES = [".pdf", ".png", ".jpg", ".jpeg"];
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
-/** True while a run is in flight; the drop zone ignores clicks and drops then. */
-let busy = false;
+/** The sample drawing, served by the API as one static file. */
+const SAMPLE_URL = "/samples/plate_001.pdf";
+const SAMPLE_NAME = "plate_001.pdf";
+
+/** The correction loop's hard cap (draftcheck/agent.py MAX_ROUNDS). Only used in words. */
+const MAX_ROUNDS = 3;
+
+/** Short names for the provider options, for the model pill. */
+const PROVIDER_LABELS = {
+  baseten: "Muse Spark Open",
+  meta: "Muse Spark",
+};
 
 /**
- * Why this file cannot be sent, or `null` when it can.
- *
- * Checked on the file name, not on the browser's `type`, which is a guess the client
- * makes from the extension anyway. The server checks both again — this is only here so
- * the wrong file gives an answer immediately instead of after a round trip.
+ * Said beside the model name when the server's fallback stepped in: Muse Spark Open on
+ * Baseten did not answer, so the same request went to Muse Spark on the Meta Model API.
  */
-function rejectionReason(file) {
-  const name = file.name || "";
-  const dot = name.lastIndexOf(".");
-  const suffix = dot === -1 ? "" : name.slice(dot).toLowerCase();
+const FALLBACK_NOTE =
+  "Muse Spark Open didn't respond in time, so Muse Spark (Meta Model API) read this drawing.";
 
-  if (!ALLOWED_SUFFIXES.includes(suffix)) {
-    return `“${name}” is not a drawing DraftCheck can read. Use a PDF, PNG, or JPG file.`;
-  }
-  if (file.size > MAX_UPLOAD_BYTES) {
-    const megabytes = (file.size / (1024 * 1024)).toFixed(1);
-    return `“${name}” is ${megabytes} MB. The limit is 10 MB.`;
-  }
-  return null;
-}
+// Closing the connection stops our server, but the provider keeps working on the
+// abandoned request and the next one waits behind it (docs/ARCHITECTURE.md §4.13).
+const CANCELLED_MESSAGE =
+  "Cancelled. Muse Spark may still be finishing the previous request, so your next read can take up to a minute.";
 
-/** Show one of the three states; the others are hidden. */
-function setBusy(isBusy) {
-  busy = isBusy;
-  submitButton.disabled = isBusy;
-  submitButton.textContent = isBusy ? "Reading…" : "Read drawing";
-  statusLine.hidden = !isBusy;
+/**
+ * How long a check may take before it is worth telling the user it is running. Under
+ * this, a "Checking…" label would appear and vanish too fast to read.
+ */
+const SLOW_CHECK_MS = 300;
 
-  dropzone.classList.toggle("is-busy", isBusy);
-  dropzone.classList.remove("is-dragging");
-  dropzone.setAttribute("aria-disabled", String(isBusy));
-  dropzone.tabIndex = isBusy ? -1 : 0;
-}
+/* ---- State --------------------------------------------------------------- */
 
-/** The file name while reading, the invitation the rest of the time. */
-function setDropLabel(fileName) {
-  dropMain.textContent = fileName || DROP_PROMPT;
-}
+const state = {
+  runId: null,
+  original: null,
+  working: null,
+  /** Run metadata from the upload reply: model, latency, attempts, fell_back. */
+  run: null,
+  /** Which provider the run was read with, for the pill while fixing. */
+  provider: null,
+  /** The file on the desk, and where it came from: "uploaded", "sample", or "demo". */
+  file: null,
+  /** The file being read right now, shown in place of `file` until the read lands. */
+  pendingFile: null,
+  /** True once a check has returned, so a later edit can mark its findings out of date. */
+  checked: false,
+  checkedAt: null,
+  /** True once the tables have moved on from the last check. */
+  stale: false,
+  errorCount: 0,
+  warningCount: 0,
+  /** When the correction loop last returned, or null. */
+  fixedAt: null,
+  /** True once the tables have moved on from the last fix. */
+  agentStale: false,
+  /** The last fix's numbers, as the server reported them. */
+  fix: null,
+  /** True once the redline has been downloaded from the primary button. */
+  exported: false,
+  /** Whether the page image has loaded, and its size in image pixels. */
+  imageReady: false,
+  imageW: 0,
+  imageH: 0,
+  /** The pill's last "answered" text, restored when a busy spell ends. */
+  answered: null,
+  /** True when the server answered with the development fake model (DRAFTCHECK_FAKE_MODEL). */
+  fake: false,
+};
 
-function showError(message) {
-  errorText.textContent = message;
-  errorBox.hidden = false;
-}
+let reading = false;
+let checking = false;
+let checkLabelShown = false;
+let fixing = false;
 
-function clearOutput() {
-  errorBox.hidden = true;
-  resultSection.hidden = true;
-}
+/** The controller for the request Cancel would stop, or `null` when none is out. */
+let readController = null;
+let fixController = null;
 
 /* ---- Formatting helpers -------------------------------------------------- */
 
@@ -156,10 +194,8 @@ function num(value) {
 }
 
 /**
- * The same, but as something to put in an input's `value`.
- *
- * Unrounded, unlike `num`: a box the user has not touched must read back as the exact
- * number the model gave, or the cell would mark itself edited on sight.
+ * The same, but as something to put in an input's `value`. Unrounded, so a box nobody
+ * touched reads back as exactly the number the model gave.
  */
 function numInput(value) {
   return typeof value === "number" && isFinite(value) ? String(value) : "";
@@ -173,6 +209,10 @@ function seconds(value) {
   return `${value.toFixed(1)} s`;
 }
 
+function plural(count, word) {
+  return `${count} ${word}${count === 1 ? "" : "s"}`;
+}
+
 /** "left_edge → hole_1_center", or an em dash when the pair is incomplete. */
 function fromTo(dimension) {
   if (!dimension.from_ref && !dimension.to_ref) {
@@ -182,11 +222,8 @@ function fromTo(dimension) {
 }
 
 /**
- * Datum references as one editable string: "A|B(MMC)|C".
- *
- * The bars are what a drawing's frame does — one compartment per datum, most important
- * first — and the bracketed modifier keeps a frame that carries one from losing it the
- * moment somebody edits the cell. `parseDatumRefs` is the exact opposite of this.
+ * Datum references as one editable string: "A|B(MMC)|C". One compartment per datum, most
+ * important first. `parseDatumRefs` is the exact opposite of this.
  */
 function datumRefsText(refs) {
   if (!Array.isArray(refs) || refs.length === 0) {
@@ -197,22 +234,455 @@ function datumRefsText(refs) {
     .join("|");
 }
 
+/** "14:32:07" — padded and 24-hour, so the line never changes width. */
+function clockTime(when) {
+  const pad = (number) => String(number).padStart(2, "0");
+  return `${pad(when.getHours())}:${pad(when.getMinutes())}:${pad(when.getSeconds())}`;
+}
+
+function isBBox(bbox) {
+  return Array.isArray(bbox) && bbox.length === 4 && bbox.every((v) => typeof v === "number");
+}
+
+/**
+ * The drawing zone an item sits in, e.g. "C3", from the centre of its bbox.
+ *
+ * Rows A–D run top to bottom and columns 1–6 left to right, the way a sheet's border is
+ * usually lettered. `bbox` is [x0, y0, x1, y1] in 0..1 from the top-left of the page.
+ */
+const ZONE_ROWS = "ABCD";
+const ZONE_COLUMNS = 6;
+
+function zoneOf(bbox) {
+  if (!isBBox(bbox)) {
+    return null;
+  }
+  const clamp = (value, top) => Math.min(top, Math.max(0, value));
+  const cx = (bbox[0] + bbox[2]) / 2;
+  const cy = (bbox[1] + bbox[3]) / 2;
+  const row = clamp(Math.floor(cy * ZONE_ROWS.length), ZONE_ROWS.length - 1);
+  const column = clamp(Math.floor(cx * ZONE_COLUMNS), ZONE_COLUMNS - 1);
+  return `${ZONE_ROWS[row]}${column + 1}`;
+}
+
+/* ---- Toasts -------------------------------------------------------------- */
+
+/** How long every toast stays, errors included. */
+const TOAST_MS = 5000;
+
+/** Gap kept between the toasts and whichever bar they would otherwise sit on. */
+const TOAST_GAP_PX = 12;
+
+/**
+ * Lift the toasts clear of the action bar and the status bar (with its legend).
+ *
+ * Both bars sit along the bottom of the window on a wide screen; on a narrow one they are
+ * in the page flow, so whether one is under the toasts depends on the scroll. Each bar
+ * that reaches into the bottom strip where the toasts would go pushes them up above it.
+ */
+function placeToasts() {
+  const height = toasts.offsetHeight;
+  let bottom = 16;
+  for (const bar of [actionBar, statusBar]) {
+    const rect = bar.getBoundingClientRect();
+    const reachesStrip = rect.bottom > window.innerHeight - bottom - height && rect.top < window.innerHeight;
+    if (reachesStrip) {
+      bottom = Math.max(bottom, window.innerHeight - rect.top + TOAST_GAP_PX);
+    }
+  }
+  toasts.style.bottom = `${bottom}px`;
+}
+
+window.addEventListener("resize", placeToasts);
+window.addEventListener("scroll", placeToasts, { passive: true });
+
+/**
+ * A small dark pill above the bottom bars, gone after five seconds.
+ *
+ * A message already on screen is not shown twice: its timer starts again instead, so a
+ * repeated error reads as "still true" rather than stacking up copies. Errors are
+ * announced as alerts and stay readable for the same five seconds.
+ */
+function toast(message, { error = false } = {}) {
+  const existing = Array.from(toasts.children).find((item) => item.dataset.message === message);
+  if (existing) {
+    clearTimeout(Number(existing.dataset.timer));
+    existing.dataset.timer = String(setTimeout(() => existing.remove(), TOAST_MS));
+    return;
+  }
+
+  const item = document.createElement("div");
+  item.className = error ? "toast is-error" : "toast";
+  item.setAttribute("role", error ? "alert" : "status");
+  item.dataset.message = message;
+
+  const body = document.createElement("span");
+  body.textContent = message;
+  item.appendChild(body);
+
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "toast-close";
+  close.setAttribute("aria-label", "Dismiss");
+  close.textContent = "×";
+  close.addEventListener("click", () => item.remove());
+  item.appendChild(close);
+
+  toasts.appendChild(item);
+  // Three at most; the oldest goes first.
+  while (toasts.children.length > 3) {
+    toasts.firstElementChild.remove();
+  }
+  item.dataset.timer = String(setTimeout(() => item.remove(), TOAST_MS));
+  placeToasts();
+}
+
+/** Drop the errors still on screen; called as a new request starts, so they cannot be
+ *  mistaken for news about it. */
+function clearErrorToasts() {
+  for (const item of toasts.querySelectorAll(".toast.is-error")) {
+    item.remove();
+  }
+}
+
+/* ---- Tabs ---------------------------------------------------------------- */
+
+function selectTab(name, { focus = false } = {}) {
+  for (const tab of tabs) {
+    const on = tab.id === `tab-${name}`;
+    tab.setAttribute("aria-selected", String(on));
+    tab.tabIndex = on ? 0 : -1;
+    $(tab.getAttribute("aria-controls")).hidden = !on;
+    if (on && focus) {
+      tab.focus();
+    }
+  }
+  panelBody.scrollTop = 0;
+}
+
+for (const tab of tabs) {
+  tab.addEventListener("click", () => selectTab(tab.id.replace("tab-", "")));
+  // Arrow keys move between tabs, the usual tablist pattern.
+  tab.addEventListener("keydown", (event) => {
+    const index = tabs.indexOf(tab);
+    let next = null;
+    if (event.key === "ArrowRight") next = tabs[(index + 1) % tabs.length];
+    if (event.key === "ArrowLeft") next = tabs[(index - 1 + tabs.length) % tabs.length];
+    if (event.key === "Home") next = tabs[0];
+    if (event.key === "End") next = tabs[tabs.length - 1];
+    if (next) {
+      event.preventDefault();
+      selectTab(next.id.replace("tab-", ""), { focus: true });
+    }
+  });
+}
+
+/* ---- The stage machine --------------------------------------------------- */
+
+/** Where the run is, read from its real state. */
+function currentStage() {
+  if (reading) return "reading";
+  if (!state.runId) return "empty";
+  if (fixing) return "fixing";
+  if (checking) return "checking";
+  if (!state.checked || state.stale) return "confirm";
+  if (state.fixedAt && !state.agentStale) return "done";
+  return state.errorCount > 0 ? "checked" : "clean";
+}
+
+/** Stepper position for each stage: which step is current, and how many are done. */
+const STEP_OF = {
+  empty: [0, 0],
+  reading: [0, 0],
+  confirm: [1, 1],
+  checking: [2, 2],
+  checked: [3, 3],
+  clean: [3, 3],
+  fixing: [3, 3],
+  done: [4, 4],
+};
+
+function paintStepper(stage) {
+  let [current, done] = STEP_OF[stage];
+  if (stage === "done" && state.exported) {
+    current = -1;
+    done = 5;
+  }
+  for (const step of stepper.children) {
+    const index = Number(step.dataset.step);
+    step.classList.toggle("is-done", index < done);
+    step.classList.toggle("is-current", index === current);
+    if (index === current) {
+      step.setAttribute("aria-current", "step");
+    } else {
+      step.removeAttribute("aria-current");
+    }
+    const name = step.querySelector(".step-name").textContent;
+    step.setAttribute("aria-label", index < done ? `${name}, done` : name);
+  }
+}
+
+function providerLabel(value) {
+  return PROVIDER_LABELS[value] || value || "the model";
+}
+
+/** "Read by <code>muse-spark-1.2</code> (fallback)", built as nodes. */
+function setPill(prefix, model, { busy = false, fellBack = false } = {}) {
+  const parts = [prefix];
+  if (model) {
+    parts.push(" ");
+    const code = document.createElement("code");
+    code.textContent = model;
+    parts.push(code);
+  }
+  if (fellBack) {
+    parts.push(" (fallback)");
+  }
+  modelPillText.replaceChildren(...parts);
+  modelPill.classList.toggle("is-busy", busy);
+  modelPill.classList.toggle("is-fallback", fellBack);
+}
+
+function paintPill(stage) {
+  // Said whenever the server has told us it is answering with the development fake, so a
+  // screenshot or a demo can never pass the fake off as a real model's reading.
+  fakeBadge.hidden = !state.fake;
+  // In fake mode no real provider is called, so the busy line must not name one.
+  const reader = state.fake ? "the fake model" : providerLabel(providerSelect.value);
+  const proposer = state.fake ? "the fake model" : providerLabel(state.provider);
+  if (stage === "reading") {
+    setPill(`Reading with ${reader}`, null, { busy: true });
+  } else if (stage === "fixing") {
+    setPill(`Proposing with ${proposer}`, null, { busy: true });
+  } else if (state.answered) {
+    setPill(state.answered.prefix, state.answered.model, { fellBack: state.answered.fellBack });
+  } else {
+    setPill(`Ready · ${providerLabel(providerSelect.value)}`, null);
+  }
+}
+
+function itemCount() {
+  const w = state.working || {};
+  return (w.datums || []).length + (w.dimensions || []).length + (w.fcfs || []).length;
+}
+
+function phaseText(stage) {
+  switch (stage) {
+    case "empty":
+      return "Drop or choose a drawing to begin.";
+    case "reading":
+      return `Reading ${state.pendingFile ? state.pendingFile.name : "the drawing"}… about 20–30 seconds.`;
+    case "confirm":
+      if (state.stale) {
+        return "The tables changed since the last check. Confirm them to check again.";
+      }
+      return (
+        `Read ${plural(itemCount(), "item")} in ${seconds(state.run && state.run.latency_s)}. ` +
+        "Check the tables against the drawing, then confirm."
+      );
+    case "checking":
+      return "Running DraftCheck's rules on the confirmed tables…";
+    case "checked":
+      return `Checked: ${plural(state.errorCount, "error")}, ${plural(state.warningCount, "warning")}.`;
+    case "clean":
+      return `Checked: no errors, ${plural(state.warningCount, "warning")}.`;
+    case "fixing":
+      return "The agent is proposing fixes; the rules re-check every round.";
+    case "done": {
+      const fix = state.fix;
+      return (
+        `Done after ${plural(fix.rounds, "round")}: ${fix.resolved} of ${fix.total} ` +
+        "findings verified resolved by the rules."
+      );
+    }
+    default:
+      return "";
+  }
+}
+
+/** The primary button and its hint, for each stage. */
+function primaryFor(stage) {
+  const blocked = invalidInputs.size > 0;
+  switch (stage) {
+    case "empty":
+      return {
+        label: "Read drawing",
+        hint: "Choose a PDF, PNG, or JPG; the model reads its dimensions, datums, and frames.",
+      };
+    case "reading":
+      return {
+        label: "Reading…",
+        disabled: true,
+        hint: "The model is reading the drawing. This usually takes 20–30 seconds.",
+      };
+    case "confirm":
+      return {
+        label: "Confirm and run checks",
+        disabled: blocked,
+        warn: blocked,
+        hint: blocked
+          ? "Some cells still need fixing — they are outlined in red."
+          : "Runs DraftCheck's rules on the tables exactly as they are now.",
+      };
+    case "checking":
+      return {
+        label: checkLabelShown ? "Checking…" : "Confirm and run checks",
+        disabled: true,
+        hint: "Runs DraftCheck's rules on the tables exactly as they are now.",
+      };
+    case "checked":
+      return {
+        label: "Let the agent fix them",
+        disabled: blocked,
+        warn: blocked,
+        hint: blocked
+          ? "Some cells still need fixing — they are outlined in red."
+          : `The model proposes edits for the ${plural(state.errorCount, "error")}; ` +
+            "the rules re-check every round.",
+      };
+    case "clean":
+      return {
+        label: "Nothing to fix",
+        disabled: true,
+        hint: "The rules found no errors, so there is nothing for the agent to fix.",
+      };
+    case "fixing":
+      return {
+        label: `Running rounds (up to ${MAX_ROUNDS})…`,
+        disabled: true,
+        hint: "Each round's edits are re-checked by the rule engine before the next.",
+      };
+    case "done":
+      return {
+        label: "Download redlined PDF",
+        hint: "The drawing with every finding marked, plus a page listing each correction.",
+      };
+    default:
+      return { label: "", hint: "" };
+  }
+}
+
+/** The count on the Issues tab: error findings still open. */
+function openErrors() {
+  if (state.fixedAt && !state.agentStale && state.fix) {
+    return state.fix.finalErrors;
+  }
+  return state.checked ? state.errorCount : 0;
+}
+
+/** Repaint everything that follows from the stage. Called after every change of state. */
+function updateUI() {
+  const stage = currentStage();
+  const busy = stage === "reading" || stage === "fixing";
+
+  paintStepper(stage);
+  paintPill(stage);
+  phase.textContent = phaseText(stage);
+
+  const action = primaryFor(stage);
+  primaryButton.textContent = action.label;
+  primaryButton.disabled = Boolean(action.disabled);
+  primaryButton.dataset.stage = stage;
+  actionHint.textContent = action.hint;
+  actionHint.classList.toggle("is-warn", Boolean(action.warn));
+  cancelButton.hidden = !busy;
+
+  // Desk: the file, and the drop zone or the paper.
+  const file = reading ? state.pendingFile : state.file;
+  fileName.textContent = file ? file.name : "No drawing yet";
+  fileSub.textContent = file
+    ? `Sheet 1, ${file.source === "sample" ? "sample drawing" : file.source === "demo" ? "demo extraction" : "uploaded"}`
+    : "Upload a drawing to begin";
+
+  const showPaper = Boolean(state.runId) && !reading && state.imageReady;
+  emptyState.hidden = Boolean(state.runId) && !reading;
+  paper.hidden = !showPaper;
+  if (showPaper) {
+    fitPaper();
+  }
+
+  dropzone.classList.toggle("is-busy", reading);
+  dropzone.setAttribute("aria-disabled", String(reading));
+  dropzone.tabIndex = reading ? -1 : 0;
+  dropMain.textContent = reading
+    ? `Reading ${state.pendingFile ? state.pendingFile.name : "the drawing"}…`
+    : DROP_PROMPT;
+
+  uploadButton.disabled = busy;
+  for (const button of sampleButtons) {
+    button.disabled = busy;
+  }
+  providerSelect.disabled = busy;
+
+  // Panel: what each tab has to show.
+  const hasRun = Boolean(state.runId) && !reading;
+  extracted.hidden = !hasRun;
+  extractedEmpty.hidden = hasRun;
+  resetButton.disabled = fixing || checking;
+  addDatumButton.disabled = fixing || checking;
+
+  issuesEmpty.hidden = state.checked;
+  const errors = openErrors();
+  issueCount.textContent = String(errors);
+  issueCount.hidden = errors === 0;
+  issueCount.setAttribute("aria-label", `${plural(errors, "open error")}`);
+
+  const fixed = Boolean(state.fixedAt);
+  correctionsEmpty.hidden = fixed;
+  agentPanel.hidden = !fixed;
+}
+
+/* ---- Sizing the paper to the stage --------------------------------------- */
+
+/** Scale the page to fit the stage, keeping its aspect; the SVG follows the paper. */
+function fitPaper() {
+  if (!state.imageReady || paper.hidden) {
+    return;
+  }
+  const style = getComputedStyle(stageEl);
+  const width = stageEl.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  const height = stageEl.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+  if (width <= 0 || height <= 0) {
+    return;
+  }
+  const scale = Math.min(width / state.imageW, height / state.imageH);
+  paper.style.width = `${Math.floor(state.imageW * scale)}px`;
+  paper.style.height = `${Math.floor(state.imageH * scale)}px`;
+}
+
+new ResizeObserver(fitPaper).observe(stageEl);
+
+pageImage.addEventListener("load", () => {
+  state.imageW = pageImage.naturalWidth;
+  state.imageH = pageImage.naturalHeight;
+  state.imageReady = true;
+  // The overlay is in image pixels, so step 19b can draw at the drawing's own scale.
+  overlay.setAttribute("viewBox", `0 0 ${state.imageW} ${state.imageH}`);
+  overlay.setAttribute("preserveAspectRatio", "none");
+  layoutBoxes();
+  updateUI();
+});
+
+pageImage.addEventListener("error", () => {
+  if (pageImage.getAttribute("src")) {
+    toast("The rendered page could not be loaded.", { error: true });
+  }
+});
+
 /* ---- Linking the tables to the drawing ----------------------------------- */
 
 /*
  * Every datum, dimension, and frame has an id (DT1, D1, F1…) and, when the model said
- * where it is, a bbox: [x0, y0, x1, y1] in 0..1 from the top-left of the page. The id is
- * the thread — one box on the image, one row in a table, and any finding about the item
- * all share it, so pointing at any of them can light up the others.
+ * where it is, a bbox. The id is the thread — one box on the image, one row in a table,
+ * and any finding about the item all share it.
  */
 
-/** item id -> { box, row }. `box` is null for an item with no bbox. Rebuilt per run. */
+/** item id -> { box, row, bbox }. `box` is null for an item with no bbox. Rebuilt per run. */
 const linked = new Map();
 
-/** The ids lit by the last click — one for a row or box, possibly several for a finding. */
+/** The ids lit by the last click. */
 let pickedIds = [];
 
-/** Put a class on both halves of a pair, or do nothing for an id we cannot locate. */
 function paint(id, className, on) {
   const pair = linked.get(id);
   if (!pair) {
@@ -226,12 +696,7 @@ function paint(id, className, on) {
   }
 }
 
-/**
- * Choose one or more items: light them on both sides and bring `scrollInto` into view.
- *
- * `block: "nearest"` scrolls the least that will do the job — the page image is sticky,
- * so a bigger jump would shove the drawing around for no reason.
- */
+/** Light one or more items on both sides, and bring `scrollInto` into view. */
 function pick(ids, scrollInto) {
   for (const previous of pickedIds) {
     paint(previous, "is-picked", false);
@@ -245,54 +710,50 @@ function pick(ids, scrollInto) {
   }
 }
 
-/**
- * Register every item and draw a box for the ones the model placed.
- *
- * Items without a bbox are registered too, with `box: null`: a datum the user adds has no
- * place on the drawing, but a finding about it must still be able to light its row.
- */
+/** Register every item, and draw an SVG box for the ones the model placed. */
 function buildOverlay(items) {
   linked.clear();
   pickedIds = [];
-  overlay.replaceChildren();
+  boxLayer.replaceChildren();
 
   for (const item of items) {
     if (!item.id) {
       continue;
     }
-    const bbox = item.bbox;
-    if (!Array.isArray(bbox) || bbox.length !== 4) {
-      linked.set(item.id, { box: null, row: null });
+    if (!isBBox(item.bbox)) {
+      linked.set(item.id, { box: null, row: null, bbox: null });
       continue;
     }
-    const [x0, y0, x1, y1] = bbox;
-
-    const box = document.createElement("div");
-    box.className = "obox";
+    const box = document.createElementNS(SVG_NS, "rect");
+    box.setAttribute("class", item.unsure ? "obox is-unsure" : "obox");
     box.dataset.itemId = item.id;
-    // Percentages, not pixels: the image is `width: 100%`, so its size changes with the
-    // window and a pixel offset would drift off the drawing.
-    box.style.left = `${x0 * 100}%`;
-    box.style.top = `${y0 * 100}%`;
-    box.style.width = `${(x1 - x0) * 100}%`;
-    box.style.height = `${(y1 - y0) * 100}%`;
-    box.title = item.title;
-    // Amber instead of the faint blue, so the items worth a second look are findable on
-    // the drawing without reading the tables at all.
-    box.classList.toggle("is-unsure", Boolean(item.unsure));
+    const title = document.createElementNS(SVG_NS, "title");
+    title.textContent = `${item.id}: ${item.title}`;
+    box.appendChild(title);
+    boxLayer.appendChild(box);
+    linked.set(item.id, { box, row: null, bbox: item.bbox });
+  }
+  layoutBoxes();
+}
 
-    overlay.appendChild(box);
-    linked.set(item.id, { box, row: null });
+/** Place the boxes in image pixels. Needs the image's size, so it reruns on load. */
+function layoutBoxes() {
+  if (!state.imageReady) {
+    return;
+  }
+  for (const pair of linked.values()) {
+    if (!pair.box) {
+      continue;
+    }
+    const [x0, y0, x1, y1] = pair.bbox;
+    pair.box.setAttribute("x", String(x0 * state.imageW));
+    pair.box.setAttribute("y", String(y0 * state.imageH));
+    pair.box.setAttribute("width", String(Math.max(0, x1 - x0) * state.imageW));
+    pair.box.setAttribute("height", String(Math.max(0, y1 - y0) * state.imageH));
   }
 }
 
-/**
- * Tie a freshly built row to its box, or mark it as unplaceable.
- *
- * A row is always interactive — `data-item-id` is what the hover and click handlers look
- * for — but a row whose item has no box says so, since pointing at it lights nothing on
- * the drawing.
- */
+/** Tie a freshly built row to its box, or mark it as unplaceable. */
 function linkRow(id, row, firstCell) {
   const pair = id ? linked.get(id) : undefined;
   if (!pair) {
@@ -308,8 +769,7 @@ function linkRow(id, row, firstCell) {
   }
 }
 
-/* Hovering either side lights both. Delegated, so the handlers survive every rebuild of
-   the tables and the overlay. */
+/* Hovering either side lights both. Delegated, so the handlers survive every rebuild. */
 function hoverHandlers(container) {
   container.addEventListener("mouseover", (event) => {
     const target = event.target.closest("[data-item-id]");
@@ -326,65 +786,42 @@ function hoverHandlers(container) {
 }
 
 hoverHandlers(overlay);
-hoverHandlers(dataPanel);
+hoverHandlers(extracted);
 
-// Clicking a box goes to the row; clicking a row goes to the box.
+// Clicking a box goes to its row in the Extracted tab; clicking a row lights its box.
 overlay.addEventListener("click", (event) => {
   const box = event.target.closest(".obox");
-  if (box) {
-    const pair = linked.get(box.dataset.itemId);
-    pick([box.dataset.itemId], pair && pair.row);
+  if (!box) {
+    return;
   }
+  const id = box.dataset.itemId;
+  const pair = linked.get(id);
+  selectTab("extracted");
+  pick([id], pair && pair.row);
 });
 
-dataPanel.addEventListener("click", (event) => {
+extracted.addEventListener("click", (event) => {
   const row = event.target.closest("tr[data-item-id]");
   if (row) {
-    const pair = linked.get(row.dataset.itemId);
-    pick([row.dataset.itemId], pair && pair.box);
+    pick([row.dataset.itemId], null);
   }
 });
 
-// The toggle only hides the drawing's boxes. The table rows stay as they are, so a
-// reader who switches the boxes off keeps everything the model read.
 overlayToggle.addEventListener("change", () => {
-  overlay.hidden = !overlayToggle.checked;
+  boxLayer.style.display = overlayToggle.checked ? "" : "none";
 });
 
 /* ---- The two copies of the drawing --------------------------------------- */
 
-/** The run being reviewed. `original` is the model's reading; `working` is the user's. */
-const state = {
-  runId: null,
-  original: null,
-  working: null,
-  /** True once a check has returned, so a later edit can mark its findings out of date. */
-  checked: false,
-  /** True once the tables have moved on from the last check. */
-  stale: false,
-  /** Error-severity findings in the last check. The agent is only offered when there are some. */
-  errorCount: 0,
-  /** When the correction loop last returned, or null. The agent results go stale too. */
-  fixedAt: null,
-};
-
-/** A deep copy, so editing one copy of the drawing can never reach the other. */
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-/** The item in a list with this id, or undefined. Ids are unique within a list. */
 function byId(list, id) {
   return (list || []).find((item) => item.id === id);
 }
 
-/**
- * An id for a datum the user adds.
- *
- * The server gives ids to items that arrive without one, numbering them by position — so
- * an added datum could be handed an id another datum already has. Choosing the id here
- * avoids that entirely, and keeps the row linkable the moment it appears.
- */
+/** An id for a datum the user adds, chosen here so it never collides with another. */
 function newDatumId() {
   const taken = new Set((state.working.datums || []).map((datum) => datum.id));
   let n = 1;
@@ -397,32 +834,14 @@ function newDatumId() {
 /* ---- Validation ---------------------------------------------------------- */
 
 /*
- * An invalid cell is one the server could only guess at: a tolerance that is not a
- * number, a datum called "AB". Rather than send it and get a surprise back, the input is
- * outlined, the reason sits in its tooltip, and Check stays disabled until the set is
- * empty. `working` is left holding the last good value, so nothing half-typed is posted.
+ * An invalid cell is outlined, the reason sits in its tooltip, and the primary button
+ * stays disabled until the set is empty. `working` keeps the last good value, so nothing
+ * half-typed is ever posted.
  */
 
-/**
- * The inputs currently holding something unusable.
- *
- * Emptied by `renderTables`, which is the only thing that throws the controls away: an
- * input that has been replaced cannot be fixed, and would otherwise keep Check disabled
- * forever. Every cell re-registers itself as it is rebuilt.
- */
+/** The inputs currently holding something unusable. Emptied by `renderTables`. */
 const invalidInputs = new Set();
 
-/** True while the correction loop is running; both buttons are dead for its duration. */
-let fixing = false;
-
-function updateCheckButton() {
-  const blocked = invalidInputs.size > 0;
-  checkButton.disabled = blocked || busy || fixing;
-  invalidNote.hidden = !blocked;
-  updateFixButton();
-}
-
-/** Mark an input good or bad, and say why in its tooltip when it is bad. */
 function setValid(input, ok, message) {
   input.classList.toggle("is-invalid", !ok);
   input.setAttribute("aria-invalid", String(!ok));
@@ -433,15 +852,12 @@ function setValid(input, ok, message) {
     invalidInputs.add(input);
     input.title = message;
   }
-  updateCheckButton();
 }
 
 /**
- * The number in a numeric input.
- *
- * A `type="number"` input empties its own value when what was typed is not a number, and
- * raises `badInput` instead — so that is checked first, before an empty box could be
- * mistaken for a field left blank on purpose.
+ * The number in a numeric input. A `type="number"` input empties its own value when what
+ * was typed is not a number and raises `badInput` instead, so that is checked first —
+ * before an empty box could be mistaken for a field left blank on purpose.
  */
 function readNumber(input, { required, min }) {
   if (input.validity && input.validity.badInput) {
@@ -461,12 +877,7 @@ function readNumber(input, { required, min }) {
   return { ok: true, value: parsed };
 }
 
-/**
- * "A|B(MMC)|C" as a list of datum references, or `null` when it is not readable.
- *
- * Empty compartments are skipped rather than rejected, so a half-typed "A|" is not
- * flagged while the next letter is still on its way.
- */
+/** "A|B(MMC)|C" as a list of datum references, or `null` when it is not readable. */
 function parseDatumRefs(raw) {
   const refs = [];
   for (const piece of raw.split("|")) {
@@ -485,30 +896,15 @@ function parseDatumRefs(raw) {
 
 /* ---- Editable cells ------------------------------------------------------ */
 
-/*
- * Every editable cell is built the same way: a control, a rule for reading it, and
- * somewhere in `working` to put the result. `commit` runs on each keystroke and does
- * three things — validate, write the value through, and repaint the cell's "edited" mark
- * against `original`. Anything that does not validate is not written through.
- */
-
-/*
- * Keeping a cell wide enough for what is in it.
- *
- * The controls are `width: 100%` of their column, and a table squeezes its columns to fit
- * the panel — so on a narrow window "100" came out as "10" and "0.2" as "0". A cell cannot
- * be narrower than the control's `min-width`, so setting that per control from the value
- * it holds makes the column grow instead of the digits disappearing, and the table carries
- * the overflow to `.table-scroll` when the panel runs out of room.
- */
-
-/** The cell's padding and border, plus the spinner a number input draws over its value. */
-const INPUT_PAD_CH = 3.5;
-
-/** No control is narrower than this, so an empty box is still worth clicking. */
+/** The control's padding and border, in characters, with a little room to type into. */
+const INPUT_PAD_CH = 3;
 const MIN_INPUT_CH = 5;
 
-/** Set a text or number control's minimum width from the value it is holding. */
+/**
+ * Set a control's minimum width from the value it holds, so a narrow panel makes the
+ * column grow (and `.table-scroll` scroll) instead of hiding digits — "100" never reads
+ * as "10".
+ */
 function fitControl(control) {
   if (control.tagName !== "INPUT" || control.type === "checkbox") {
     return;
@@ -517,7 +913,6 @@ function fitControl(control) {
   control.style.minWidth = `${Math.max(MIN_INPUT_CH, characters)}ch`;
 }
 
-/** Add or remove a cell's accent, with the model's own value in the tooltip. */
 function markEdited(cell, edited, originalText) {
   cell.classList.toggle("is-edited", edited);
   if (edited) {
@@ -528,12 +923,8 @@ function markEdited(cell, edited, originalText) {
 }
 
 /**
- * One editable cell.
- *
- * `read` turns the control into `{ ok, value }`; `apply` writes an accepted value into
- * `working`; `was` is what the model read, shown when the two differ. `same` compares the
- * two, defaulting to `===` — the datum-references cell compares strings instead. `cell`
- * reuses a `<td>` already on the page, which is how the units table is filled.
+ * One editable cell: `read` turns the control into `{ ok, value }`, `apply` writes an
+ * accepted value into `working`, and `was` is what the model read.
  */
 function editCell(control, { read, apply, was, shown, same, mono = true, cell }) {
   const target = cell || document.createElement("td");
@@ -545,14 +936,12 @@ function editCell(control, { read, apply, was, shown, same, mono = true, cell })
 
   const matches = same || ((a, b) => a === b);
 
-  /** Validate, write through, and repaint the mark. `first` is the paint on build. */
   function commit(first) {
-    // Before anything else, and whatever the value turns out to be: a cell holding
-    // something unusable is exactly one the user needs to be able to read.
     fitControl(control);
     const result = read();
     setValid(control, result.ok, result.message || "This value cannot be used.");
     if (!result.ok) {
+      if (!first) updateUI();
       return;
     }
     apply(result.value);
@@ -562,20 +951,15 @@ function editCell(control, { read, apply, was, shown, same, mono = true, cell })
     }
   }
 
-  // `input` covers all three controls used here — text and number boxes as they are
-  // typed in, selects and checkboxes as they are switched.
   control.addEventListener("input", () => commit(false));
-  // Built, so paint the mark and flag a value that is unusable from the start — an added
-  // datum opens with no label, and that is exactly a cell that needs fixing.
   commit(true);
   return target;
 }
 
-/** A plain read-only cell. */
-function textCell(value, mono) {
+function textCell(value, className) {
   const cell = document.createElement("td");
-  if (mono) {
-    cell.className = "mono";
+  if (className) {
+    cell.className = className;
   }
   cell.textContent = value;
   return cell;
@@ -617,14 +1001,12 @@ function textControl(value, { width } = {}) {
   return input;
 }
 
-/**
- * A number cell wired to one field of one item.
- *
- * `min` is left out for a dimension's value — a coordinate dimension can be negative —
- * and is 0 for every tolerance, where a negative number is never a real reading.
- */
-function numberCell(item, field, was, { required, min, cell }) {
+/** A number cell wired to one field of one item. */
+function numberCell(item, field, was, { required, min, cell, label }) {
   const control = numberControl(numInput(item[field]), { min });
+  if (label) {
+    control.setAttribute("aria-label", label);
+  }
   const wants = min === undefined ? "a number" : `a number of ${min} or more`;
   const message = required ? `Type ${wants}.` : `Type ${wants}, or leave this empty.`;
 
@@ -642,98 +1024,218 @@ function numberCell(item, field, was, { required, min, cell }) {
 /* ---- Low confidence ------------------------------------------------------ */
 
 /*
- * The model returns a confidence with every datum, dimension, and frame. Below the
- * threshold the item is marked on both sides — an amber tag on its row, an amber outline
- * on its box — and counted in one line above the tables, so a reviewer with no time to
- * read every row still knows which ones the model was least sure of.
- *
- * It changes nothing about the check. Confidence is the model's own opinion of its
- * reading; the rules run on the values, not on how sure the model was about them.
+ * The model returns a confidence with every item. Below the threshold the row gets a
+ * warn tint and a note, and the box on the drawing goes amber. It changes nothing about
+ * the check: the rules run on the values, not on how sure the model was.
  */
 
 /** Below this, an item is marked for a second look. The only place this number lives. */
 const CONFIDENCE_THRESHOLD = 0.8;
 
-/**
- * True when the model said it was unsure about this item.
- *
- * A missing or unusable confidence is *unknown*, not *low*: the model said nothing about
- * how sure it was, and marking that as doubt would invent a verdict it never gave.
- */
+/** A missing confidence is unknown, not low — the model said nothing either way. */
 function isUnsure(item) {
   const value = item && item.confidence;
   return typeof value === "number" && isFinite(value) && value < CONFIDENCE_THRESHOLD;
 }
 
-/** The ids flagged in the current tables, in the order the tables show them. */
+/** "92%", or an em dash when the model gave no confidence. */
+function confidenceText(item) {
+  const value = item && item.confidence;
+  return typeof value === "number" && isFinite(value) ? `${Math.round(value * 100)}%` : EM_DASH;
+}
+
 let unsureIds = [];
 
-/** The amber tag for a row, or null when the model was sure enough about the item. */
 function unsureMarker(item) {
   if (!isUnsure(item)) {
     return null;
   }
   const mark = document.createElement("span");
   mark.className = "unsure";
-  mark.textContent = "unsure";
-  // Two decimals always, so the number is in the same place in every tooltip.
+  mark.textContent = "Low confidence, check this";
   mark.title =
     `Muse Spark is unsure about this one (confidence ${item.confidence.toFixed(2)}). ` +
     `Please check it.`;
-  // The tooltip is the whole message, and a title alone is not reliably announced.
-  mark.setAttribute("aria-label", mark.title);
   return mark;
 }
 
-/** Scroll to the first flagged row and light it, the way clicking the row would. */
 function goToFirstUnsure() {
   const id = unsureIds[0];
   const pair = id ? linked.get(id) : undefined;
-  if (!pair || !pair.row) {
-    return;
+  if (pair && pair.row) {
+    pick([id], pair.row);
   }
-  pick([id], pair.row);
 }
 
-/**
- * The line above the tables: how many items to look at, or that there are none.
- *
- * The count is a button only when there is somewhere to go. "Confident about every item"
- * is a statement, and a statement that looks clickable and does nothing is worse than
- * plain text.
- */
 function renderConfidenceSummary() {
   if (unsureIds.length === 0) {
     confidenceSummary.className = "confidence-summary is-clear";
     confidenceSummary.replaceChildren("Muse Spark is confident about every item");
     return;
   }
-
   const button = document.createElement("button");
   button.type = "button";
   button.className = "confidence-link";
-  button.textContent =
-    `Muse Spark flagged ${unsureIds.length} item${unsureIds.length === 1 ? "" : "s"} ` +
-    `to double-check`;
+  button.textContent = `Muse Spark flagged ${plural(unsureIds.length, "item")} to double-check`;
   button.addEventListener("click", goToFirstUnsure);
-
   confidenceSummary.className = "confidence-summary is-flagged";
   confidenceSummary.replaceChildren(button);
 }
 
+/* ---- Column headers, each with a plain-language tip ---------------------- */
+
+/*
+ * The tips are DraftCheck's own explanations, written for someone checking a drawing
+ * for the first time. They are not taken from any standard.
+ */
+const TIPS = {
+  id: "DraftCheck's name for this item. The same id links the row, its box on the drawing, and any issue about it.",
+  label: "The single letter that names this datum feature on the drawing.",
+  textRaw: "The dimension exactly as the model read it off the sheet, before it was split into numbers.",
+  value: "The size or distance the dimension calls for, in the drawing's units.",
+  tolPlus: "How far above the value the part may measure. Empty means the dimension has no tolerance of its own.",
+  tolMinus: "How far below the value the part may measure. Empty means the dimension has no tolerance of its own.",
+  basic: "Ticked for an exact, untoleranced dimension (usually drawn in a box). A feature control frame controls it instead.",
+  fromTo: "The two features the dimension measures between, as the model named them.",
+  zone: "Where the item sits on the sheet: rows A to D from top to bottom, columns 1 to 6 from left to right.",
+  confidence: "How sure the model said it was about this reading. Under 80% the row is flagged for a second look; it does not change the check.",
+  characteristic: "The kind of geometric control the frame applies, such as position or flatness.",
+  tolerance: "The size of the zone the feature must stay within, in the drawing's units.",
+  modifier: "Whether the tolerance is tied to the feature's largest or smallest material size (MMC or LMC), or to neither.",
+  datumRefs: "The datums the frame is measured from, most important first, separated by bars, for example A|B|C.",
+};
+
+const COLUMNS = {
+  datums: [
+    { label: "ID", tip: TIPS.id },
+    { label: "Label", tip: TIPS.label },
+    { label: "Zone", tip: TIPS.zone },
+    { label: "Conf.", tip: TIPS.confidence, num: true },
+    { label: "Remove", hidden: true },
+  ],
+  dimensions: [
+    { label: "ID", tip: TIPS.id },
+    { label: "Text as printed", tip: TIPS.textRaw },
+    { label: "Value", tip: TIPS.value },
+    { label: "Tol +", tip: TIPS.tolPlus },
+    { label: "Tol −", tip: TIPS.tolMinus },
+    { label: "Basic", tip: TIPS.basic },
+    { label: "From → to", tip: TIPS.fromTo },
+    { label: "Zone", tip: TIPS.zone },
+    { label: "Conf.", tip: TIPS.confidence, num: true },
+  ],
+  fcfs: [
+    { label: "ID", tip: TIPS.id },
+    { label: "Characteristic", tip: TIPS.characteristic },
+    { label: "Tolerance", tip: TIPS.tolerance },
+    { label: "Modifier", tip: TIPS.modifier },
+    { label: "Datum refs", tip: TIPS.datumRefs },
+    { label: "Zone", tip: TIPS.zone },
+    { label: "Conf.", tip: TIPS.confidence, num: true },
+  ],
+};
+
+let tipCounter = 0;
+
+/** Show a tip bubble beside its button. Fixed-positioned so a table scroller cannot clip it. */
+function openTip(button, bubble) {
+  const rect = button.getBoundingClientRect();
+  bubble.classList.add("is-open");
+  const width = bubble.offsetWidth;
+  const left = Math.min(window.innerWidth - width - 8, Math.max(8, rect.left + rect.width / 2 - width / 2));
+  const below = rect.bottom + 6;
+  const top = below + bubble.offsetHeight > window.innerHeight ? rect.top - bubble.offsetHeight - 6 : below;
+  bubble.style.left = `${left}px`;
+  bubble.style.top = `${top}px`;
+}
+
+function buildHeader(rowId, columns) {
+  const row = $(rowId);
+  row.replaceChildren();
+  for (const column of columns) {
+    const th = document.createElement("th");
+    th.scope = "col";
+    if (column.num) {
+      th.className = "num";
+    }
+    if (column.hidden) {
+      const span = document.createElement("span");
+      span.className = "visually-hidden";
+      span.textContent = column.label;
+      th.appendChild(span);
+      row.appendChild(th);
+      continue;
+    }
+
+    const inner = document.createElement("span");
+    inner.className = "th-inner";
+    inner.append(column.label);
+
+    const wrap = document.createElement("span");
+    wrap.className = "tip-wrap";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "tip";
+    button.textContent = "i";
+    button.setAttribute("aria-label", `About ${column.label}`);
+    const bubble = document.createElement("span");
+    bubble.className = "tip-text";
+    bubble.setAttribute("role", "tooltip");
+    bubble.id = `tip-${(tipCounter += 1)}`;
+    bubble.textContent = column.tip;
+    button.setAttribute("aria-describedby", bubble.id);
+
+    const open = () => openTip(button, bubble);
+    const close = () => bubble.classList.remove("is-open");
+    button.addEventListener("mouseenter", open);
+    button.addEventListener("focus", open);
+    button.addEventListener("mouseleave", close);
+    button.addEventListener("blur", close);
+    button.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") close();
+    });
+    // A click on the tip is not a click on the table.
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      open();
+    });
+
+    wrap.append(button, bubble);
+    inner.appendChild(wrap);
+    th.appendChild(inner);
+    row.appendChild(th);
+  }
+}
+
+// The bubbles are fixed-positioned, so close them all when the panel scrolls under them.
+panelBody.addEventListener("scroll", () => {
+  for (const bubble of document.querySelectorAll(".tip-text.is-open")) {
+    bubble.classList.remove("is-open");
+  }
+});
+
+buildHeader("head-datums", COLUMNS.datums);
+buildHeader("head-dimensions", COLUMNS.dimensions);
+buildHeader("head-fcfs", COLUMNS.fcfs);
+
 /* ---- Building the tables ------------------------------------------------- */
 
-/**
- * Replace a tbody's rows.
- *
- * `rows` is a list of `{ id, cells, marker }`, where each cell is a `<td>`, `id` ties the
- * row to its box on the drawing, and `marker` is the low-confidence tag when there is one.
- * An empty list leaves one spanning row saying so, rather than a table with a header and
- * nothing under it — "the model found none" and "the page has not loaded" should not look
- * alike.
- */
+/** The cells every item row starts and ends with: its id, and its zone and confidence. */
+function idCell(id) {
+  return textCell(text(id), "item-id");
+}
+
+function zoneCell(item) {
+  return textCell(zoneOf(item.bbox) || EM_DASH, "zone");
+}
+
+function confidenceCell(item) {
+  return textCell(confidenceText(item), "conf num");
+}
+
+/** Replace a tbody's rows; an empty list leaves one row saying so. */
 function fillTable(tbodyId, rows, columns, emptyMessage) {
-  const tbody = document.getElementById(tbodyId);
+  const tbody = $(tbodyId);
   tbody.replaceChildren();
 
   if (rows.length === 0) {
@@ -752,8 +1254,6 @@ function fillTable(tbodyId, rows, columns, emptyMessage) {
     for (const cell of cells) {
       row.appendChild(cell);
     }
-    // The tag rides in the first cell, next to "no location", so a row carries both of
-    // the things that are true about it rather than growing a column for each.
     if (marker) {
       row.classList.add("is-unsure");
       cells[0].appendChild(marker);
@@ -764,15 +1264,10 @@ function fillTable(tbodyId, rows, columns, emptyMessage) {
     linkRow(id, row, cells[0]);
     tbody.appendChild(row);
   }
-  updateCheckButton();
-}
-
-function setCell(id, value) {
-  document.getElementById(id).textContent = value;
 }
 
 function setCount(id, items) {
-  document.getElementById(id).textContent = `(${items.length})`;
+  $(id).textContent = `(${items.length})`;
 }
 
 const UNIT_OPTIONS = [
@@ -781,7 +1276,6 @@ const UNIT_OPTIONS = [
   ["in", "in"],
 ];
 
-/** Units and the general tolerance: the two header fields the rules read. */
 function renderHeader() {
   const working = state.working;
   const original = state.original;
@@ -795,23 +1289,21 @@ function renderHeader() {
     },
     was: original.units || null,
     shown: text(original.units),
-    cell: document.getElementById("v-units"),
+    cell: $("v-units"),
   });
 
-  // `general_tolerance` can come back missing altogether; the cell still needs somewhere
-  // to write, and an object with nothing in it parses to the same thing.
   if (!working.general_tolerance) {
     working.general_tolerance = { linear_plus_minus: null, text_raw: null };
   }
   const originalTolerance = original.general_tolerance || {};
-  numberCell(
-    working.general_tolerance,
-    "linear_plus_minus",
-    originalTolerance.linear_plus_minus ?? null,
-    { required: false, min: 0, cell: document.getElementById("v-gentol") }
-  );
+  numberCell(working.general_tolerance, "linear_plus_minus", originalTolerance.linear_plus_minus ?? null, {
+    required: false,
+    min: 0,
+    cell: $("v-gentol"),
+    label: "General tolerance",
+  });
 
-  setCell("v-gentol-raw", text(originalTolerance.text_raw));
+  $("v-gentol-raw").textContent = text(originalTolerance.text_raw);
 }
 
 function renderDatums() {
@@ -819,21 +1311,15 @@ function renderDatums() {
   const originals = state.original.datums || [];
 
   const rows = datums.map((datum) => {
-    // Matched by id, which the server assigned to the model's datums and `newDatumId`
-    // assigns to added ones — so an added datum has no original and is always "edited".
     const was = byId(originals, datum.id);
     const control = textControl(datum.label || "", { width: 3 });
     control.classList.add("cell-label");
-    control.setAttribute("aria-label", "Datum label");
+    control.setAttribute("aria-label", `Datum label for ${datum.id}`);
 
     const labelCell = editCell(control, {
       read: () => {
         const value = control.value.trim().toUpperCase();
-        return {
-          ok: /^[A-Z]$/.test(value),
-          value,
-          message: "A datum label is a single letter, A to Z.",
-        };
+        return { ok: /^[A-Z]$/.test(value), value, message: "A datum label is a single letter, A to Z." };
       },
       apply: (value) => {
         datum.label = value;
@@ -847,21 +1333,24 @@ function renderDatums() {
     remove.type = "button";
     remove.className = "btn-row";
     remove.textContent = "Remove";
-    remove.title = `Remove datum ${datum.label || ""}`.trim();
-    remove.addEventListener("click", () => {
+    remove.setAttribute("aria-label", `Remove datum ${datum.label || datum.id}`);
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
       state.working.datums = state.working.datums.filter((item) => item !== datum);
-      // Everything, not just this table: the removed datum's box has to come off the
-      // drawing too, and that is `buildOverlay`'s doing.
       renderTables();
       afterEdit();
     });
     removeCell.appendChild(remove);
 
-    return { id: datum.id, cells: [labelCell, removeCell], marker: unsureMarker(datum) };
+    return {
+      id: datum.id,
+      cells: [idCell(datum.id), labelCell, zoneCell(datum), confidenceCell(datum), removeCell],
+      marker: unsureMarker(datum),
+    };
   });
 
   setCount("count-datums", datums);
-  fillTable("rows-datums", rows, 2, "No datum features were read.");
+  fillTable("rows-datums", rows, COLUMNS.datums.length, "No datum features were read.");
 }
 
 function renderDimensions() {
@@ -870,21 +1359,31 @@ function renderDimensions() {
 
   const rows = dimensions.map((dimension) => {
     const was = byId(originals, dimension.id) || {};
+    const id = dimension.id;
 
     const basic = document.createElement("input");
     basic.type = "checkbox";
     basic.className = "cell-check";
     basic.checked = Boolean(dimension.is_basic);
-    basic.setAttribute("aria-label", "Basic dimension");
+    basic.setAttribute("aria-label", `Basic dimension, ${id}`);
 
     return {
-      id: dimension.id,
+      id,
       marker: unsureMarker(dimension),
       cells: [
-        textCell(text(dimension.text_raw), true),
-        numberCell(dimension, "value", was.value ?? null, { required: true }),
-        numberCell(dimension, "tol_plus", was.tol_plus ?? null, { required: false, min: 0 }),
-        numberCell(dimension, "tol_minus", was.tol_minus ?? null, { required: false, min: 0 }),
+        idCell(id),
+        textCell(text(dimension.text_raw), "mono"),
+        numberCell(dimension, "value", was.value ?? null, { required: true, label: `Value, ${id}` }),
+        numberCell(dimension, "tol_plus", was.tol_plus ?? null, {
+          required: false,
+          min: 0,
+          label: `Plus tolerance, ${id}`,
+        }),
+        numberCell(dimension, "tol_minus", was.tol_minus ?? null, {
+          required: false,
+          min: 0,
+          label: `Minus tolerance, ${id}`,
+        }),
         editCell(basic, {
           read: () => ({ ok: true, value: basic.checked }),
           apply: (value) => {
@@ -894,13 +1393,15 @@ function renderDimensions() {
           shown: was.is_basic ? "yes" : "no",
           mono: false,
         }),
-        textCell(fromTo(dimension), true),
+        textCell(fromTo(dimension), "mono"),
+        zoneCell(dimension),
+        confidenceCell(dimension),
       ],
     };
   });
 
   setCount("count-dimensions", dimensions);
-  fillTable("rows-dimensions", rows, 6, "No dimensions were read.");
+  fillTable("rows-dimensions", rows, COLUMNS.dimensions.length, "No dimensions were read.");
 }
 
 const MODIFIER_OPTIONS = [
@@ -915,17 +1416,24 @@ function renderFcfs() {
 
   const rows = fcfs.map((fcf) => {
     const was = byId(originals, fcf.id) || {};
+    const id = fcf.id;
 
     const modifier = selectControl(MODIFIER_OPTIONS, fcf.material_modifier || "");
-    const refs = textControl(datumRefsText(fcf.datum_refs), { width: 12 });
-    refs.setAttribute("aria-label", "Datum references");
+    modifier.setAttribute("aria-label", `Material modifier, ${id}`);
+    const refs = textControl(datumRefsText(fcf.datum_refs), { width: 10 });
+    refs.setAttribute("aria-label", `Datum references, ${id}`);
 
     return {
-      id: fcf.id,
+      id,
       marker: unsureMarker(fcf),
       cells: [
-        textCell(text(fcf.characteristic), false),
-        numberCell(fcf, "tolerance", was.tolerance ?? null, { required: true, min: 0 }),
+        idCell(id),
+        textCell(text(fcf.characteristic)),
+        numberCell(fcf, "tolerance", was.tolerance ?? null, {
+          required: true,
+          min: 0,
+          label: `Tolerance, ${id}`,
+        }),
         editCell(modifier, {
           read: () => ({ ok: true, value: modifier.value || null }),
           apply: (value) => {
@@ -948,26 +1456,23 @@ function renderFcfs() {
           },
           was: was.datum_refs || [],
           shown: datumRefsText(was.datum_refs) || EM_DASH,
-          // Two lists are the same when they read the same in the cell.
           same: (a, b) => datumRefsText(a) === datumRefsText(b),
         }),
+        zoneCell(fcf),
+        confidenceCell(fcf),
       ],
     };
   });
 
   setCount("count-fcfs", fcfs);
-  fillTable("rows-fcfs", rows, 4, "No feature control frames were read.");
+  fillTable("rows-fcfs", rows, COLUMNS.fcfs.length, "No feature control frames were read.");
 }
 
 /** Everything the user can edit, built from `working` and compared against `original`. */
 function renderTables() {
-  // Every control on screen is about to be replaced, so no complaint about one of them
-  // outlives this rebuild; the new cells re-register whatever is still wrong.
   invalidInputs.clear();
-  // Refilled by `fillTable` as the three tables are built below, in their order.
   unsureIds = [];
 
-  // The boxes go up first: a row asks `linked` whether its item has one.
   buildOverlay([
     ...(state.working.datums || []).map((datum) => ({
       id: datum.id,
@@ -988,7 +1493,6 @@ function renderTables() {
       unsure: isUnsure(fcf),
     })),
   ]);
-  overlay.hidden = !overlayToggle.checked;
 
   renderHeader();
   renderDatums();
@@ -999,45 +1503,39 @@ function renderTables() {
 
 /* ---- Findings ------------------------------------------------------------ */
 
-/** "14:32:07" — padded and 24-hour, so the line never changes width. */
-function clockTime(when) {
-  const pad = (number) => String(number).padStart(2, "0");
-  return `${pad(when.getHours())}:${pad(when.getMinutes())}:${pad(when.getSeconds())}`;
-}
-
-/**
- * The line under the panel title: when the check ran, and whether it still holds.
- *
- * Both states are one line in the same place. An earlier version put the stale warning in
- * a box of its own above the findings, which meant a check that landed deleted a 114-pixel
- * block and shunted everything under it upwards — the "flicker" this replaced.
- */
-function setCheckStatus(stale) {
+function setCheckStatus() {
   if (!state.checkedAt) {
     checkStatus.hidden = true;
     return;
   }
   const at = `Checked at ${clockTime(state.checkedAt)}`;
-  checkStatus.textContent = stale ? `${at} — edited since; check again` : at;
-  checkStatus.classList.toggle("is-stale", stale);
+  checkStatus.textContent = state.stale ? `${at} — edited since; confirm again to re-check` : at;
+  checkStatus.classList.toggle("is-stale", state.stale);
   checkStatus.hidden = false;
 }
 
-/**
- * Called after every accepted edit.
- *
- * Findings are only true of the data they were computed from, so the first edit after a
- * check says so rather than leaving a stale verdict sitting there looking current.
- */
+function setAgentStatus() {
+  if (!state.fixedAt) {
+    agentStatus.hidden = true;
+    return;
+  }
+  const at = `Fixes proposed at ${clockTime(state.fixedAt)}`;
+  agentStatus.textContent = state.agentStale ? `${at} — edited since; check and fix again` : at;
+  agentStatus.classList.toggle("is-stale", state.agentStale);
+  agentStatus.hidden = false;
+}
+
+/** After every accepted edit: whatever was computed from the old tables is now dated. */
 function afterEdit() {
   if (state.checked) {
     state.stale = true;
-    setCheckStatus(true);
+    setCheckStatus();
   }
-  // The agent worked from the data the check ran on, so an edit dates its rounds and its
-  // redline exactly as it dates the findings.
-  setAgentStatus(true);
-  updateFixButton();
+  if (state.fixedAt) {
+    state.agentStale = true;
+    setAgentStatus();
+  }
+  updateUI();
 }
 
 function clearFindings() {
@@ -1045,67 +1543,75 @@ function clearFindings() {
   state.checkedAt = null;
   state.stale = false;
   state.errorCount = 0;
-  findingsPanel.hidden = true;
-  findingsPanel.classList.remove("is-fresh");
+  state.warningCount = 0;
   checkStatus.hidden = true;
   findingsList.replaceChildren();
   findingsNone.hidden = true;
   checkIssuesBox.hidden = true;
-  checkErrorBox.hidden = true;
   clearAgent();
 }
 
-/**
- * Tint the panel for half a second, so an update that changes nothing visible is still
- * visibly an update.
- *
- * The class has to come off and the reflow has to be forced, or a second check in the
- * same second would re-add a class that is already there and play no animation at all.
- */
-function flashPanel() {
-  findingsPanel.classList.remove("is-fresh");
-  void findingsPanel.offsetWidth;
-  findingsPanel.classList.add("is-fresh");
+/** Where a finding is: its own bbox, or the first of its items that has one. */
+function findingZone(finding) {
+  const own = zoneOf(finding.bbox);
+  if (own) {
+    return own;
+  }
+  for (const id of finding.item_ids || []) {
+    const pair = linked.get(id);
+    const zone = pair && zoneOf(pair.bbox);
+    if (zone) {
+      return zone;
+    }
+  }
+  return null;
 }
 
-/** One finding: its rule, its severity, its message, and the items it is about. */
-function findingItem(finding) {
+/** One finding card: delta, title, rule and zone, severity, why, and source. */
+function findingCard(finding, number) {
+  const severity = finding.severity === "error" ? "error" : "warning";
   const item = document.createElement("li");
-  item.className = `finding sev-${finding.severity === "error" ? "error" : "warning"}`;
+  item.className = `finding sev-${severity}`;
   item.tabIndex = 0;
 
-  const head = document.createElement("p");
-  head.className = "finding-head";
+  const delta = document.createElement("span");
+  delta.className = "delta";
+  delta.setAttribute("aria-hidden", "true");
+  delta.textContent = String(number);
 
-  const severity = document.createElement("span");
-  severity.className = "sev-tag";
-  severity.textContent = finding.severity;
-  head.appendChild(severity);
-
-  const rule = document.createElement("code");
-  rule.className = "rule-id";
-  rule.textContent = finding.rule_id;
-  head.appendChild(rule);
-
-  const message = document.createElement("p");
-  message.className = "finding-message";
-  message.textContent = finding.message;
-
-  item.append(head, message);
+  const title = document.createElement("p");
+  title.className = "finding-title";
+  title.textContent = finding.title || finding.rule_id;
 
   const ids = Array.isArray(finding.item_ids) ? finding.item_ids : [];
-  // Light every item the finding names, and scroll to the first one we can actually
-  // point at — its box if it has one, otherwise its row.
+  const zone = findingZone(finding);
+  const where = zone ? `zone ${zone}` : ids.length ? "no location" : "whole drawing";
+  const meta = document.createElement("p");
+  meta.className = "finding-meta";
+  meta.textContent = `${finding.rule_id}, ${where}`;
+
+  const chip = document.createElement("span");
+  chip.className = "chip";
+  chip.textContent = severity;
+
+  const why = document.createElement("p");
+  why.className = "finding-why";
+  why.textContent = finding.message;
+
+  const source = document.createElement("p");
+  source.className = "finding-source";
+  source.textContent = `Source: ${text(finding.source)}`;
+
+  item.append(delta, title, chip, meta, why, source);
+  item.setAttribute("aria-label", `Issue ${number}, ${severity}: ${title.textContent}. ${meta.textContent}`);
+
   function show() {
-    pick(ids, null);
-    for (const id of ids) {
-      const pair = linked.get(id);
-      const target = (pair && (pair.box || pair.row)) || null;
-      if (target) {
-        target.scrollIntoView({ block: "nearest", behavior: "smooth" });
-        break;
-      }
+    for (const other of findingsList.children) {
+      other.classList.toggle("is-active", other === item);
+      other.removeAttribute("aria-current");
     }
+    item.setAttribute("aria-current", "true");
+    pick(ids, null);
   }
   item.addEventListener("click", show);
   item.addEventListener("keydown", (event) => {
@@ -1114,103 +1620,51 @@ function findingItem(finding) {
       show();
     }
   });
-
   return item;
 }
 
-/**
- * Replace the findings with a new set, in one update.
- *
- * Both lists are built in a fragment and swapped in with a single `replaceChildren`, so
- * the panel goes straight from the old findings to the new ones. Emptying a list and
- * refilling it would reach the same place, but it leaves a moment where the panel holds
- * nothing — and on a slow enough machine that moment is a frame the user sees.
- */
 function renderFindings(result) {
   const findings = result.findings || [];
   const issues = result.parse_issues || [];
 
-  const newFindings = document.createDocumentFragment();
-  for (const finding of findings) {
-    newFindings.appendChild(findingItem(finding));
-  }
+  const cards = document.createDocumentFragment();
+  findings.forEach((finding, index) => cards.appendChild(findingCard(finding, index + 1)));
 
-  const newIssues = document.createDocumentFragment();
+  const lines = document.createDocumentFragment();
   for (const issue of issues) {
     const line = document.createElement("li");
     line.textContent = issue;
-    newIssues.appendChild(line);
+    lines.appendChild(line);
   }
 
-  findingsList.replaceChildren(newFindings);
-  checkIssuesList.replaceChildren(newIssues);
+  findingsList.replaceChildren(cards);
+  checkIssuesList.replaceChildren(lines);
   findingsNone.hidden = findings.length > 0;
   checkIssuesBox.hidden = issues.length === 0;
-  checkErrorBox.hidden = true;
 
+  // A new check supersedes the last fix: its rounds were about different findings.
+  clearAgent();
   state.checked = true;
   state.checkedAt = new Date();
   state.stale = false;
   state.errorCount = result.error_count || 0;
-  setCheckStatus(false);
-  findingsPanel.hidden = false;
-  flashPanel();
-  updateFixButton();
+  state.warningCount = result.warning_count || 0;
+  setCheckStatus();
 }
 
-/* ---- Proposing fixes ----------------------------------------------------- */
-
-/*
- * The agent is offered only when there is something for it to work on and the findings
- * it would work from are current: a fix proposed against data the user has since edited
- * would be answering a question nobody asked any more. The button says nothing about why
- * it is dead, so `#fix-hint` says it instead.
- */
-
-/** Why the agent cannot run right now, or "" when it can. */
-function fixBlockedBecause() {
-  if (!state.checked) {
-    return "Check the drawing first — the agent works from the findings.";
-  }
-  if (state.stale) {
-    return "The tables have changed since the last check. Check the drawing again first.";
-  }
-  if (state.errorCount === 0) {
-    return "Nothing to propose: the last check found no errors.";
-  }
-  return "";
-}
-
-function updateFixButton() {
-  const reason = fixBlockedBecause();
-  proposeButton.disabled = reason !== "" || busy || fixing || invalidInputs.size > 0;
-  fixHint.textContent = reason;
-  fixHint.hidden = reason === "";
-}
-
-/** The agent's line: when it ran, and whether the tables have moved on since. */
-function setAgentStatus(stale) {
-  if (!state.fixedAt) {
-    agentStatus.hidden = true;
-    return;
-  }
-  const at = `Fixes proposed at ${clockTime(state.fixedAt)}`;
-  agentStatus.textContent = stale ? `${at} — edited since; check and fix again` : at;
-  agentStatus.classList.toggle("is-stale", stale);
-  agentStatus.hidden = false;
-}
+/* ---- Corrections --------------------------------------------------------- */
 
 function clearAgent() {
   state.fixedAt = null;
-  agentPanel.hidden = true;
+  state.agentStale = false;
+  state.fix = null;
+  state.exported = false;
   agentStatus.hidden = true;
-  agentErrorBox.hidden = true;
   agentRounds.replaceChildren();
   agentVerdicts.replaceChildren();
   redlineImage.removeAttribute("src");
 }
 
-/** A paragraph with a class. The page builds a lot of these. */
 function paragraph(className, value) {
   const line = document.createElement("p");
   line.className = className;
@@ -1218,30 +1672,22 @@ function paragraph(className, value) {
   return line;
 }
 
-/**
- * One proposed edit: what it would do, whether it stuck, and the reasoning either side.
- *
- * `applied` is the rule engine's word, not the model's — a rejected edit is one
- * `edits.apply_edits` refused, and `reason` is the refusal it wrote.
- */
+/** One proposed edit. `applied` is the rule engine's word, not the model's. */
 function editItem(edit, applied) {
   const item = document.createElement("li");
   item.className = applied ? "edit is-applied" : "edit is-rejected";
 
   const head = document.createElement("p");
   head.className = "edit-head";
-
   const tag = document.createElement("span");
   tag.className = "edit-tag";
   tag.textContent = applied ? "applied" : "rejected";
-  head.appendChild(tag);
-
   const sentence = document.createElement("span");
   sentence.className = "edit-text";
   sentence.textContent = edit.edit;
-  head.appendChild(sentence);
-
+  head.append(tag, sentence);
   item.appendChild(head);
+
   if (edit.rationale) {
     item.appendChild(paragraph("edit-why", `Why: ${edit.rationale}`));
   }
@@ -1251,7 +1697,6 @@ function editItem(edit, applied) {
   return item;
 }
 
-/** "Cleared" or "Introduced", with one line per finding, or nothing when the list is empty. */
 function changedFindings(label, findings, className) {
   if (!findings || findings.length === 0) {
     return null;
@@ -1259,7 +1704,6 @@ function changedFindings(label, findings, className) {
   const block = document.createElement("div");
   block.className = `changed ${className}`;
   block.appendChild(paragraph("changed-label", label));
-
   const list = document.createElement("ul");
   list.className = "changed-list";
   for (const finding of findings) {
@@ -1270,13 +1714,6 @@ function changedFindings(label, findings, className) {
   block.appendChild(list);
   return block;
 }
-
-/**
- * Said beside the model name when the server's fallback stepped in: Muse Spark Open on
- * Baseten did not answer, so the same request went to Muse Spark on the Meta Model API.
- */
-const FALLBACK_NOTE =
-  "Muse Spark Open didn't respond in time, so Muse Spark (Meta Model API) read this drawing.";
 
 /** "Answered by muse-spark-1.2 (fallback: timeout)", or null when no model answered. */
 function roundModel(round) {
@@ -1289,24 +1726,18 @@ function roundModel(round) {
   return `Answered by ${round.model}${fallback}`;
 }
 
-/** One round: the edits it proposed, and what the rules said about the result. */
 function roundCard(round) {
   const item = document.createElement("li");
   item.className = "round";
 
   const head = document.createElement("p");
   head.className = "round-head";
-
   const number = document.createElement("span");
-  number.className = "round-number";
   number.textContent = `Round ${round.round}`;
-  head.appendChild(number);
-
   const counts = document.createElement("span");
   counts.className = "round-counts";
-  counts.textContent = `Findings: ${round.findings_before} before → ${round.findings_after} after`;
-  head.appendChild(counts);
-
+  counts.textContent = `Findings: ${round.findings_before} → ${round.findings_after}`;
+  head.append(number, counts);
   item.appendChild(head);
 
   const answered = roundModel(round);
@@ -1315,7 +1746,6 @@ function roundCard(round) {
     model.classList.toggle("is-fallback", Boolean(round.fell_back));
     item.appendChild(model);
   }
-
   if (round.error) {
     item.appendChild(paragraph("round-error", `This round could not run: ${round.error}`));
   }
@@ -1327,31 +1757,21 @@ function roundCard(round) {
   } else {
     const edits = document.createElement("ul");
     edits.className = "edits";
-    for (const edit of applied) {
-      edits.appendChild(editItem(edit, true));
-    }
-    for (const edit of rejected) {
-      edits.appendChild(editItem(edit, false));
-    }
+    for (const edit of applied) edits.appendChild(editItem(edit, true));
+    for (const edit of rejected) edits.appendChild(editItem(edit, false));
     item.appendChild(edits);
   }
 
   const cleared = changedFindings("Cleared:", round.resolved, "is-cleared");
   const introduced = changedFindings("Introduced:", round.introduced, "is-introduced");
-  if (cleared) {
-    item.appendChild(cleared);
-  }
-  if (introduced) {
-    item.appendChild(introduced);
-  }
+  if (cleared) item.appendChild(cleared);
+  if (introduced) item.appendChild(introduced);
   if (!cleared && !introduced && !round.error) {
     item.appendChild(paragraph("round-empty", "No finding changed in this round."));
   }
-
   return item;
 }
 
-/** One original finding and what became of it. The verdict came from re-running the rules. */
 function verdictItem(entry) {
   const item = document.createElement("li");
   const resolved = entry.status === "resolved";
@@ -1360,11 +1780,9 @@ function verdictItem(entry) {
   const tag = document.createElement("span");
   tag.className = "verdict-tag";
   tag.textContent = resolved ? "verified resolved" : "unresolved";
-
   const key = document.createElement("code");
   key.className = "rule-id";
   key.textContent = entry.finding;
-
   const message = document.createElement("span");
   message.className = "verdict-message";
   message.textContent = entry.message;
@@ -1374,59 +1792,68 @@ function verdictItem(entry) {
 }
 
 /**
- * Show one correction run: the rounds, the verdicts, and the redline it produced.
- *
- * The redline URLs are fixed per run and the files are rewritten on every fix, so both
- * carry a timestamp — without it the browser would show the previous run's redline from
- * its cache and nothing on screen would say so.
+ * Show one correction run. The redline URLs are fixed per run and rewritten on every fix,
+ * so both carry a timestamp to keep the browser from showing a cached one.
  */
 function renderAgent(result) {
   const rounds = result.rounds || [];
   const statuses = result.status || [];
 
-  const newRounds = document.createDocumentFragment();
-  for (const round of rounds) {
-    newRounds.appendChild(roundCard(round));
-  }
+  const roundNodes = document.createDocumentFragment();
+  for (const round of rounds) roundNodes.appendChild(roundCard(round));
   if (rounds.length === 0) {
     const item = document.createElement("li");
     item.className = "round";
     item.appendChild(paragraph("round-empty", "The agent was not asked for any edits."));
-    newRounds.appendChild(item);
+    roundNodes.appendChild(item);
   }
+  const verdictNodes = document.createDocumentFragment();
+  for (const entry of statuses) verdictNodes.appendChild(verdictItem(entry));
 
-  const newVerdicts = document.createDocumentFragment();
-  for (const entry of statuses) {
-    newVerdicts.appendChild(verdictItem(entry));
-  }
-
-  agentRounds.replaceChildren(newRounds);
-  agentVerdicts.replaceChildren(newVerdicts);
-  agentErrorBox.hidden = true;
+  agentRounds.replaceChildren(roundNodes);
+  agentVerdicts.replaceChildren(verdictNodes);
 
   const stamp = Date.now();
   redlineImage.src = `${result.redline_png_url}?t=${stamp}`;
   redlinePdf.href = `${result.redline_pdf_url}?t=${stamp}`;
 
+  const finalFindings = result.final_findings || [];
+  state.fix = {
+    rounds: rounds.length,
+    resolved: result.resolved_count || 0,
+    total: statuses.length,
+    finalErrors: finalFindings.filter((finding) => finding.severity === "error").length,
+  };
   state.fixedAt = new Date();
-  setAgentStatus(false);
-  agentPanel.hidden = false;
+  state.agentStale = false;
+  state.exported = false;
+  if (result.model) {
+    state.answered = { prefix: "Fixed by", model: result.model, fellBack: Boolean(result.fell_back) };
+  }
+  if (typeof result.fake_model === "boolean") {
+    state.fake = result.fake_model;
+  }
+  setAgentStatus();
 }
 
 /* ---- Rendering one run --------------------------------------------------- */
 
-function render(run) {
+function render(run, file) {
   const drawing = run.drawing || {};
   const issues = run.parse_issues || [];
 
   state.runId = run.run_id;
+  state.run = run;
+  state.file = file;
   state.original = clone(drawing);
   state.working = clone(drawing);
+  state.answered = { prefix: "Read by", model: run.model, fellBack: Boolean(run.fell_back) };
+  state.fake = Boolean(run.fake_model);
   clearFindings();
 
-  setCell("meta-model", text(run.model));
-  setCell("meta-latency", seconds(run.latency_s));
-  setCell("meta-attempts", text(run.attempts));
+  $("meta-model").textContent = text(run.model);
+  $("meta-latency").textContent = seconds(run.latency_s);
+  $("meta-attempts").textContent = text(run.attempts);
   metaFallback.textContent = run.fell_back ? FALLBACK_NOTE : "";
   metaFallback.hidden = !run.fell_back;
 
@@ -1438,23 +1865,16 @@ function render(run) {
   }
   parseIssuesBox.hidden = issues.length === 0;
 
+  state.imageReady = false;
   pageImage.src = run.page_url;
-  fixCancelled.hidden = true;
 
   renderTables();
-  updateCheckButton();
-  resultSection.hidden = false;
+  selectTab("extracted");
 }
 
 /* ---- The requests -------------------------------------------------------- */
 
-/**
- * The message to show for a failed response.
- *
- * FastAPI puts its own text in `detail`, which is a string for the errors this app
- * raises and a list of objects for a request its schema rejected. Both are handled,
- * and a reply that is not JSON at all falls back to the status line.
- */
+/** The message in a failed response: FastAPI's `detail`, string or list. */
 async function errorMessage(response) {
   let payload;
   try {
@@ -1462,7 +1882,6 @@ async function errorMessage(response) {
   } catch {
     return `The server returned ${response.status} ${response.statusText}.`;
   }
-
   const detail = payload && payload.detail;
   if (typeof detail === "string" && detail) {
     return detail;
@@ -1473,51 +1892,32 @@ async function errorMessage(response) {
   return `The server returned ${response.status} ${response.statusText}.`;
 }
 
-/* ---- Cancelling a wait ---------------------------------------------------- */
-
 /*
- * Reading a drawing and proposing fixes each wait on the model for up to a minute or so,
- * and each has a Cancel button beside its waiting line. Cancel aborts the browser's
- * request and nothing more: the server has no way to be told, so the model may still
- * finish, and whatever it finishes is never shown.
- *
- * Each request owns an AbortController while it is out. Every `await` in it is followed
- * by a look at `signal.aborted`, so a reply that lands in the same instant as the click
- * is dropped rather than drawn — Cancel never leaves half a result on screen.
+ * Reading and fixing each wait on the model, and Cancel aborts the browser's request.
+ * The server notices the browser left and aborts its own model call. Every `await` is
+ * followed by a look at `signal.aborted`, so a reply that lands in the same instant as
+ * the click is dropped rather than drawn.
  */
 
-// Closing the connection stops our server, but the provider keeps working on the
-// abandoned request and the next one waits behind it (docs/ARCHITECTURE.md §4.13).
-const CANCELLED_MESSAGE =
-  "Cancelled. Muse Spark may still be finishing the previous request, so your next read can take up to a minute.";
-
-/** The controller for the request Cancel would stop, or `null` when none is out. */
-let readController = null;
-let fixController = null;
-
-cancelReadButton.addEventListener("click", () => readController && readController.abort());
-cancelFixButton.addEventListener("click", () => fixController && fixController.abort());
+cancelButton.addEventListener("click", () => {
+  if (readController) readController.abort();
+  if (fixController) fixController.abort();
+});
 
 /**
- * Send one file and show what comes back.
- *
- * The one path for both ways in: dropping a file, and the Read drawing button. A file
- * that fails `rejectionReason` never gets here, so nothing unsendable reaches the wire.
- *
- * Cancel puts the screen back the way it was before the click — a run already on screen
- * comes back untouched, because `render` is the only thing that replaces it and it has not
- * been called.
+ * Send one file and show what comes back. Cancel or a failure leaves a run already on
+ * screen exactly as it was, because only `render` replaces it.
  */
-async function startRun(file) {
-  const before = { errorHidden: errorBox.hidden, resultHidden: resultSection.hidden };
-  readCancelled.hidden = true;
-  clearOutput();
-  setDropLabel(file.name);
-  setBusy(true);
+async function startRun(file, source) {
+  clearErrorToasts();
+  state.pendingFile = { name: file.name, source };
+  reading = true;
+  updateUI();
 
   const body = new FormData();
   body.append("file", file);
   body.append("provider", providerSelect.value);
+  const provider = providerSelect.value;
 
   const controller = new AbortController();
   readController = controller;
@@ -1528,76 +1928,45 @@ async function startRun(file) {
     if (!response.ok) {
       const message = await errorMessage(response);
       if (!signal.aborted) {
-        showError(message);
+        toast(`Could not read the drawing. ${message}`, { error: true });
       }
       return;
     }
     const run = await response.json();
     if (!signal.aborted) {
-      render(run);
+      state.provider = provider;
+      render(run, { name: file.name, source });
     }
   } catch (problem) {
-    // A fetch only rejects when the request never completed — the server is down, the
-    // connection dropped, or Cancel aborted it. An HTTP error status is handled above.
     if (!signal.aborted) {
-      showError(`Could not reach the server: ${problem.message}`);
+      toast(`Could not reach the server: ${problem.message}`, { error: true });
     }
   } finally {
     readController = null;
+    reading = false;
+    state.pendingFile = null;
     if (signal.aborted) {
-      errorBox.hidden = before.errorHidden;
-      resultSection.hidden = before.resultHidden;
-      readCancelled.textContent = CANCELLED_MESSAGE;
-      readCancelled.hidden = false;
+      toast(CANCELLED_MESSAGE);
     }
-    setBusy(false);
-    setDropLabel(null);
-    updateCheckButton();
+    // The same file can be picked again after a failure.
+    fileInput.value = "";
+    updateUI();
   }
 }
 
-/**
- * How long a check may take before it is worth telling the user it is running.
- *
- * Under this, the answer arrives before anyone could read a progress label, so the button
- * says nothing and simply goes dead for an instant.
- */
-const SLOW_CHECK_MS = 300;
-
-/**
- * Send the edited drawing to the rules and show what they say.
- *
- * `working` is the body: the extraction with the user's edits written into it, every
- * other field untouched. What passes is decided server side, from this JSON.
- */
+/** Send the edited drawing to the rules. What passes is decided server side. */
 async function runCheck() {
   if (!state.runId || invalidInputs.size > 0) {
     return;
   }
-  // Nothing else on screen changes while the request is out. The panel keeps the previous
-  // findings, the error box keeps whatever it was showing, and the status line still says
-  // when that answer was computed — all of it still true until a new answer arrives to
-  // replace it in one go.
-  //
-  // Disabling is immediate, because its whole job is to swallow a second click.
-  checkButton.disabled = true;
-
-  // The label is not. A check against a local server comes back in about 100 ms, and a
-  // word that appears and vanishes inside a fifth of a second reads as a glitch rather
-  // than as progress. So "Checking…" is only promised, and only kept if the wait turns
-  // out to be long enough to be worth reporting.
-  let labelChanged = false;
+  clearErrorToasts();
+  checking = true;
+  checkLabelShown = false;
+  updateUI();
   const labelTimer = setTimeout(() => {
-    labelChanged = true;
-    checkButton.textContent = "Checking…";
+    checkLabelShown = true;
+    updateUI();
   }, SLOW_CHECK_MS);
-
-  /** Keep the findings, put the reason above them. */
-  function failed(message) {
-    checkErrorText.textContent = message;
-    checkErrorBox.hidden = false;
-    findingsPanel.hidden = false;
-  }
 
   try {
     const response = await fetch(`/api/runs/${state.runId}/check`, {
@@ -1606,99 +1975,96 @@ async function runCheck() {
       body: JSON.stringify(state.working),
     });
     if (!response.ok) {
-      failed(await errorMessage(response));
+      toast(`Could not check the drawing. ${await errorMessage(response)}`, { error: true });
       return;
     }
     renderFindings(await response.json());
+    selectTab("issues");
   } catch (problem) {
-    failed(`Could not reach the server: ${problem.message}`);
+    toast(`Could not reach the server: ${problem.message}`, { error: true });
   } finally {
-    // Either the timer has not fired, and must not fire now, or it has and the label
-    // needs putting back. Restored only when it actually changed, so a fast check leaves
-    // the button untouched from first click to last.
     clearTimeout(labelTimer);
-    if (labelChanged) {
-      checkButton.textContent = "Check drawing";
-    }
-    updateCheckButton();
+    checking = false;
+    checkLabelShown = false;
+    updateUI();
   }
 }
 
-checkButton.addEventListener("click", runCheck);
-
 /**
- * Ask the agent for corrections, and show the rounds and the redline it produced.
- *
- * The loop is three model calls at worst and takes 20–60 seconds, so unlike Check this one
- * always ends up saying it is working. It still goes through the same 300 ms timer: the
- * request could fail at the server before the model is ever called, and a spinner that
- * appears for a tenth of a second on the way to an error message is noise.
- *
- * Nothing is posted. The server works from `confirmed.json` — the drawing the last check
- * saved — which is why the button is dead whenever the tables have moved on from it.
+ * Ask the agent for corrections. Nothing is posted: the server works from the drawing
+ * the last check saved, which is why this is only offered while that check is current.
  */
 async function runFix() {
-  if (!state.runId || fixBlockedBecause() !== "") {
+  if (!state.runId || !state.checked || state.stale || state.errorCount === 0) {
     return;
   }
+  clearErrorToasts();
   fixing = true;
-  fixCancelled.hidden = true;
-  updateCheckButton();
+  updateUI();
 
   const controller = new AbortController();
   fixController = controller;
   const { signal } = controller;
 
-  let labelChanged = false;
-  const labelTimer = setTimeout(() => {
-    labelChanged = true;
-    proposeButton.textContent = "Proposing…";
-    fixStatus.hidden = false;
-  }, SLOW_CHECK_MS);
-
-  /** Keep whatever the panel is showing, and put the reason above it. */
-  function failed(message) {
-    agentErrorText.textContent = message;
-    agentErrorBox.hidden = false;
-    agentPanel.hidden = false;
-  }
-
-  // Nothing on screen changes until the reply is drawn, so a cancelled fix needs nothing
-  // put back beyond the button and the waiting line, which `finally` restores anyway.
   try {
     const response = await fetch(`/api/runs/${state.runId}/fix`, { method: "POST", signal });
     if (!response.ok) {
       const message = await errorMessage(response);
       if (!signal.aborted) {
-        failed(message);
+        toast(`Could not propose fixes. ${message}`, { error: true });
       }
       return;
     }
     const result = await response.json();
     if (!signal.aborted) {
       renderAgent(result);
+      selectTab("corrections");
     }
   } catch (problem) {
     if (!signal.aborted) {
-      failed(`Could not reach the server: ${problem.message}`);
+      toast(`Could not reach the server: ${problem.message}`, { error: true });
     }
   } finally {
     fixController = null;
-    clearTimeout(labelTimer);
-    if (labelChanged) {
-      proposeButton.textContent = "Propose fixes";
-      fixStatus.hidden = true;
-    }
-    if (signal.aborted) {
-      fixCancelled.textContent = CANCELLED_MESSAGE;
-      fixCancelled.hidden = false;
-    }
     fixing = false;
-    updateCheckButton();
+    if (signal.aborted) {
+      toast(CANCELLED_MESSAGE);
+    }
+    updateUI();
   }
 }
 
-proposeButton.addEventListener("click", runFix);
+function downloadRedline() {
+  if (!state.fixedAt || !redlinePdf.getAttribute("href") || redlinePdf.getAttribute("href") === "#") {
+    return;
+  }
+  redlinePdf.click();
+}
+
+redlinePdf.addEventListener("click", () => {
+  state.exported = true;
+  toast("Downloading the redlined PDF.");
+  updateUI();
+});
+
+primaryButton.addEventListener("click", () => {
+  switch (currentStage()) {
+    case "empty":
+      fileInput.click();
+      break;
+    case "confirm":
+      runCheck();
+      break;
+    case "checked":
+      runFix();
+      break;
+    case "done":
+      downloadRedline();
+      break;
+    default:
+      break;
+  }
+});
 
 resetButton.addEventListener("click", () => {
   if (!state.original) {
@@ -1707,51 +2073,93 @@ resetButton.addEventListener("click", () => {
   state.working = clone(state.original);
   renderTables();
   afterEdit();
+  toast("Tables reset to what the model read.");
 });
 
 addDatumButton.addEventListener("click", () => {
   if (!state.working) {
     return;
   }
-  // No label and no place on the drawing yet: the label cell opens invalid, which is the
-  // honest state — a datum without a letter is not something the rules can use.
+  // No label yet: the cell opens invalid, which is honest — a datum needs a letter.
   state.working.datums = state.working.datums || [];
   state.working.datums.push({ id: newDatumId(), label: "", location: null, bbox: null });
   renderTables();
   afterEdit();
 });
 
-/** Check a file and either start reading it or say why not. No request for a bad file. */
-function offerFile(file) {
-  const reason = rejectionReason(file);
-  if (reason) {
-    clearOutput();
-    showError(reason);
-    return;
+/* ---- Ways in: drop, click, keyboard, the buttons, and the sample ---------- */
+
+const DROP_PROMPT = "Drop a drawing here, or click to choose a file";
+
+/** Why this file cannot be sent, or `null` when it can. The server checks again. */
+function rejectionReason(file) {
+  const name = file.name || "";
+  const dot = name.lastIndexOf(".");
+  const suffix = dot === -1 ? "" : name.slice(dot).toLowerCase();
+  if (!ALLOWED_SUFFIXES.includes(suffix)) {
+    return `“${name}” is not a drawing DraftCheck can read. Use a PDF, PNG, or JPG file.`;
   }
-  startRun(file);
+  if (file.size > MAX_UPLOAD_BYTES) {
+    const megabytes = (file.size / (1024 * 1024)).toFixed(1);
+    return `“${name}” is ${megabytes} MB. The limit is 10 MB.`;
+  }
+  return null;
 }
 
-/* ---- Ways in: drop, click, keyboard, and the button ---------------------- */
+function isBusy() {
+  return reading || fixing;
+}
 
-dropzone.addEventListener("click", (event) => {
-  // The hidden input lives inside the zone, so its own click would bounce back here and
-  // reopen the dialog forever. Only a click on the zone itself opens it.
-  if (busy || event.target === fileInput) {
+function offerFile(file, source = "uploaded") {
+  if (isBusy()) {
     return;
   }
-  fileInput.click();
+  const reason = rejectionReason(file);
+  if (reason) {
+    toast(reason, { error: true });
+    return;
+  }
+  startRun(file, source);
+}
+
+/** Fetch the sample PDF and upload it exactly as a picked file would be. */
+async function trySample() {
+  if (isBusy()) {
+    return;
+  }
+  try {
+    const response = await fetch(SAMPLE_URL);
+    if (!response.ok) {
+      toast(`Could not load the sample drawing. ${await errorMessage(response)}`, { error: true });
+      return;
+    }
+    const blob = await response.blob();
+    offerFile(new File([blob], SAMPLE_NAME, { type: "application/pdf" }), "sample");
+  } catch (problem) {
+    toast(`Could not reach the server: ${problem.message}`, { error: true });
+  }
+}
+
+for (const button of sampleButtons) {
+  button.addEventListener("click", trySample);
+}
+
+uploadButton.addEventListener("click", () => {
+  if (!isBusy()) fileInput.click();
+});
+
+dropzone.addEventListener("click", () => {
+  if (!isBusy()) fileInput.click();
 });
 
 dropzone.addEventListener("keydown", (event) => {
-  if (busy || (event.key !== "Enter" && event.key !== " ")) {
+  if (isBusy() || (event.key !== "Enter" && event.key !== " ")) {
     return;
   }
   event.preventDefault(); // Space would scroll the page.
   fileInput.click();
 });
 
-// Picking a file from the dialog reads it straight away, exactly as a drop does.
 fileInput.addEventListener("change", () => {
   const file = fileInput.files && fileInput.files[0];
   if (file) {
@@ -1759,44 +2167,36 @@ fileInput.addEventListener("change", () => {
   }
 });
 
-/* The browser opens a dropped file in the tab unless both dragover and drop call
-   preventDefault — dragover says "this element accepts the drop", drop keeps the
-   navigation from happening. */
-dropzone.addEventListener("dragover", (event) => {
-  if (busy) {
+providerSelect.addEventListener("change", updateUI);
+
+/* The whole desk takes a drop, so a second drawing can be dropped on the first. Both
+   dragover and drop must preventDefault, or the browser opens the file in the tab. */
+desk.addEventListener("dragover", (event) => {
+  if (isBusy()) {
     return;
   }
   event.preventDefault();
   event.dataTransfer.dropEffect = "copy";
-  dropzone.classList.add("is-dragging");
+  desk.classList.add("is-dragging");
 });
 
-// dragleave fires when crossing onto a child element too; `relatedTarget` outside the
-// zone is what actually means the pointer left it.
-dropzone.addEventListener("dragleave", (event) => {
-  if (!dropzone.contains(event.relatedTarget)) {
-    dropzone.classList.remove("is-dragging");
+desk.addEventListener("dragleave", (event) => {
+  if (!desk.contains(event.relatedTarget)) {
+    desk.classList.remove("is-dragging");
   }
 });
 
-dropzone.addEventListener("drop", (event) => {
-  if (busy) {
+desk.addEventListener("drop", (event) => {
+  event.preventDefault();
+  desk.classList.remove("is-dragging");
+  if (isBusy()) {
     return;
   }
-  event.preventDefault();
-  dropzone.classList.remove("is-dragging");
-
   const file = event.dataTransfer.files && event.dataTransfer.files[0];
   if (!file) {
-    clearOutput();
-    showError("That drop carried no file. Drag a PDF, PNG, or JPG drawing onto the box.");
+    toast("That drop carried no file. Drag a PDF, PNG, or JPG drawing onto the desk.", { error: true });
     return;
   }
-
-  // Hand the drop to the file input as well, so the form holds the same file the drop
-  // started and the Read drawing button can run it again. Assigning `files` fires no
-  // change event, so this does not start a second run.
-  fileInput.files = event.dataTransfer.files;
   offerFile(file);
 });
 
@@ -1804,46 +2204,48 @@ dropzone.addEventListener("drop", (event) => {
 
 /*
  * `?demo=low-confidence` loads a saved extraction with two items marked unsure, so the
- * markings above can be looked at without spending a model call on it. The server only
- * answers this for a browser on the same machine, so a deployed DraftCheck has no demo.
+ * markings can be looked at without a model call. The server only answers this for a
+ * browser on the same machine with DRAFTCHECK_ENABLE_DEMO=1.
  */
-
-const DEMO_PARAM = "demo";
 const LOW_CONFIDENCE_DEMO = "low-confidence";
 
-/** Ask for the demo run and show it, exactly as an upload's reply is shown. */
 async function loadDemo() {
-  readCancelled.hidden = true;
-  clearOutput();
-  setBusy(true);
+  state.pendingFile = { name: "plate_001.png", source: "demo" };
+  reading = true;
+  updateUI();
   try {
     const response = await fetch(`/api/demo/${LOW_CONFIDENCE_DEMO}`, { method: "POST" });
     if (!response.ok) {
-      showError(await errorMessage(response));
+      toast(`Could not load the demo. ${await errorMessage(response)}`, { error: true });
       return;
     }
-    render(await response.json());
+    render(await response.json(), { name: "plate_001.png", source: "demo" });
   } catch (problem) {
-    showError(`Could not reach the server: ${problem.message}`);
+    toast(`Could not reach the server: ${problem.message}`, { error: true });
   } finally {
-    setBusy(false);
-    setDropLabel(null);
-    updateCheckButton();
+    reading = false;
+    state.pendingFile = null;
+    updateUI();
   }
 }
 
-if (new URLSearchParams(window.location.search).get(DEMO_PARAM) === LOW_CONFIDENCE_DEMO) {
+updateUI();
+
+/** Ask the server whether the development fake model is answering, for the pill's badge. */
+async function loadModelMode() {
+  try {
+    const response = await fetch("/api/model-mode");
+    if (response.ok) {
+      state.fake = Boolean((await response.json()).fake_model);
+      updateUI();
+    }
+  } catch {
+    // No answer means no badge; the upload reply will say so if the fake is in use.
+  }
+}
+
+loadModelMode();
+
+if (new URLSearchParams(window.location.search).get("demo") === LOW_CONFIDENCE_DEMO) {
   loadDemo();
 }
-
-form.addEventListener("submit", (event) => {
-  event.preventDefault();
-
-  const file = fileInput.files && fileInput.files[0];
-  if (!file) {
-    clearOutput();
-    showError("Drop a PDF, PNG, or JPG drawing on the box, or click it to choose one.");
-    return;
-  }
-  offerFile(file);
-});
