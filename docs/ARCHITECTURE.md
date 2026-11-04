@@ -1,7 +1,7 @@
 # DraftCheck — Architecture
 
-Every item below is marked **BUILT** (exists in this repo today) or **PLANNED** (designed,
-not yet written).
+Every item below is marked **BUILT** (exists in this repo today), **DEPLOYED** (running at
+https://draftcheck.onrender.com), or **PLANNED** (designed, not yet written).
 
 Last updated: 2026-11-03
 
@@ -22,10 +22,10 @@ facts, and turning a rule violation into wording a person can act on. Whether a 
 passes is always computed in plain Python from the extracted data, so the same drawing
 always produces the same verdicts. No rule outcome is ever read out of a model response.
 
-## 3. Pipeline — PARTLY BUILT
+## 3. Pipeline — BUILT
 
-Render, Extract, Check, Correct, and the redlined PDF output work today. The
-user-confirmation step is still planned.
+Every stage works today, in the browser page and over HTTP. The CLI runs every stage
+except Confirm.
 
 ```mermaid
 flowchart TD
@@ -46,7 +46,7 @@ Stage notes:
 | --- | --- | --- |
 | Render | PDF page rasterized to an image the model can see, via `render.load_pages` | **BUILT** |
 | Extract | Model returns a JSON object; parsed by `llm_parsing.extract_json`, then validated by `schema.parse_drawing`. Wired up as `pipeline.extract` | **BUILT** |
-| Confirm | User reviews and edits the extracted values before any checking. Over HTTP today: the extraction goes back from `POST /api/runs` and the (possibly edited) data comes in to `POST /api/runs/{id}/check`. The browser screen itself is the next step | **PARTLY BUILT** (API only) |
+| Confirm | User reviews and edits the extracted values before any checking. The extraction goes back from `POST /api/runs` and the (possibly edited) data comes in to `POST /api/runs/{id}/check`; the browser page shows it as editable tables, see §4.9 | **BUILT** |
 | Check | Python rules produce pass/fail per rule, with no model involvement, via `rules.run_rules`, wrapped as `pipeline.check` | **BUILT** |
 | Correct | Agent proposes edits from a fixed menu, Python applies the safe ones and re-runs the rules to verify; **max 3 rounds**, then stop. `agent.correct`, see §4.5 | **BUILT** |
 | Output | Two-page redline: the drawing with a numbered marker per located finding, and a findings page behind it. `redline.render_redline` / `redline.save_redline`, see §4.7 | **BUILT** |
@@ -76,7 +76,6 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/api.py` | FastAPI app over the same four modules the CLI drives: upload + extract, check the confirmed data, run the correction loop, serve the page image and the redline. One run is one folder under `outputs/web/<uuid4>/`, so each request reads what the previous one wrote — see §4.8. Decides nothing itself | **BUILT** |
 | `draftcheck/limits.py` | What one demo deployment is willing to spend, and on whom. `Limits.from_env()` holds every number (per-IP uploads and fixes per hour, model calls per day, run retention, sweep interval, `TRUST_PROXY`); `UsageLimiter` counts them in memory over sliding windows and raises `LimitExceeded`, which `api.py` turns into a `429`; `client_ip(...)` decides which address a request is counted against; `sweep_runs(root, max_age_hours)` deletes stale run folders and `Cleaner` keeps that to once an hour — see §4.12 | **BUILT** |
 | `draftcheck/static/` | The browser page, served at `/`: `index.html`, `style.css`, `app.js`, `sheet.js` (the drawing primitives for the sheet: scan band, revision clouds, pen notes, stamp — §4.17), and `fonts/` (Archivo, JetBrains Mono, Nanum Pen Script, each with its OFL licence). Plain HTML, CSS, and JavaScript — no framework, no build step, nothing loaded from a CDN. Laid out as "the checker's desk" (§4.15): a header with a five-stage stepper and a model pill, the drawing as paper on a dark desk with an SVG overlay in image pixels, and a tabbed review panel (Extracted, Issues, Corrections) with one primary button whose label follows the stage. The tables are editable (§4.9), linked to the drawing by item id, and checked and fixed through the same endpoints as before. Cells are written with `textContent` or as an input's `value`, so model output is never treated as markup | **BUILT** (upload + view + edit + check + fix + redline) |
-| `frontend/` | Driving `/fix` from the page and showing the correction report and the redline | PLANNED |
 | `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch. The ground truth is written in `schema.py`'s field names — plus `bbox_convention` and `seeded_errors` — so it parses as a `Drawing` and doubles as the target an extraction is scored against. `--suite` builds the evaluation suite instead (below) and leaves plate_001 alone | **BUILT** |
 | `scripts/drawing_suite.py` | The evaluation suite: eight drawings described as `DrawingSpec` data and drawn by one renderer, so each sheet and its ground truth come from the same spec. Every seeded error names its `rule_id` and exact `finding_key` — see §4.18 | **BUILT** |
 | `scripts/run_eval.py` | Runs each suite drawing × provider through render → extract → rules → correction loop, one call at a time, scores it against the ground truth in plain Python, caches each finished run in `outputs/eval/results.json`, and writes `docs/EVAL.md` — see §4.18 | **BUILT** |
@@ -787,9 +786,9 @@ host's probe runs it every few seconds: one that called the provider would spend
 budget on being asked whether we are alive, and would report us unhealthy whenever the
 provider hiccuped — a different question from the one being asked.
 
-### 4.13 Deploy — CONFIGURED (not yet deployed)
+### 4.13 Deploy — DEPLOYED
 
-DraftCheck runs on **Render**, as one Python web service on the **free plan** in the
+Live at **https://draftcheck.onrender.com**. DraftCheck runs on **Render**, as one Python web service on the **free plan** in the
 Oregon region. Everything about the service is written down in `render.yaml` at the repo
 root (a Render Blueprint), so the setup is reviewed like code instead of clicked together
 in a dashboard:
@@ -1339,5 +1338,5 @@ draftCheck/
 | --- | --- | --- |
 | 1 | Extraction + JSON schema + rule engine + test generator | BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`, `rules.py` with 6 rules, and `pipeline.py` + `cli.py` joining them into one `check` command that runs a drawing end to end. More rules can be added to the registry as the sample set grows. An eight-drawing evaluation suite and `scripts/run_eval.py` score extraction, detection, and fixes per provider (§4.18) |
 | 2 | Agent correction loop + redlined PDF | BUILT: `edits.py` (the four allowed operations and their guards), `agent.py` (the three-round loop), and `redline.py` (the two-page redline), wired into `check --fix --redline` and verified end to end on plate_001 |
-| 3 | Web UI + live deploy | PARTLY BUILT: `api.py` serves the whole flow over HTTP — upload + extract, check the confirmed data, run the loop, fetch the redline — verified end to end against the live model on plate_001. The browser page uploads a drawing, shows what the model read, lets the reviewer correct it, runs the check from it (§4.9), proposes verified fixes with the redline (§4.10), and marks the rows the model was least sure of (§4.11). Production safety is in place — per-IP and global usage limits, run-folder cleanup, and `/healthz` (§4.12). The Render deploy is configured in `render.yaml` (§4.13) but not yet run |
+| 3 | Web UI + live deploy | BUILT and DEPLOYED: `api.py` serves the whole flow over HTTP — upload + extract, check the confirmed data, run the loop, fetch the redline — verified end to end against the live model on plate_001. The browser page uploads a drawing, shows what the model read, lets the reviewer correct it, runs the check from it (§4.9), proposes verified fixes with the redline (§4.10), and marks the rows the model was least sure of (§4.11). Production safety is in place — per-IP and global usage limits, run-folder cleanup, and `/healthz` (§4.12). Deployed on Render from `render.yaml` at https://draftcheck.onrender.com (§4.13) |
 | 4 | After hackathon: SAM 3.1 precision, revisions, link to Research Paper Recommender | PLANNED (post-hackathon) |
