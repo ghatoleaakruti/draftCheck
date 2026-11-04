@@ -225,6 +225,12 @@ For UI work with no model calls, start the app with the fake model. It only answ
 DRAFTCHECK_FAKE_MODEL=1 uvicorn draftcheck.api:app --reload
 ```
 
+Smoke-test the live site (upload, check, streamed fix, redline; add `--explain` for the explanation). It needs no keys but makes real model calls, so each run counts toward the live site's usage limits:
+
+```bash
+python -m scripts.smoke_live
+```
+
 Run the tests and linter:
 
 ```bash
