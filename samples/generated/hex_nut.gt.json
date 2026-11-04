@@ -1,0 +1,121 @@
+{
+  "units": "mm",
+  "general_tolerance": {
+    "linear_plus_minus": 0.2,
+    "text_raw": "UNLESS OTHERWISE SPECIFIED: ±0.2"
+  },
+  "title_block": {
+    "title": "HEX NUT M10",
+    "drawing_number": "DC-0302",
+    "revision": "A",
+    "material": "MEDIUM CARBON STEEL",
+    "scale": "4:1"
+  },
+  "expected_part_type": "hex_nut",
+  "views": [
+    {
+      "name": "top",
+      "kind": "top"
+    },
+    {
+      "name": "front",
+      "kind": "front"
+    }
+  ],
+  "bbox_convention": "[x0, y0, x1, y1] normalized 0..1, origin top-left, covering the annotation's text or symbol",
+  "datums": [],
+  "dimensions": [
+    {
+      "id": "dim_across_corners",
+      "text_raw": "(18.48)",
+      "value": 18.48,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": true,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "corner_left",
+      "to_ref": "corner_right",
+      "bbox": [
+        0.4598,
+        0.1162,
+        0.4998,
+        0.1331
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_across_flats",
+      "text_raw": "16",
+      "value": 16.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "flat_bottom",
+      "to_ref": "flat_top",
+      "bbox": [
+        0.6485,
+        0.321,
+        0.6615,
+        0.3392
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_thickness",
+      "text_raw": "8.4",
+      "value": 8.4,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "bottom_face",
+      "to_ref": "top_face",
+      "bbox": [
+        0.6485,
+        0.6085,
+        0.6615,
+        0.6313
+      ],
+      "view": "front"
+    },
+    {
+      "id": "dim_thread",
+      "text_raw": "M10x1.5",
+      "value": 10.0,
+      "unit": null,
+      "feature_type": "thread",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": null,
+      "to_ref": null,
+      "bbox": [
+        0.2399,
+        0.4392,
+        0.2907,
+        0.4569
+      ],
+      "view": "top"
+    }
+  ],
+  "fcfs": [],
+  "notes": [
+    "1. THREAD TOLERANCE CLASS 6H.",
+    "2. CHAMFER BOTH FACES 30°.",
+    "3. PROPERTY CLASS 8.",
+    "4. FINISH: ZINC PLATE."
+  ],
+  "seeded_errors": []
+}

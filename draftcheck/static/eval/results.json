@@ -1,0 +1,879 @@
+{
+  "schema": 1,
+  "generated_at": "2026-11-04T06:21:11+00:00",
+  "method": "Generated drawings with known answers; scores computed by Python against ground truth; see docs/EVAL.md.",
+  "providers": [
+    {
+      "id": "baseten",
+      "label": "Muse Spark Open (Baseten)"
+    },
+    {
+      "id": "meta",
+      "label": "Muse Spark (Meta Model API)"
+    }
+  ],
+  "suite": {
+    "drawings": 17,
+    "part_types": 10,
+    "views": 29,
+    "gdt_frames": 19,
+    "seeded_errors": 13
+  },
+  "totals": {
+    "baseten": {
+      "label": "Muse Spark Open (Baseten)",
+      "runs_ok": 0,
+      "errors_caught": 0,
+      "errors_expected": 0,
+      "false_alarms": 0,
+      "fixes_verified": 0,
+      "errors_before": 0,
+      "fallbacks": 0,
+      "latency_s": 0,
+      "part_types_recognized": 0,
+      "part_types_scored": 0
+    },
+    "meta": {
+      "label": "Muse Spark (Meta Model API)",
+      "runs_ok": 0,
+      "errors_caught": 0,
+      "errors_expected": 0,
+      "false_alarms": 0,
+      "fixes_verified": 0,
+      "errors_before": 0,
+      "fallbacks": 0,
+      "latency_s": 0,
+      "part_types_recognized": 0,
+      "part_types_scored": 0
+    }
+  },
+  "drawings": [
+    {
+      "stem": "plate_001",
+      "title": "BRACKET PLATE",
+      "part_type": "plate",
+      "features": {
+        "views": 1,
+        "view_kinds": [
+          "front"
+        ],
+        "sections": 0,
+        "details": 0,
+        "gdt_frames": {
+          "position": 1
+        },
+        "datums": 2,
+        "dimensions": 6,
+        "tables": [],
+        "balloons": 0,
+        "notes": 0
+      },
+      "seeded_errors": [
+        {
+          "rule_id": "GDT-001",
+          "description": "The position feature control frame references datum C as its tertiary datum, but no datum feature symbol C appears on the drawing. Only datums A and B are defined.",
+          "caught_by": {
+            "baseten": null,
+            "meta": null
+          }
+        }
+      ],
+      "thumb": "eval/thumbs/plate_001.png",
+      "sheet": "eval/sheets/plate_001.png",
+      "pdf": "eval/pdfs/plate_001.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    },
+    {
+      "stem": "plate_clean",
+      "title": "BASE PLATE",
+      "part_type": "plate",
+      "features": {
+        "views": 1,
+        "view_kinds": [
+          "front"
+        ],
+        "sections": 0,
+        "details": 0,
+        "gdt_frames": {
+          "position": 1
+        },
+        "datums": 2,
+        "dimensions": 6,
+        "tables": [],
+        "balloons": 0,
+        "notes": 0
+      },
+      "seeded_errors": [],
+      "thumb": "eval/thumbs/plate_clean.png",
+      "sheet": "eval/sheets/plate_clean.png",
+      "pdf": "eval/pdfs/plate_clean.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    },
+    {
+      "stem": "plate_dup_datum",
+      "title": "BASE PLATE",
+      "part_type": "plate",
+      "features": {
+        "views": 1,
+        "view_kinds": [
+          "front"
+        ],
+        "sections": 0,
+        "details": 0,
+        "gdt_frames": {
+          "position": 1
+        },
+        "datums": 3,
+        "dimensions": 6,
+        "tables": [],
+        "balloons": 0,
+        "notes": 0
+      },
+      "seeded_errors": [
+        {
+          "rule_id": "GDT-002",
+          "description": "Two datum feature symbols are both labelled A: one on the bottom edge and one on the top edge.",
+          "caught_by": {
+            "baseten": null,
+            "meta": null
+          }
+        }
+      ],
+      "thumb": "eval/thumbs/plate_dup_datum.png",
+      "sheet": "eval/sheets/plate_dup_datum.png",
+      "pdf": "eval/pdfs/plate_dup_datum.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    },
+    {
+      "stem": "plate_flatness_datum",
+      "title": "BASE PLATE",
+      "part_type": "plate",
+      "features": {
+        "views": 1,
+        "view_kinds": [
+          "front"
+        ],
+        "sections": 0,
+        "details": 0,
+        "gdt_frames": {
+          "flatness": 1,
+          "position": 1
+        },
+        "datums": 2,
+        "dimensions": 6,
+        "tables": [],
+        "balloons": 0,
+        "notes": 0
+      },
+      "seeded_errors": [
+        {
+          "rule_id": "GDT-003",
+          "description": "The flatness frame references datum A. Flatness is a form control and takes no datum.",
+          "caught_by": {
+            "baseten": null,
+            "meta": null
+          }
+        }
+      ],
+      "thumb": "eval/thumbs/plate_flatness_datum.png",
+      "sheet": "eval/sheets/plate_flatness_datum.png",
+      "pdf": "eval/pdfs/plate_flatness_datum.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    },
+    {
+      "stem": "plate_no_basic",
+      "title": "BASE PLATE",
+      "part_type": "plate",
+      "features": {
+        "views": 1,
+        "view_kinds": [
+          "front"
+        ],
+        "sections": 0,
+        "details": 0,
+        "gdt_frames": {
+          "position": 1
+        },
+        "datums": 2,
+        "dimensions": 6,
+        "tables": [],
+        "balloons": 0,
+        "notes": 0
+      },
+      "seeded_errors": [
+        {
+          "rule_id": "GDT-004",
+          "description": "The holes carry a position tolerance, but their locating dimensions (20, 80, 30) are plain dimensions, not basic ones.",
+          "caught_by": {
+            "baseten": null,
+            "meta": null
+          }
+        }
+      ],
+      "thumb": "eval/thumbs/plate_no_basic.png",
+      "sheet": "eval/sheets/plate_no_basic.png",
+      "pdf": "eval/pdfs/plate_no_basic.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    },
+    {
+      "stem": "plate_no_gentol",
+      "title": "BASE PLATE",
+      "part_type": "plate",
+      "features": {
+        "views": 1,
+        "view_kinds": [
+          "front"
+        ],
+        "sections": 0,
+        "details": 0,
+        "gdt_frames": {
+          "position": 1
+        },
+        "datums": 2,
+        "dimensions": 6,
+        "tables": [],
+        "balloons": 0,
+        "notes": 0
+      },
+      "seeded_errors": [
+        {
+          "rule_id": "DIM-001",
+          "description": "The title block gives no general tolerance, and the overall height 60 prints no tolerance of its own.",
+          "caught_by": {
+            "baseten": null,
+            "meta": null
+          }
+        }
+      ],
+      "thumb": "eval/thumbs/plate_no_gentol.png",
+      "sheet": "eval/sheets/plate_no_gentol.png",
+      "pdf": "eval/pdfs/plate_no_gentol.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    },
+    {
+      "stem": "plate_edge_hole",
+      "title": "BASE PLATE",
+      "part_type": "plate",
+      "features": {
+        "views": 1,
+        "view_kinds": [
+          "front"
+        ],
+        "sections": 0,
+        "details": 0,
+        "gdt_frames": {
+          "position": 1
+        },
+        "datums": 2,
+        "dimensions": 9,
+        "tables": [],
+        "balloons": 0,
+        "notes": 0
+      },
+      "seeded_errors": [
+        {
+          "rule_id": "MFG-001",
+          "description": "Hole 3 (Ø6) has its centre 5 mm from the right edge, leaving a web far thinner than one hole diameter.",
+          "caught_by": {
+            "baseten": null,
+            "meta": null
+          }
+        }
+      ],
+      "thumb": "eval/thumbs/plate_edge_hole.png",
+      "sheet": "eval/sheets/plate_edge_hole.png",
+      "pdf": "eval/pdfs/plate_edge_hole.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    },
+    {
+      "stem": "bracket_01",
+      "title": "MOUNTING BRACKET",
+      "part_type": "bracket",
+      "features": {
+        "views": 2,
+        "view_kinds": [
+          "front",
+          "right_side"
+        ],
+        "sections": 0,
+        "details": 0,
+        "gdt_frames": {
+          "flatness": 1,
+          "position": 1
+        },
+        "datums": 2,
+        "dimensions": 11,
+        "tables": [],
+        "balloons": 0,
+        "notes": 3
+      },
+      "seeded_errors": [
+        {
+          "rule_id": "GDT-001",
+          "description": "The position frame references datum D, but the drawing defines only A and B.",
+          "caught_by": {
+            "baseten": null,
+            "meta": null
+          }
+        },
+        {
+          "rule_id": "GDT-003",
+          "description": "The flatness frame on the back face references datum A.",
+          "caught_by": {
+            "baseten": null,
+            "meta": null
+          }
+        },
+        {
+          "rule_id": "MFG-001",
+          "description": "The Ø6 hole has its centre 5 mm from the right edge.",
+          "caught_by": {
+            "baseten": null,
+            "meta": null
+          }
+        }
+      ],
+      "thumb": "eval/thumbs/bracket_01.png",
+      "sheet": "eval/sheets/bracket_01.png",
+      "pdf": "eval/pdfs/bracket_01.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    },
+    {
+      "stem": "plate_inch_multi",
+      "title": "COVER PLATE",
+      "part_type": "plate",
+      "features": {
+        "views": 1,
+        "view_kinds": [
+          "front"
+        ],
+        "sections": 0,
+        "details": 0,
+        "gdt_frames": {
+          "perpendicularity": 1,
+          "position": 1
+        },
+        "datums": 3,
+        "dimensions": 7,
+        "tables": [],
+        "balloons": 0,
+        "notes": 0
+      },
+      "seeded_errors": [
+        {
+          "rule_id": "GDT-002",
+          "description": "Datum B is placed twice: on the left edge and again on the right edge.",
+          "caught_by": {
+            "baseten": null,
+            "meta": null
+          }
+        }
+      ],
+      "thumb": "eval/thumbs/plate_inch_multi.png",
+      "sheet": "eval/sheets/plate_inch_multi.png",
+      "pdf": "eval/pdfs/plate_inch_multi.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    },
+    {
+      "stem": "gear_spur",
+      "title": "SPUR GEAR 24T M2",
+      "part_type": "spur_gear",
+      "features": {
+        "views": 2,
+        "view_kinds": [
+          "front",
+          "right_side"
+        ],
+        "sections": 0,
+        "details": 0,
+        "gdt_frames": {
+          "circular_runout": 1
+        },
+        "datums": 1,
+        "dimensions": 8,
+        "tables": [],
+        "balloons": 0,
+        "notes": 4
+      },
+      "seeded_errors": [],
+      "thumb": "eval/thumbs/gear_spur.png",
+      "sheet": "eval/sheets/gear_spur.png",
+      "pdf": "eval/pdfs/gear_spur.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    },
+    {
+      "stem": "hex_nut",
+      "title": "HEX NUT M10",
+      "part_type": "hex_nut",
+      "features": {
+        "views": 2,
+        "view_kinds": [
+          "top",
+          "front"
+        ],
+        "sections": 0,
+        "details": 0,
+        "gdt_frames": {},
+        "datums": 0,
+        "dimensions": 4,
+        "tables": [],
+        "balloons": 0,
+        "notes": 4
+      },
+      "seeded_errors": [],
+      "thumb": "eval/thumbs/hex_nut.png",
+      "sheet": "eval/sheets/hex_nut.png",
+      "pdf": "eval/pdfs/hex_nut.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    },
+    {
+      "stem": "hex_bolt",
+      "title": "HEX BOLT M8 x 40",
+      "part_type": "hex_bolt",
+      "features": {
+        "views": 2,
+        "view_kinds": [
+          "front",
+          "left_side"
+        ],
+        "sections": 0,
+        "details": 0,
+        "gdt_frames": {},
+        "datums": 0,
+        "dimensions": 5,
+        "tables": [],
+        "balloons": 0,
+        "notes": 4
+      },
+      "seeded_errors": [],
+      "thumb": "eval/thumbs/hex_bolt.png",
+      "sheet": "eval/sheets/hex_bolt.png",
+      "pdf": "eval/pdfs/hex_bolt.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    },
+    {
+      "stem": "flange",
+      "title": "FLANGE 6-BOLT",
+      "part_type": "flange",
+      "features": {
+        "views": 2,
+        "view_kinds": [
+          "front",
+          "section"
+        ],
+        "sections": 1,
+        "details": 0,
+        "gdt_frames": {
+          "perpendicularity": 1,
+          "position": 1
+        },
+        "datums": 2,
+        "dimensions": 7,
+        "tables": [],
+        "balloons": 0,
+        "notes": 4
+      },
+      "seeded_errors": [
+        {
+          "rule_id": "GDT-001",
+          "description": "The hole position frame references datum C, but the drawing defines only A (the back face) and B (the bore).",
+          "caught_by": {
+            "baseten": null,
+            "meta": null
+          }
+        }
+      ],
+      "thumb": "eval/thumbs/flange.png",
+      "sheet": "eval/sheets/flange.png",
+      "pdf": "eval/pdfs/flange.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    },
+    {
+      "stem": "stepped_shaft",
+      "title": "STEPPED SHAFT",
+      "part_type": "stepped_shaft",
+      "features": {
+        "views": 3,
+        "view_kinds": [
+          "front",
+          "section",
+          "detail"
+        ],
+        "sections": 1,
+        "details": 1,
+        "gdt_frames": {
+          "circular_runout": 1
+        },
+        "datums": 1,
+        "dimensions": 12,
+        "tables": [],
+        "balloons": 0,
+        "notes": 3
+      },
+      "seeded_errors": [
+        {
+          "rule_id": "DIM-001",
+          "description": "The title block gives no general tolerance, and the collar diameter Ø40 prints no tolerance of its own.",
+          "caught_by": {
+            "baseten": null,
+            "meta": null
+          }
+        }
+      ],
+      "thumb": "eval/thumbs/stepped_shaft.png",
+      "sheet": "eval/sheets/stepped_shaft.png",
+      "pdf": "eval/pdfs/stepped_shaft.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    },
+    {
+      "stem": "gripper_claw",
+      "title": "GRIPPER CLAW",
+      "part_type": "gripper_claw",
+      "features": {
+        "views": 2,
+        "view_kinds": [
+          "front",
+          "top"
+        ],
+        "sections": 0,
+        "details": 0,
+        "gdt_frames": {
+          "profile_surface": 1
+        },
+        "datums": 2,
+        "dimensions": 13,
+        "tables": [],
+        "balloons": 0,
+        "notes": 3
+      },
+      "seeded_errors": [],
+      "thumb": "eval/thumbs/gripper_claw.png",
+      "sheet": "eval/sheets/gripper_claw.png",
+      "pdf": "eval/pdfs/gripper_claw.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    },
+    {
+      "stem": "block_3view",
+      "title": "MACHINED BLOCK",
+      "part_type": "machined_block",
+      "features": {
+        "views": 4,
+        "view_kinds": [
+          "front",
+          "top",
+          "right_side",
+          "isometric"
+        ],
+        "sections": 0,
+        "details": 0,
+        "gdt_frames": {
+          "flatness": 1,
+          "parallelism": 1
+        },
+        "datums": 1,
+        "dimensions": 24,
+        "tables": [
+          "hole_table"
+        ],
+        "balloons": 0,
+        "notes": 3
+      },
+      "seeded_errors": [
+        {
+          "rule_id": "GDT-003",
+          "description": "The flatness frame on the bottom face references datum A. Flatness is a form control and takes no datum.",
+          "caught_by": {
+            "baseten": null,
+            "meta": null
+          }
+        }
+      ],
+      "thumb": "eval/thumbs/block_3view.png",
+      "sheet": "eval/sheets/block_3view.png",
+      "pdf": "eval/pdfs/block_3view.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    },
+    {
+      "stem": "bolted_joint",
+      "title": "BOLTED JOINT ASSY",
+      "part_type": "bolted_joint_assembly",
+      "features": {
+        "views": 2,
+        "view_kinds": [
+          "front",
+          "section"
+        ],
+        "sections": 1,
+        "details": 0,
+        "gdt_frames": {},
+        "datums": 0,
+        "dimensions": 3,
+        "tables": [
+          "parts_list"
+        ],
+        "balloons": 5,
+        "notes": 3
+      },
+      "seeded_errors": [],
+      "thumb": "eval/thumbs/bolted_joint.png",
+      "sheet": "eval/sheets/bolted_joint.png",
+      "pdf": "eval/pdfs/bolted_joint.pdf",
+      "runs": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      },
+      "explain": {
+        "baseten": {
+          "status": "not run"
+        },
+        "meta": {
+          "status": "not run"
+        }
+      }
+    }
+  ]
+}

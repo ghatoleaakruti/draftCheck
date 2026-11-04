@@ -239,6 +239,43 @@ button:disabled {
   letter-spacing: -0.01em;
 }
 
+/* Page links: the checker and its test results */
+
+.brand-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.topnav {
+  display: flex;
+  gap: 4px;
+}
+
+.brand .topnav-link {
+  margin-left: 10px;
+}
+
+.topnav-link {
+  padding: 5px 12px;
+  border-radius: 6px;
+  color: var(--desk-ink-2);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background var(--fast), color var(--fast);
+}
+
+.topnav-link:hover {
+  background: var(--desk);
+  color: var(--desk-ink);
+}
+
+.topnav-link.is-current {
+  background: var(--desk);
+  color: var(--desk-ink);
+  box-shadow: inset 0 -2px 0 var(--pen-red);
+}
+
 /* Stepper */
 
 .stepper {
@@ -1618,6 +1655,55 @@ td.is-edited::after {
   margin: 6px 0 0;
   padding-left: 18px;
   font-size: 12.5px;
+}
+
+.about-rows {
+  margin: 8px 0 0;
+  display: grid;
+  gap: 6px;
+}
+
+.about-row {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--rule);
+  font-size: 12.5px;
+}
+
+.about-row[hidden] {
+  display: none;
+}
+
+.about-row dt {
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.about-row dd {
+  margin: 0;
+}
+
+.about-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 3px;
+}
+
+.about-list strong {
+  font-weight: 650;
+}
+
+.about-projection {
+  margin-top: 5px;
+  color: var(--ink-2);
+}
+
+.about-projection .part-chip {
+  margin-right: 6px;
 }
 
 .ai-label {

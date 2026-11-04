@@ -283,6 +283,9 @@ something is for, say so briefly.
 engine decides that. If findings are listed, they are already decided; explain why they \
 matter to a student, not whether they are right.
 - Keep every sentence short and plain, for a student in their first drafting course.
+- For views and projection, read the sheet: view labels ("SECTION A-A", "DETAIL C"), \
+cutting-plane lines, and the projection symbol in the title block. If there is no \
+projection symbol or the views do not make it clear, say "unclear" rather than guess.
 
 Output exactly one JSON object. No prose, no explanation outside the JSON, no markdown \
 code fences.\
@@ -299,8 +302,31 @@ PART_TYPES = (
     "cover",
     "spacer",
     "block",
+    "fastener",
+    "assembly",
     "other",
 )
+
+
+#: The view names an explanation may use. Anything else is dropped by the parser.
+VIEW_NAMES = (
+    "front",
+    "top",
+    "right",
+    "left",
+    "bottom",
+    "rear",
+    "section",
+    "detail",
+    "isometric",
+    "other",
+)
+
+#: How the views are arranged. Anything the parser does not recognise becomes "unclear".
+PROJECTIONS = ("first-angle", "third-angle", "unclear")
+
+#: The kinds of table the page labels. Anything else becomes "other".
+TABLE_KINDS = ("parts_list", "hole_table", "revision", "notes", "other")
 
 
 def _explain_findings_block(findings: list[Finding]) -> str:
@@ -324,6 +350,9 @@ def explain_user(drawing_json: str, findings: list[Finding]) -> str:
         findings: What the rules said about it, or an empty list if no check has run.
     """
     types = " | ".join(PART_TYPES)
+    views = " | ".join(f'"{name}"' for name in VIEW_NAMES)
+    projections = " | ".join(f'"{name}"' for name in PROJECTIONS)
+    tables = " | ".join(f'"{name}"' for name in TABLE_KINDS)
     return f"""\
 Here is the drawing and the data read from it.
 
@@ -344,9 +373,22 @@ Return one JSON object with exactly these keys:
     "features": ["short strings, e.g. \\"2 through holes, Ø8\\""],
     "confidence": number from 0 to 1
   }},
+  "views": [
+    {{"name": {views},
+      "label": "the view's printed label, e.g. \\"SECTION A-A\\", or null if it has none",
+      "shows": "one sentence: what this view likely shows"}}
+  ],
+  "projection": {projections},
+  "projection_note": "one or two sentences for a student on how the views relate",
+  "tables": [
+    {{"kind": {tables}, "summary": "one sentence: what the table lists"}}
+  ],
+  "balloons": "one sentence on the item balloons, or null if there are none",
   "dimensions": [
     {{"id": "<dimension id>", "kind": "size" | "location" | "form" | "reference",
-      "purpose": "one sentence: why this dimension is likely there"}}
+      "purpose": "one sentence: why this dimension is likely there",
+      "view": "the name of the view it is placed in, from your views list",
+      "also_seen_in": ["names of other views from your views list that show this feature"]}}
   ],
   "fcfs": [
     {{"id": "<frame id>",
@@ -364,9 +406,16 @@ matters for how the part works"}}
   ]
 }}
 
+Part type: "fastener" is a bolt, nut, screw, stud, washer, or pin drawn on its own; \
+"assembly" is a drawing of several parts together, usually with balloons and a parts list.
+
 Kinds: "size" gives the size of a feature (a diameter, a thickness); "location" places a \
 feature relative to an edge, a datum, or another feature; "form" describes shape (a \
 radius, an angle, a chamfer); "reference" is information only, printed in parentheses.
+
+Views: list every view on the sheet once, using only the names above. A dimension's \
+"view" and "also_seen_in" must be names from your own views list; leave \
+"also_seen_in" empty if no other view shows the feature. The title block is not a table.
 
 Explain every dimension, frame, and datum in the data, using its exact id or label. Only \
 include findings that are listed above. Output only the JSON object.\

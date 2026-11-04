@@ -1,0 +1,142 @@
+{
+  "units": "mm",
+  "general_tolerance": {
+    "linear_plus_minus": 0.2,
+    "text_raw": "UNLESS OTHERWISE SPECIFIED: ±0.2"
+  },
+  "title_block": {
+    "title": "HEX BOLT M8 x 40",
+    "drawing_number": "DC-0303",
+    "revision": "A",
+    "material": "ALLOY STEEL",
+    "scale": "2:1"
+  },
+  "expected_part_type": "hex_bolt",
+  "views": [
+    {
+      "name": "front",
+      "kind": "front"
+    },
+    {
+      "name": "end",
+      "kind": "left_side"
+    }
+  ],
+  "bbox_convention": "[x0, y0, x1, y1] normalized 0..1, origin top-left, covering the annotation's text or symbol",
+  "datums": [],
+  "dimensions": [
+    {
+      "id": "dim_head_height",
+      "text_raw": "5.3",
+      "value": 5.3,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "head_top",
+      "to_ref": "bearing_face",
+      "bbox": [
+        0.3069,
+        0.3349,
+        0.3245,
+        0.3518
+      ],
+      "view": "front"
+    },
+    {
+      "id": "dim_thread_length",
+      "text_raw": "22",
+      "value": 22.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "thread_end",
+      "to_ref": "bolt_tip",
+      "bbox": [
+        0.5352,
+        0.3349,
+        0.5493,
+        0.3518
+      ],
+      "view": "front"
+    },
+    {
+      "id": "dim_length",
+      "text_raw": "40",
+      "value": 40.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "bearing_face",
+      "to_ref": "bolt_tip",
+      "bbox": [
+        0.4708,
+        0.5481,
+        0.4848,
+        0.5649
+      ],
+      "view": "front"
+    },
+    {
+      "id": "dim_across_flats",
+      "text_raw": "13",
+      "value": 13.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "flat_left",
+      "to_ref": "flat_right",
+      "bbox": [
+        0.1571,
+        0.5481,
+        0.1712,
+        0.5649
+      ],
+      "view": "end"
+    },
+    {
+      "id": "dim_thread",
+      "text_raw": "M8x1.25",
+      "value": 8.0,
+      "unit": null,
+      "feature_type": "thread",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": null,
+      "to_ref": null,
+      "bbox": [
+        0.6717,
+        0.5863,
+        0.7226,
+        0.6039
+      ],
+      "view": "front"
+    }
+  ],
+  "fcfs": [],
+  "notes": [
+    "1. THREAD TOLERANCE CLASS 6g.",
+    "2. PROPERTY CLASS 8.8, MARK ON HEAD.",
+    "3. FINISH: ZINC PLATE.",
+    "4. LENGTH IS MEASURED UNDER THE HEAD."
+  ],
+  "seeded_errors": []
+}

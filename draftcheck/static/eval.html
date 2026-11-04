@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>DraftCheck · Test results</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/eval.css" />
+  </head>
+  <body class="eval-body">
+    <!-- Test results: reads only /eval/results.json, the snapshot scripts/run_eval.py
+         writes. No model calls, no API calls. -->
+    <header class="topbar eval-topbar">
+      <a class="brand brand-link" href="/">
+        <svg class="brand-mark" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+          <rect x="3.5" y="2.5" width="17" height="19" rx="1.5" class="mark-sheet" />
+          <path d="M12.5 21.5v-5h8" class="mark-sheet" />
+          <path
+            d="M6.5 8.6c.4-1.3 1.9-1.4 2.4-.4.5-1.2 2.1-1.1 2.4.1.6-1 2-.7 2.1.5"
+            class="mark-cloud"
+          />
+        </svg>
+        <span class="brand-name">DraftCheck</span>
+      </a>
+      <nav class="topnav" aria-label="Pages">
+        <a class="topnav-link" href="/">Checker</a>
+        <a class="topnav-link is-current" href="/eval.html" aria-current="page">Test results</a>
+      </nav>
+      <p id="eval-stamp" class="model-pill eval-stamp" role="status">
+        <span class="model-dot" aria-hidden="true"></span>
+        <span id="eval-stamp-text">Loading…</span>
+      </p>
+    </header>
+
+    <main class="eval">
+      <p id="eval-method" class="eval-method">
+        Generated drawings with known answers; scores computed by Python against ground truth;
+        see docs/EVAL.md.
+      </p>
+
+      <!-- Shown when there is no snapshot yet: an empty state, not an error. -->
+      <section id="eval-empty" class="eval-empty" hidden aria-labelledby="eval-empty-heading">
+        <h2 id="eval-empty-heading">No test results yet</h2>
+        <p>
+          The results page reads a snapshot that the evaluation writes. Run
+          <code>python -m scripts.run_eval</code> (or <code>--snapshot-only</code> to rebuild
+          it from saved results) and reload this page.
+        </p>
+        <a class="btn-quiet" href="/">Back to the checker</a>
+      </section>
+
+      <div id="eval-content" hidden>
+        <section class="eval-headline" aria-labelledby="eval-headline-heading">
+          <h2 id="eval-headline-heading" class="visually-hidden">Headline numbers</h2>
+          <div id="eval-suite" class="stat-row"></div>
+          <div class="compare-wrap">
+            <table id="eval-compare" class="compare">
+              <caption class="visually-hidden">Both models side by side</caption>
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="eval-filters" aria-label="Filters">
+          <label class="filter">
+            <span>Part type</span>
+            <select id="filter-part"><option value="">All part types</option></select>
+          </label>
+          <label class="filter">
+            <span>Model</span>
+            <select id="filter-model"><option value="">Both models</option></select>
+          </label>
+          <label class="filter">
+            <span>Seeded errors</span>
+            <select id="filter-seeded">
+              <option value="">Seeded and clean</option>
+              <option value="seeded">Has seeded errors</option>
+              <option value="clean">Clean</option>
+            </select>
+          </label>
+          <label class="filter filter-check">
+            <input id="filter-multiview" type="checkbox" />
+            <span>Multi-view only</span>
+          </label>
+          <p id="eval-count" class="eval-count" role="status"></p>
+        </section>
+
+        <section id="eval-grid" class="eval-grid" aria-label="Drawings"></section>
+        <p id="eval-none" class="eval-none" hidden>No drawing matches these filters.</p>
+      </div>
+    </main>
+
+    <!-- One drawing in detail. Filled by eval.js. -->
+    <dialog id="eval-detail" class="eval-detail" aria-labelledby="detail-name">
+      <div class="detail-head">
+        <div>
+          <p class="detail-kicker"><span id="detail-part" class="part-chip"></span></p>
+          <h2 id="detail-name" class="detail-name"></h2>
+          <p id="detail-title" class="detail-title"></p>
+        </div>
+        <div class="detail-actions">
+          <a id="detail-try" class="btn-primary detail-try" href="/">Try it live</a>
+          <button id="detail-close" class="btn-quiet" type="button" aria-label="Close">Close</button>
+        </div>
+      </div>
+      <div class="detail-body">
+        <figure class="detail-sheet">
+          <img id="detail-image" alt="" />
+        </figure>
+        <div class="detail-facts">
+          <section>
+            <h3>Seeded errors</h3>
+            <div id="detail-seeded"></div>
+          </section>
+          <section>
+            <h3>Reading the drawing</h3>
+            <div id="detail-extraction"></div>
+          </section>
+          <section>
+            <h3>Views and part type</h3>
+            <div id="detail-explain"></div>
+          </section>
+          <section>
+            <h3>Runs</h3>
+            <div id="detail-runs"></div>
+          </section>
+        </div>
+      </div>
+    </dialog>
+
+    <script src="/eval.js" defer></script>
+  </body>
+</html>

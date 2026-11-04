@@ -6,7 +6,9 @@
  *   POST /api/runs/{id}/check    the drawing the user confirmed -> findings
  *   POST /api/runs/{id}/fix      run the correction loop -> rounds, verdicts, redline URLs
  *   POST /api/runs/{id}/explain  an AI explanation for learners (never read by the rules)
- * plus GET /samples/plate_001.pdf, which "Try the sample drawing" fetches and then uploads
+ * plus GET /samples/plate_001.pdf, which "Try the sample drawing" fetches and then uploads,
+ * and GET /eval/pdfs/<stem>.pdf, which "Try it live" on the Test results page asks for
+ * with /?try=<stem>; it is uploaded the same way
  * through POST /api/runs exactly like a picked file.
  *
  * Nothing here decides whether the drawing passes. The tables are an editor and a
@@ -122,6 +124,13 @@ const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 /** The sample drawing, served by the API as one static file. */
 const SAMPLE_URL = "/samples/plate_001.pdf";
 const SAMPLE_NAME = "plate_001.pdf";
+
+/** How the desk names where its file came from. */
+const SOURCE_LABELS = {
+  sample: "sample drawing",
+  demo: "demo extraction",
+  suite: "test drawing",
+};
 
 /** The correction loop's hard cap (draftcheck/agent.py MAX_ROUNDS). Only used in words. */
 const MAX_ROUNDS = 3;
@@ -641,7 +650,7 @@ function updateUI() {
   const file = reading ? state.pendingFile : state.file;
   fileName.textContent = file ? file.name : "No drawing yet";
   fileSub.textContent = file
-    ? `Sheet 1, ${file.source === "sample" ? "sample drawing" : file.source === "demo" ? "demo extraction" : "uploaded"}`
+    ? `Sheet 1, ${SOURCE_LABELS[file.source] || "uploaded"}`
     : "Upload a drawing to begin";
 
   const showPaper = Boolean(state.runId) && !reading && state.imageReady;
@@ -1712,7 +1721,7 @@ function renderDimensions() {
       cells: [
         idCell(id),
         printedWithNote(dimension.text_raw, explainNote("dimensions", id), (note) =>
-          `${capitalize(note.kind)}: ${note.purpose}`),
+          `${capitalize(note.kind)}: ${note.purpose}${whereSeen(note)}`),
         markCrossCheck(
           numberCell(dimension, "value", was.value ?? null, { required: true, label: `Value, ${id}` }),
           id,
@@ -2820,6 +2829,88 @@ function printedWithNote(printed, note, lineOf, className = "mono") {
   return cell;
 }
 
+/** " · in front view, also seen in top view" for a dimension note, or "" with no view. */
+function whereSeen(note) {
+  if (!note.view) return "";
+  const named = (name) => `${name} view`;
+  const also = (note.also_seen_in || []).map(named);
+  const tail = also.length ? `, also seen in ${joinWords(also)}` : "";
+  return ` · in ${named(note.view)}${tail}`;
+}
+
+/** ["a", "b", "c"] -> "a, b and c". */
+function joinWords(words) {
+  if (words.length < 2) return words.join("");
+  return `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
+}
+
+/** The chip for each part type the explanation can give (prompts.PART_TYPES). */
+const PART_TYPE_LABELS = {
+  plate: "Plate",
+  bracket: "Bracket",
+  flange: "Flange",
+  shaft: "Shaft",
+  gear: "Gear",
+  housing: "Housing",
+  cover: "Cover",
+  spacer: "Spacer",
+  block: "Block",
+  fastener: "Fastener",
+  assembly: "Assembly",
+  other: "Other",
+};
+
+/** How the page names each table kind and projection the explanation can give. */
+const TABLE_LABELS = {
+  parts_list: "Parts list",
+  hole_table: "Hole table",
+  revision: "Revision block",
+  notes: "Notes",
+  other: "Other table",
+};
+const PROJECTION_LABELS = {
+  "first-angle": "First-angle",
+  "third-angle": "Third-angle",
+  unclear: "Projection unclear",
+};
+
+/** One "<strong>Lead:</strong> text" list item. */
+function leadItem(lead, rest) {
+  const item = document.createElement("li");
+  const strong = document.createElement("strong");
+  strong.textContent = `${lead}: `;
+  item.append(strong, rest);
+  return item;
+}
+
+/** The Views, Tables, and Balloons rows of the About card. */
+function renderAboutRows(explanation) {
+  const views = (explanation && explanation.views) || [];
+  const viewItems = document.createDocumentFragment();
+  for (const view of views) {
+    viewItems.appendChild(leadItem(view.label || `${capitalize(view.name)} view`, view.shows));
+  }
+  $("about-views").replaceChildren(viewItems);
+  const projection = (explanation && explanation.projection) || "unclear";
+  const note = explanation && explanation.projection_note;
+  $("about-projection-chip").textContent = PROJECTION_LABELS[projection] || PROJECTION_LABELS.unclear;
+  $("about-projection-note").textContent = note || "";
+  $("about-projection").hidden = !note && projection === "unclear";
+  $("about-views-row").hidden = views.length === 0 && !note;
+
+  const tables = (explanation && explanation.tables) || [];
+  const tableItems = document.createDocumentFragment();
+  for (const table of tables) {
+    tableItems.appendChild(leadItem(TABLE_LABELS[table.kind] || TABLE_LABELS.other, table.summary));
+  }
+  $("about-tables").replaceChildren(tableItems);
+  $("about-tables-row").hidden = tables.length === 0;
+
+  const balloons = explanation && explanation.balloons;
+  $("about-balloons").textContent = balloons || "";
+  $("about-balloons-row").hidden = !balloons;
+}
+
 /** "Why it matters" and "How to think about fixing" on an issue card, when explained. */
 function fillFindingNotes(container, finding) {
   const note = explainNote("findings", finding.key);
@@ -2858,7 +2949,7 @@ function renderAbout(result) {
   aboutIntro.hidden = Boolean(part);
   aboutResult.hidden = !part;
   if (part) {
-    $("about-type").textContent = capitalize(part.type || "other");
+    $("about-type").textContent = PART_TYPE_LABELS[part.type] || PART_TYPE_LABELS.other;
     $("about-name").textContent = part.name_guess || "Unnamed part";
     $("about-summary").textContent = part.summary || "";
     const features = document.createDocumentFragment();
@@ -2869,6 +2960,7 @@ function renderAbout(result) {
     }
     $("about-features").replaceChildren(features);
   }
+  renderAboutRows(explanation);
   const issues = (explanation && explanation.parse_issues) || [];
   const lines = document.createDocumentFragment();
   for (const issue of issues) {
@@ -3262,6 +3354,27 @@ function offerFile(file, source = "uploaded") {
   startRun(file, source);
 }
 
+/** A test-drawing name from the Test results page: lowercase letters, digits, underscores. */
+const SUITE_STEM = /^[a-z0-9_]{1,64}$/;
+
+/** "Try it live": fetch one test drawing's PDF and upload it as a picked file would be. */
+async function trySuiteDrawing(stem) {
+  if (!SUITE_STEM.test(stem) || isBusy()) {
+    return;
+  }
+  try {
+    const response = await fetch(`/eval/pdfs/${stem}.pdf`);
+    if (!response.ok) {
+      toast(`Could not load the test drawing ${stem}.`, { error: true });
+      return;
+    }
+    const blob = await response.blob();
+    offerFile(new File([blob], `${stem}.pdf`, { type: "application/pdf" }), "suite");
+  } catch (problem) {
+    toast(`Could not reach the server: ${problem.message}`, { error: true });
+  }
+}
+
 /** Fetch the sample PDF and upload it exactly as a picked file would be. */
 async function trySample() {
   if (isBusy()) {
@@ -3387,6 +3500,19 @@ async function loadModelMode() {
 }
 
 loadModelMode();
+
+{
+  // Arriving from "Try it live": upload that test drawing once, then drop the parameter so
+  // a reload does not upload it again.
+  const params = new URLSearchParams(window.location.search);
+  const tryStem = params.get("try");
+  if (tryStem !== null) {
+    params.delete("try");
+    const rest = params.toString();
+    history.replaceState(null, "", `${window.location.pathname}${rest ? `?${rest}` : ""}`);
+    trySuiteDrawing(tryStem);
+  }
+}
 
 if (new URLSearchParams(window.location.search).get("demo") === LOW_CONFIDENCE_DEMO) {
   loadDemo();

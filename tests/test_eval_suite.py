@@ -12,8 +12,9 @@ from pathlib import Path
 import pytest
 
 from draftcheck.config import ConfigError
+from draftcheck.explain import parse_explanation
 from draftcheck.llm_client import JSONChatResult, Usage
-from draftcheck.prompts import EXTRACTION_SYSTEM
+from draftcheck.prompts import EXPLAIN_SYSTEM, EXTRACTION_SYSTEM
 from draftcheck.render import load_pages
 from draftcheck.rules import run_rules
 from draftcheck.schema import Drawing, finding_key, parse_drawing
@@ -21,8 +22,13 @@ from scripts import run_eval
 from scripts.drawing_suite import SUITE, build_suite
 from scripts.run_eval import (
     DRAWINGS,
+    EXPLAIN_SCORE_VERSION,
+    SCORE_VERSION,
+    drawing_features,
+    drawing_layout,
     expected_rule_ids,
     load_ground_truth,
+    score_explanation,
     score_extraction,
     score_findings,
     summary_markdown,
@@ -49,6 +55,14 @@ def test_suite_has_the_requested_drawings() -> None:
         "plate_edge_hole",
         "bracket_01",
         "plate_inch_multi",
+        "gear_spur",
+        "hex_nut",
+        "hex_bolt",
+        "flange",
+        "stepped_shaft",
+        "gripper_claw",
+        "block_3view",
+        "bolted_joint",
     }
 
 
@@ -170,16 +184,25 @@ def test_findings_scoring_counts_caught_missed_and_false_alarms() -> None:
 
 
 class ScriptedClient:
-    """Extraction returns a given dict; every correction round proposes ``edits``."""
+    """Extraction returns a given dict; every correction round proposes ``edits``; an
+    explanation request returns ``explanation``."""
 
-    def __init__(self, extraction: dict, edits: list | None = None) -> None:
+    def __init__(
+        self, extraction: dict, edits: list | None = None, explanation: dict | None = None
+    ) -> None:
         self.extraction = extraction
         self.edits = edits or []
+        self.explanation = explanation or {}
         self.calls = 0
 
     def chat_json(self, system: str, user: str, images: list[bytes]) -> JSONChatResult:
         self.calls += 1
-        data = self.extraction if system == EXTRACTION_SYSTEM else {"edits": self.edits}
+        if system == EXTRACTION_SYSTEM:
+            data = self.extraction
+        elif system == EXPLAIN_SYSTEM:
+            data = self.explanation
+        else:
+            data = {"edits": self.edits}
         return JSONChatResult(
             data=data,
             text=json.dumps(data),
@@ -357,3 +380,196 @@ def test_summary_has_a_row_per_run_and_totals(tmp_path: Path) -> None:
     for line in page.splitlines():
         if line.startswith("| plate_"):
             assert line.count("|") == header_cols, line
+
+
+# --- Drawing features and explanation scoring (step 26e) ---------------------------------
+
+
+def test_features_of_the_assembly_and_the_block() -> None:
+    joint = drawing_features("bolted_joint", load_ground_truth("bolted_joint"))
+    assert joint["part_type"] == "bolted_joint_assembly"
+    assert joint["view_kinds"] == ["front", "section"] and joint["sections"] == 1
+    assert joint["tables"] == ["parts_list"] and joint["balloons"] == 5
+    assert joint["gdt_frames"] == {}
+
+    block = drawing_features("block_3view", load_ground_truth("block_3view"))
+    assert block["views"] == 4 and "isometric" in block["view_kinds"]
+    assert block["tables"] == ["hole_table"]
+    assert block["gdt_frames"] == {"flatness": 1, "parallelism": 1}
+
+
+def test_features_of_the_shaft_count_its_section_and_detail() -> None:
+    shaft = drawing_features("stepped_shaft", load_ground_truth("stepped_shaft"))
+    assert (shaft["sections"], shaft["details"]) == (1, 1)
+    assert shaft["notes"] == 3
+
+
+def test_older_drawings_take_their_layout_from_the_recipe() -> None:
+    plate = drawing_layout("plate_001", load_ground_truth("plate_001"))
+    assert plate["part_type"] == "plate" and plate["views"] == [("front", "front")]
+    assert set(plate["dim_views"].values()) == {"front"}
+
+    bracket = drawing_layout("bracket_01", load_ground_truth("bracket_01"))
+    assert bracket["part_type"] == "bracket"
+    assert bracket["views"] == [("front", "front"), ("side", "right_side")]
+    assert bracket["dim_views"]["dim_thickness"] == "side"
+    assert bracket["dim_views"]["dim_hole_diameter"] == "front"
+
+
+def _perfect_explanation(stem: str) -> dict:
+    """An explanation that gets the layout right, built from the ground truth."""
+    truth = load_ground_truth(stem)
+    layout = drawing_layout(stem, truth)
+    kind_names = {"right_side": "right", "left_side": "left"}
+    names = {name: kind_names.get(kind, kind) for name, kind in layout["views"]}
+    part = {"gear_spur": "gear", "bracket_01": "bracket"}.get(stem, "plate")
+    return {
+        "part": {"type": part, "summary": "x"},
+        "views": [{"name": n, "shows": "x"} for n in names.values()],
+        "projection": "third-angle",
+        "dimensions": [
+            {"id": dim_id, "kind": "size", "purpose": "x", "view": names[view]}
+            for dim_id, view in layout["dim_views"].items()
+        ],
+    }
+
+
+@pytest.mark.parametrize("stem", ["gear_spur", "bracket_01", "plate_clean"])
+def test_a_perfect_explanation_scores_full_marks(stem: str) -> None:
+    truth = load_ground_truth(stem)
+    explanation = parse_explanation(_perfect_explanation(stem), parse_drawing(truth), [])
+    score = score_explanation(stem, truth, explanation)
+    assert score["part_type_correct"] is True
+    assert score["views_found"] == score["views_expected"] and score["views_extra"] == 0
+    assert score["dims_view_correct"] == score["dims_with_view"] > 0
+
+
+def test_wrong_type_missing_views_and_misplaced_dimensions_are_counted() -> None:
+    truth = load_ground_truth("gear_spur")
+    data = _perfect_explanation("gear_spur")
+    data["part"]["type"] = "flange"
+    data["views"] = [{"name": "front", "shows": "x"}, {"name": "top", "shows": "x"}]
+    for note in data["dimensions"]:
+        note["view"] = "front"  # the side-view dimensions are now in the wrong view
+    explanation = parse_explanation(data, parse_drawing(truth), [])
+    score = score_explanation("gear_spur", truth, explanation)
+    assert score["part_type_correct"] is False
+    assert (score["views_found"], score["views_expected"], score["views_extra"]) == (1, 2, 1)
+    side = sum(1 for d in truth["dimensions"] if d["view"] == "side")
+    assert score["dims_view_correct"] == score["dims_with_view"] - side
+
+
+def test_a_nut_bolt_or_assembly_is_still_right_as_other() -> None:
+    """"other" stays accepted as a fallback for the three new types."""
+    for stem in ("hex_nut", "hex_bolt", "bolted_joint"):
+        truth = load_ground_truth(stem)
+        explanation = parse_explanation({"part": {"type": "other"}}, parse_drawing(truth), [])
+        assert score_explanation(stem, truth, explanation)["part_type_correct"] is True
+
+
+def test_explain_runs_are_scored_and_cached_without_touching_extraction_runs(
+    tmp_path: Path,
+) -> None:
+    results_path = tmp_path / "r.json"
+    truth = load_ground_truth("gear_spur")
+    client = ScriptedClient(truth, explanation=_perfect_explanation("gear_spur"))
+    quiet = {"results_path": results_path, "client_for": lambda _: client,
+             "log": lambda _: None}
+
+    first = run_eval.run_eval(["gear_spur"], ["baseten"], **quiet)
+    assert "explain" not in first  # not asked for
+    run_before = first["runs"]["gear_spur|baseten"]
+    calls = client.calls
+
+    second = run_eval.run_eval(["gear_spur"], ["baseten"], explain=True, **quiet)
+    assert client.calls == calls + 1  # only the explanation; the cached run is kept
+    assert second["runs"]["gear_spur|baseten"] == run_before
+    assert run_before["score_version"] == SCORE_VERSION
+    entry = second["explain"]["gear_spur|baseten"]
+    assert entry["status"] == "ok" and entry["score_version"] == EXPLAIN_SCORE_VERSION
+    assert entry["part_type_correct"] is True
+    assert entry["dims_view_correct"] == entry["dims_with_view"]
+
+    run_eval.run_eval(["gear_spur"], ["baseten"], explain=True, **quiet)
+    assert client.calls == calls + 1  # both cached now
+
+
+def test_results_hold_drawing_features(tmp_path: Path) -> None:
+    results = run_eval.run_eval(
+        ["bolted_joint"], ["baseten"], results_path=tmp_path / "r.json",
+        client_for=lambda _: ScriptedClient(load_ground_truth("bolted_joint")),
+        log=lambda _: None,
+    )
+    assert results["drawing_features"]["bolted_joint"]["balloons"] == 5
+    saved = json.loads((tmp_path / "r.json").read_text())
+    assert saved["drawing_features"]["bolted_joint"]["tables"] == ["parts_list"]
+
+
+def test_summary_has_features_and_explanation_tables(tmp_path: Path) -> None:
+    truth = load_ground_truth("gear_spur")
+    client = ScriptedClient(truth, explanation=_perfect_explanation("gear_spur"))
+    results = run_eval.run_eval(
+        ["gear_spur"], ["baseten"], results_path=tmp_path / "r.json",
+        client_for=lambda _: client, explain=True, log=lambda _: None,
+    )
+    page = summary_markdown(results, ["gear_spur", "hex_nut"], ["baseten"])
+    assert "## Drawing features" in page
+    assert "| `gear_spur` | spur_gear | 2 (front, right_side) | 0 | 0 | circular_runout |" in page
+    assert "| `hex_nut` | not counted |" in page
+    assert "## Explanations" in page
+    row = next(line for line in page.splitlines() if line.startswith("| `gear_spur` | baseten"))
+    assert "| ok | gear (yes) | 2/2 |" in row
+    assert "| `hex_nut` | baseten | not run |" in page
+
+
+def test_summary_says_explanations_were_not_run() -> None:
+    page = summary_markdown({"runs": {}}, ["plate_clean"], ["baseten"])
+    assert "Not run. Use `python -m scripts.run_eval --explain`." in page
+
+
+@pytest.mark.parametrize("explains", [{}, {"gear_spur|baseten": {"status": "skipped"}}])
+def test_explanation_section_says_it_scores_the_ground_truth(explains: dict) -> None:
+    page = summary_markdown({"runs": {}, "explain": explains}, ["gear_spur"], ["baseten"])
+    lines = page.splitlines()
+    at = lines.index("## Explanations")
+    assert lines[at + 2] == (
+        "Explanations are scored on the ground-truth drawing, so reading errors don't "
+        "affect them."
+    )
+
+
+@pytest.mark.parametrize(
+    ("stem", "part_type", "right"),
+    [
+        ("hex_nut", "fastener", True),
+        ("hex_bolt", "fastener", True),
+        ("bolted_joint", "assembly", True),
+        ("hex_nut", "assembly", False),
+        ("bolted_joint", "fastener", False),
+        ("hex_bolt", "shaft", False),
+    ],
+)
+def test_fasteners_and_the_assembly_expect_their_own_types(
+    stem: str, part_type: str, right: bool
+) -> None:
+    truth = load_ground_truth(stem)
+    explanation = parse_explanation({"part": {"type": part_type}}, parse_drawing(truth), [])
+    assert score_explanation(stem, truth, explanation)["part_type_correct"] is right
+
+
+def test_the_explain_flag_reaches_run_eval(tmp_path: Path, monkeypatch) -> None:
+    seen = {}
+
+    def fake_run_eval(drawings, providers, **kwargs):
+        seen.update(kwargs)
+        return {"runs": {}}
+
+    monkeypatch.setattr(run_eval, "run_eval", fake_run_eval)
+    code = run_eval.main(["--explain", "--drawings", "plate_clean", "--providers", "baseten",
+                          "--results", str(tmp_path / "r.json"),
+                          "--summary", str(tmp_path / "EVAL.md"),
+                          "--snapshot", str(tmp_path / "snapshot")])
+    assert code == 0 and seen["explain"] is True
+    saved = json.loads((tmp_path / "r.json").read_text())
+    assert set(saved["drawing_features"]) == set(DRAWINGS)
+    assert "## Drawing features" in (tmp_path / "EVAL.md").read_text()

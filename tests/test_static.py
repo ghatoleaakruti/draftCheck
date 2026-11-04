@@ -134,7 +134,8 @@ def test_the_pen_font_waits_until_a_pen_note_is_drawn() -> None:
 
 
 def test_the_page_loads_nothing_from_another_site() -> None:
-    for name in ("index.html", "style.css", "app.js", "sheet.js"):
+    for name in ("index.html", "style.css", "app.js", "sheet.js", "eval.html", "eval.css",
+                 "eval.js"):
         source = (STATIC_DIR / name).read_text(encoding="utf-8")
         assert "https://" not in source.replace("http://www.w3.org/2000/svg", ""), name
 
@@ -209,7 +210,7 @@ def test_page_and_redline_use_the_same_lead_ins() -> None:
     assert f'"{AFTER_FIXES_LEAD}"' in source
 
 
-@pytest.mark.parametrize("name", ["app.js", "sheet.js"])
+@pytest.mark.parametrize("name", ["app.js", "sheet.js", "eval.js"])
 def test_page_scripts_parse(name: str) -> None:
     """A syntax error stops the whole page; `node --check` catches it without a browser."""
     import shutil
@@ -323,3 +324,100 @@ def test_explanations_are_requested_and_drawn_as_text() -> None:
 
 def test_cancel_also_stops_an_explanation() -> None:
     assert "if (explainController) explainController.abort();" in read_app_js()
+
+
+def test_the_about_card_has_views_tables_and_balloons_rows() -> None:
+    page = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for element in ("about-views-row", "about-views", "about-projection-note",
+                    "about-tables-row", "about-tables", "about-balloons-row"):
+        assert f'id="{element}"' in page
+    source = read_app_js()
+    assert "function renderAboutRows(" in source
+    assert "renderAboutRows(explanation);" in source
+
+
+def test_dimension_notes_say_which_views_show_them() -> None:
+    source = read_app_js()
+    assert "${whereSeen(note)}" in source
+    assert "also seen in ${joinWords(also)}" in source
+    assert "` · in ${named(note.view)}${tail}`" in source
+
+
+def test_every_part_type_has_a_chip_label() -> None:
+    """The chip names each type the explanation can give, and nothing else."""
+    from draftcheck.prompts import PART_TYPES
+
+    source = read_app_js()
+    block = source[source.index("const PART_TYPE_LABELS = {"):]
+    block = block[: block.index("};")]
+    labels = re.findall(r"^\s+(\w+): \"", block, flags=re.M)
+    assert labels == list(PART_TYPES)
+    assert "PART_TYPE_LABELS[part.type] || PART_TYPE_LABELS.other" in source
+
+
+# ---- Test results page (step 26f) -------------------------------------------------------
+
+EVAL_HTML = STATIC_DIR / "eval.html"
+EVAL_JS = STATIC_DIR / "eval.js"
+
+
+def test_the_header_links_to_the_test_results_page() -> None:
+    page = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert '<a class="topnav-link" href="/eval.html">Test results</a>' in page
+
+
+def test_the_results_page_has_its_parts() -> None:
+    page = EVAL_HTML.read_text(encoding="utf-8")
+    for element in ("eval-method", "eval-empty", "eval-content", "eval-suite", "eval-compare",
+                    "filter-part", "filter-model", "filter-seeded", "filter-multiview",
+                    "eval-grid", "eval-detail", "detail-image", "detail-seeded",
+                    "detail-extraction", "detail-explain", "detail-runs", "detail-try"):
+        assert f'id="{element}"' in page, element
+    assert 'aria-current="page"' in page and 'href="/eval.html"' in page
+    assert '<script src="/eval.js" defer></script>' in page
+    assert "Generated drawings with known answers; scores computed by Python against ground" \
+        in page
+
+
+def test_the_results_page_reads_only_the_snapshot() -> None:
+    """No model calls and no API calls: one static JSON file, so the page is instant."""
+    source = EVAL_JS.read_text(encoding="utf-8")
+    assert 'const SNAPSHOT_URL = "/eval/results.json";' in source
+    assert source.count("fetch(") == 1
+    assert "/api/" not in source
+    assert ".innerHTML" not in source
+
+
+def test_a_missing_snapshot_shows_the_empty_state() -> None:
+    source = EVAL_JS.read_text(encoding="utf-8")
+    assert "if (response.ok) data = await response.json();" in source
+    assert "showEmpty();" in source
+    page = EVAL_HTML.read_text(encoding="utf-8")
+    assert '<section id="eval-empty" class="eval-empty" hidden' in page
+    assert "No test results yet" in page
+
+
+def test_try_it_live_hands_one_named_drawing_to_the_upload_flow() -> None:
+    eval_js = EVAL_JS.read_text(encoding="utf-8")
+    assert "`/?try=${encodeURIComponent(drawing.stem)}`" in eval_js
+    app = read_app_js()
+    assert "const SUITE_STEM = /^[a-z0-9_]{1,64}$/;" in app
+    assert "if (!SUITE_STEM.test(stem) || isBusy())" in app
+    upload = 'offerFile(new File([blob], `${stem}.pdf`, { type: "application/pdf" }), "suite");'
+    assert upload in app
+    # The parameter is dropped once used, so a reload does not upload it again.
+    assert 'params.delete("try");' in app
+
+
+def test_the_results_page_is_served() -> None:
+    from fastapi.testclient import TestClient
+
+    from draftcheck.api import app
+
+    client = TestClient(app)
+    for path, kind in (("/eval.html", "text/html"), ("/eval.js", "javascript"),
+                       ("/eval.css", "text/css")):
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert kind in response.headers["content-type"], path
+    assert "Test results" in client.get("/eval.html").text

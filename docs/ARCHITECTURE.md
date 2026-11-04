@@ -77,7 +77,7 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/limits.py` | What one demo deployment is willing to spend, and on whom. `Limits.from_env()` holds every number (per-IP uploads and fixes per hour, model calls per day, run retention, sweep interval, `TRUST_PROXY`); `UsageLimiter` counts them in memory over sliding windows and raises `LimitExceeded`, which `api.py` turns into a `429`; `client_ip(...)` decides which address a request is counted against; `sweep_runs(root, max_age_hours)` deletes stale run folders and `Cleaner` keeps that to once an hour — see §4.12 | **BUILT** |
 | `draftcheck/static/` | The browser page, served at `/`: `index.html`, `style.css`, `app.js`, `sheet.js` (the drawing primitives for the sheet: scan band, revision clouds, pen notes, stamp — §4.17), and `fonts/` (Archivo, JetBrains Mono, Nanum Pen Script, each with its OFL licence). Plain HTML, CSS, and JavaScript — no framework, no build step, nothing loaded from a CDN. Laid out as "the checker's desk" (§4.15): a header with a five-stage stepper and a model pill, the drawing as paper on a dark desk with an SVG overlay in image pixels, and a tabbed review panel (Extracted, Issues, Corrections) with one primary button whose label follows the stage. The tables are editable (§4.9), linked to the drawing by item id, and checked and fixed through the same endpoints as before. Cells are written with `textContent` or as an input's `value`, so model output is never treated as markup | **BUILT** (upload + view + edit + check + fix + redline) |
 | `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch. The ground truth is written in `schema.py`'s field names — plus `bbox_convention` and `seeded_errors` — so it parses as a `Drawing` and doubles as the target an extraction is scored against. `--suite` builds the evaluation suite instead (below) and leaves plate_001 alone | **BUILT** |
-| `scripts/drawing_suite.py` | The evaluation suite: eight drawings described as `DrawingSpec` data and drawn by one renderer, so each sheet and its ground truth come from the same spec. Every seeded error names its `rule_id` and exact `finding_key` — see §4.18 | **BUILT** |
+| `scripts/drawing_suite.py` | The evaluation suite: sixteen drawings described as data — `DrawingSpec` for plates (a rectangle with holes) and `PartSpec` for other parts (named orthographic views, a shape list per view, point-to-point dimensions, leader callouts) — so each sheet and its ground truth come from the same spec. Every seeded error names its `rule_id` and exact `finding_key` — see §4.18 | **BUILT** |
 | `scripts/run_eval.py` | Runs each suite drawing × provider through render → extract → rules → correction loop, one call at a time, scores it against the ground truth in plain Python, caches each finished run in `outputs/eval/results.json`, and writes `docs/EVAL.md` — see §4.18 | **BUILT** |
 | `scripts/smoke_test.py` | One-shot check that the configured model answers over the network; `--provider baseten\|meta` picks which one | **BUILT** |
 | `scripts/extract_spike.py` | One extraction pass on a drawing: renders it, calls `chat_json`, and writes `outputs/spike/<name>.raw.txt`, `.json`, and `.overlay.png` (red boxes = model bboxes, green = ground truth from `--gt`). A look-at-it tool; it decides nothing | **BUILT** |
@@ -1176,7 +1176,7 @@ the first time a note is written, and the notes are measured again once it arriv
 
 ### 4.18 Evaluation suite — BUILT (step 22)
 
-**Drawings.** `python -m scripts.make_sample_drawing --suite` writes eight sheets to
+**Drawings.** `python -m scripts.make_sample_drawing --suite` writes sixteen sheets to
 `samples/generated/` (PDF, `.gt.json`, PNG preview), next to the unchanged plate_001:
 
 | Drawing | What is seeded | Expected findings |
@@ -1189,13 +1189,53 @@ the first time a note is written, and the notes are measured again once it arriv
 | plate_edge_hole | A Ø6 hole centred 5 mm from the right edge | MFG-001 |
 | bracket_01 | Front + side view (hidden lines), 30/60/30 chain under an overall 120, notes, full title block; position frame A\|B\|D with D undefined, flatness to A, Ø6 hole 5 from the edge | GDT-001, GDT-003, MFG-001 |
 | plate_inch_multi | Inches, 4 holes, position + perpendicularity frames; datum B placed twice | GDT-002 |
+| gear_spur | Spur gear, 24 teeth module 2: front (involute teeth, pitch circle as a chain line, keyed bore) + right side (face, hub); circular runout on the OD to datum A on the bore | none |
+| hex_nut | M10x1.5 nut: top (hexagon, thread circles) + front (faces, chamfer curves, hidden thread); across flats, across corners (reference), thickness | none |
+| hex_bolt | M8x1.25 x 40 bolt: front (head, shank, thread, chamfered tip) + left-side end view (hexagon); head height, across flats, length under head, thread length | none |
+| flange | Front (6X Ø9 on a basic Ø76 bolt circle, bore, cutting-plane line A-A) + hatched SECTION A-A (raised face, thickness); perpendicularity of the bore to A; hole position frame A\|B\|C with C undefined | GDT-001 |
+| stepped_shaft | Front (Ø25 / Ø40 / Ø30, keyway, chamfers, R1 fillet, cutting-plane line B-B, detail circle C) + hatched SECTION B-B at 2:1 + DETAIL C at 4:1; runout of the Ø30 to datum A on the Ø25; no general tolerance and the Ø40 prints none | DIM-001 |
+| gripper_claw | Front (irregular outline, 2X Ø6.5, R12 jaw arc on basic dimensions, 15° taper) + top (thickness, 1 x 45° chamfer); profile of a surface on the jaw to A\|B | none |
+| block_3view | Front (through slot), top (counterbored hole with ⌴/↧ callout, 4 tapped holes labelled A1–A4), right (chamfer), small isometric; HOLE TABLE; parallelism of the top to A; a flatness frame on the bottom that references A | GDT-003 |
+| bolted_joint | Assembly: front view (plates, bolt head, cutting-plane line) + SECTION A-A (plates hatched 45°/135°, bolt, washer, nut unsectioned); balloons 1–5; PARTS LIST on the title block; overlap, joint thickness, (41.4) stack height | none |
+
+**Part sheets (step 26).** The last three use `PartSpec`, the second recipe. Each view is a
+`PartView` (name, kind, page origin, scale) placed third-angle and aligned with the others;
+geometry is a list of `Shape`s (path, circle, arc, or the "bow" chamfer curve) in line
+styles visible / thin / hidden / center. `PointDim` runs between any two feature points,
+so each extension line starts at its own feature; a span too narrow for its text gets
+arrows outside and the text beside it. A `Callout` is a leader and shoulder, and can hang a
+datum feature symbol from the shoulder (datum A on the gear bore). Every part sheet has a
+title block with a third-angle projection symbol and a GENERAL NOTES block. Their ground
+truth adds `expected_part_type`, `views` (`{name, kind}`), and a `view` on every dimension;
+the schema ignores these keys. The new fields on `DrawingSpec` (`projection`,
+`notes_heading`) default to off, so the first eight sheets are byte-identical.
+
+Step 26b added, all as optional `PartSpec` fields so earlier sheets are unchanged:
+`hatch` shapes (45° section lining clipped to a polygon), `CuttingPlane` (thick chain line
+whose ends turn into arrows along the direction of sight, lettered), view `label` lines
+("SECTION A-A", "DETAIL C / SCALE 4:1"), `AngleDim` (arc between two rays; ground truth
+`feature_type: "angular"`), `SurfaceDatum` (triangle base on an edge), a `datum` on a
+`PointDim` (in line with the dimension line, so it names the feature of size), `basic`
+callouts and dimensions (boxed), a callout `datum_at` (to hang a datum from a frame), and
+the profile-of-a-surface symbol. A frame's leader now leaves its bottom edge when the
+feature is below the frame.
+
+Step 26c added `Table` (a ruled table; `kind` "hole_table" or "parts_list", header on top
+or, for a parts list on the title block, at the bottom), `Balloon` (numbered circle,
+leader, dot), multi-line callouts whose `[CB]`/`[DP]` tokens draw the counterbore and depth
+symbols (Helvetica has no glyphs for them; ground truth spells them ⌴ and ↧) and whose
+`extras` become their own dimensions, a 135° hatch for the second part in a section, the
+parallelism symbol, and `iso()` / `iso_edges()` / `iso_circle()` to draw an isometric from
+3D edges. Ground truth gains `hole_table` (each row also becomes X, Y, and thread
+dimensions measured in the named view), `parts_list`, and `balloons` keys — only on sheets
+that have them, and outside the schema, so the rules ignore them.
 
 **Sanity test.** `tests/test_eval_suite.py` runs the rules on every ground truth and requires
 exactly the seeded findings — by `finding_key`, so the right items too — and nothing else.
 That validates the generator and the rules before a model is involved. plate_001's ground
 truth predates `rule_id`, so `run_eval.LEGACY_ERROR_RULES` maps its error type to GDT-001.
 
-**Running.** `python -m scripts.run_eval [--drawings …] [--providers …] [--force]`. For each
+**Running.** `python -m scripts.run_eval [--drawings …] [--providers …] [--force] [--explain]`. For each
 pair it renders page 1 with the server's `render_settings`, calls `extract_page`, runs the
 rules, and runs `agent.correct`, all through `api.guard_for` — the same time limit and
 Baseten→Meta fallback as a live request. Pairs run strictly one after another. Each result
@@ -1220,6 +1260,34 @@ of that run.
   older scoring is run again rather than mixed in (the summary shows it as stale).
   Rounds, edits applied and rejected, latency (extract, fix, total), and whether any call
   fell back are recorded alongside.
+
+**Explanations (`--explain`, step 26e).** For each pair the "About this drawing"
+explanation (§4.20) is also requested — on the drawing's *ground truth* and the rules'
+findings on it, so it cites the ground-truth ids and its score does not depend on the
+extraction (`run_explain_one`). `score_explanation` scores it in plain Python:
+
+- Part type: right when it is in `PART_TYPE_MATCHES` for the drawing's
+  `expected_part_type`. The nut and bolt expect "fastener" and the bolted joint
+  "assembly", with "other" still accepted for those three as a fallback.
+- Views: the explanation's view names against the sheet's view kinds (mapped by
+  `VIEW_KIND_NAMES`, e.g. `right_side` → "right"), as multisets; extra names are counted.
+- Dimensions in the right view: of the dimensions with a known view, those whose note names
+  it; a missing note or view counts as wrong.
+
+The first nine drawings' ground truth has no views or part type and is kept unchanged, so
+`drawing_layout` reads theirs from the recipe (a plate is one front view; bracket_01 adds a
+right side view and its thickness is placed there). Explanation results are cached under
+`results["explain"]` with their own `EXPLAIN_SCORE_VERSION`; `SCORE_VERSION` and the
+`runs` entries are untouched, so existing cached results stay valid. EVAL.md gains an
+"Explanations" table with per-provider totals, or a line saying it has not been run; the
+section opens by saying explanations are scored on the ground-truth drawing, so reading
+errors don't affect them.
+
+**Drawing features.** `drawing_features` counts what each drawing's ground truth contains:
+part type, views and their kinds, sections, details, GD&T frames by characteristic, datums,
+dimensions, tables, balloons, and notes. It is written to `results["drawing_features"]` and
+to a "Drawing features" table in EVAL.md, and recomputed on every run (it comes from the
+ground truth, not a model). Rows in the two new tables put the drawing name in backticks.
 
 `docs/EVAL.md` is regenerated from the results file at the end of every run, with one row
 per drawing and provider and a totals row per provider.
@@ -1283,6 +1351,19 @@ each one is and why it is likely there, what each feature control frame controls
 that matters for function, the role of each datum, and, once the drawing has been checked,
 why each finding matters and how a student should think about fixing it.
 
+**Views, projection, tables (step 26d).** The answer also describes the sheet's layout:
+`views` (each `{name, label, shows}`; `name` is one of `prompts.VIEW_NAMES` — front, top,
+right, left, bottom, rear, section, detail, isometric, other — and `label` is the printed
+one, e.g. "SECTION A-A"), `projection` (`first-angle`, `third-angle`, or `unclear`) with a
+one- or two-sentence `projection_note` for a student, `tables` (each `{kind, summary}`;
+`kind` is one of `prompts.TABLE_KINDS` — parts_list, hole_table, revision, notes, other),
+and a `balloons` sentence. Each dimension note may say which view it is placed in (`view`)
+and which other views show the feature (`also_seen_in`). The prompt asks the model to read
+view labels, cutting-plane lines, and the projection symbol, and to say "unclear" rather
+than guess. On the page the About card gains a Views row (each view and what it shows, then
+the projection chip and note), a Tables row, and a Balloons row, each hidden when empty;
+a dimension's note ends "· in front view, also seen in top view".
+
 **A teaching aid, not a check.** The explanation is written by the model and is shown
 labelled "AI explanation · not checked by the rules" once in every section that shows one.
 The rules never read it, the extraction prompt is unchanged, and nothing in it is ever
@@ -1295,16 +1376,24 @@ one entry at a time, and drops any entry whose id (dimensions, frames), label (d
 key (findings) is not on the drawing or among the findings that were sent — and any second
 entry for the same item. Each drop is a line in the explanation's `parse_issues`, which the
 card lists. Datum notes are accepted only for labels a datum feature symbol on the drawing
-actually carries: a letter cited in a frame but never defined gets no story. An unknown part
-type becomes `other`; a confidence is clamped to 0–1.
+actually carries: a letter cited in a frame but never defined gets no story. The part type
+is one of `prompts.PART_TYPES` (plate, bracket, flange, shaft, gear, housing, cover, spacer,
+block, fastener, assembly, other), each with its own chip on the page; an unknown one becomes
+`other`; a confidence is clamped to 0–1. A view whose name is not in
+`VIEW_NAMES` is dropped. A dimension's `view` and `also_seen_in` may only name views the
+explanation's own `views` list describes: any other name is cleared and recorded (the
+dimension's note itself is kept, since its purpose is about a real dimension), and a repeat
+of its own view is removed. An unknown projection becomes `unclear` (recorded); an unknown
+table kind becomes `other`.
 
 **What it explains.** The confirmed drawing and its findings when a check has run
 (`confirmed.json`, `findings.json`), otherwise the extraction with no findings. The reply
 says which (`based_on`).
 
 **Cached.** The answer is saved in the run folder as `explain.json`, with a fingerprint
-(`explain.explanation_fingerprint`: a hash of the drawing's items and the findings' keys
-and messages). Asking again about the same data returns the saved answer with
+(`explain.explanation_fingerprint`: a hash of `EXPLANATION_VERSION`, the drawing's items,
+and the findings' keys and messages; the version is bumped when the answer's shape changes,
+so an `explain.json` saved under an older shape is explained afresh). Asking again about the same data returns the saved answer with
 `cached: true` and spends no model call and no limit slot. When the confirmed data changes,
 the next request explains afresh. If the student has already asked for an explanation on a
 run, the page asks again after each check, so the issue cards get their notes.
@@ -1317,7 +1406,44 @@ way (`_unless_disconnected`), and nothing is written.
 
 **Fake model.** In fake-model mode (§4.16) the call returns
 `fake_model.SCRIPTED_EXPLANATION`, a hand-written explanation of plate_001, with its note
-on GDT-001 included only when that finding was sent.
+on GDT-001 included only when that finding was sent. It describes plate_001 honestly: one
+front view, projection `unclear` (one view, no projection symbol), no tables, a balloons
+sentence saying there are none, and every dimension in the front view with nothing in `also_seen_in`.
+
+### 4.21 "Test results": the eval as a page — BUILT (step 26f)
+
+**What it is.** `/eval.html`, linked from the header as "Test results", shows the
+evaluation for a demo: headline numbers across the suite (drawings, part types, views,
+GD&T frames, seeded issues, runs finished) and both models side by side (issues caught,
+false alarms, fixes verified, part types recognized, fallback runs, average latency); a
+gallery of every drawing with its thumbnail, part type chip, feature chips (views,
+sections, details, GD&T, tables, balloons), and per-model badges; filters by part type,
+model, seeded or clean, and multi-view; and a detail panel per drawing (a larger image, each
+seeded error and which model caught it, reading scores, view and part-type scores,
+latency, fallback). The page's one-line method note says the drawings have known answers
+and the scores are computed by Python against ground truth.
+
+**Instant, and nothing live.** `eval.js` fetches one static file, `/eval/results.json`,
+and nothing else: no model call and no API call. Everything is built with DOM calls and
+`textContent`. A missing or empty snapshot shows an empty state with the command that makes
+one, not an error.
+
+**The snapshot.** `scripts/run_eval.py` writes it after every run
+(`write_snapshot` / `build_snapshot`), or alone with `--snapshot-only` (no model calls;
+`docs/EVAL.md` and the results file are left alone). It is built field by field from a
+whitelist — scores, drawing features, part type, model, latency, fallback, and per seeded
+error which model caught it — so a run's `reason`, parse issues, findings, round errors,
+and anything from the environment can never reach it; a false alarm is kept as its rule id
+only, since the item id is the model's own name. Each status is `ok`, `failed`,
+`skipped`, `stale` (scored under an older version), or `not run`. Beside it go a 360 px
+thumbnail and a 1400 px image of each drawing, and the drawing's PDF. They are our own
+generated drawings, so publishing them is fine.
+
+**Try it live.** The detail panel's button opens `/?try=<stem>`. `app.js` accepts only a
+name of lowercase letters, digits, and underscores, drops the parameter from the address
+so a reload does not repeat it, fetches `/eval/pdfs/<stem>.pdf`, and hands it to
+`offerFile` exactly as a picked file — the normal upload flow, limits and all. The desk
+labels it "test drawing".
 
 ## 5. Repo layout (what exists today)
 
@@ -1354,13 +1480,18 @@ draftCheck/
 │       ├── style.css
 │       ├── app.js
 │       ├── sheet.js            # drawing on the sheet: scan, clouds, pen notes, stamp
+│       ├── eval.html, eval.css, eval.js  # the "Test results" page (§4.21)
+│       ├── eval/               # its snapshot, written by scripts/run_eval.py (§4.21)
+│       │   ├── results.json    # scores and features only, copied field by field
+│       │   ├── thumbs/, sheets/  # each drawing at 360 px and 1400 px
+│       │   └── pdfs/           # each drawing, for "Try it live"
 │       └── fonts/              # Archivo, JetBrains Mono, Nanum Pen Script + OFL.txt each
 ├── samples/
 │   └── generated/              # synthetic drawings, regenerable from scripts/
 │       ├── plate_001.pdf       # the drawing
 │       ├── plate_001.gt.json   # ground truth in schema.py field names, parses as a Drawing
 │       ├── plate_001.png       # rendered preview
-│       └── <suite stem>.{pdf,gt.json,png}  # the eight eval drawings (§4.18)
+│       └── <suite stem>.{pdf,gt.json,png}  # the sixteen eval drawings (§4.18)
 ├── outputs/                    # git-ignored; spike dumps, overlays, redlines, eval/results.json
 ├── scripts/
 │   ├── __init__.py
@@ -1380,6 +1511,7 @@ draftCheck/
 │   ├── test_edit_display.py    # short before/after strings and pen labels
 │   ├── test_edits.py
 │   ├── test_eval_suite.py      # generator, ground-truth sanity, eval scoring (no network)
+│   ├── test_drawing_parts.py   # part recipes (gear, nut, bolt): geometry, views, ground truth
 │   ├── test_explain.py         # explanation validation, fingerprint, endpoint, cache, limit
 │   ├── test_limits.py
 │   ├── test_memory.py

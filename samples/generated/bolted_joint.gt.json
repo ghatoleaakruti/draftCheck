@@ -1,0 +1,193 @@
+{
+  "units": "mm",
+  "general_tolerance": {
+    "linear_plus_minus": 0.5,
+    "text_raw": "UNLESS OTHERWISE SPECIFIED: ±0.5"
+  },
+  "title_block": {
+    "title": "BOLTED JOINT ASSY",
+    "drawing_number": "DC-0310",
+    "revision": "A",
+    "material": "SEE PARTS LIST",
+    "scale": "1:1"
+  },
+  "expected_part_type": "bolted_joint_assembly",
+  "views": [
+    {
+      "name": "front",
+      "kind": "front"
+    },
+    {
+      "name": "section_a_a",
+      "kind": "section"
+    }
+  ],
+  "bbox_convention": "[x0, y0, x1, y1] normalized 0..1, origin top-left, covering the annotation's text or symbol",
+  "datums": [],
+  "dimensions": [
+    {
+      "id": "dim_plate_overlap",
+      "text_raw": "40 ±0.5",
+      "value": 40.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.5,
+      "tol_minus": 0.5,
+      "from_ref": "lower_plate_end",
+      "to_ref": "upper_plate_end",
+      "bbox": [
+        0.3576,
+        0.4146,
+        0.4,
+        0.4314
+      ],
+      "view": "front"
+    },
+    {
+      "id": "dim_stack_height",
+      "text_raw": "(41.4)",
+      "value": 41.4,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": true,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "bolt_head_top",
+      "to_ref": "bolt_tip",
+      "bbox": [
+        0.6228,
+        0.5547,
+        0.6359,
+        0.5974
+      ],
+      "view": "section_a_a"
+    },
+    {
+      "id": "dim_joint_thickness",
+      "text_raw": "22 ±0.2",
+      "value": 22.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.2,
+      "tol_minus": 0.2,
+      "from_ref": "upper_plate_top",
+      "to_ref": "lower_plate_bottom",
+      "bbox": [
+        0.1218,
+        0.5333,
+        0.1348,
+        0.5882
+      ],
+      "view": "section_a_a"
+    }
+  ],
+  "fcfs": [],
+  "notes": [
+    "1. TIGHTEN BOLT TO 45 Nm.",
+    "2. FASTENERS ARE SHOWN UNSECTIONED.",
+    "3. BREAK SHARP EDGES ON PLATES."
+  ],
+  "parts_list": [
+    {
+      "item": 1,
+      "part_number": "DC-0311",
+      "description": "PLATE, UPPER 10 THK",
+      "qty": 1,
+      "material": "AL 6061-T6"
+    },
+    {
+      "item": 2,
+      "part_number": "DC-0312",
+      "description": "PLATE, LOWER 12 THK",
+      "qty": 1,
+      "material": "AL 6061-T6"
+    },
+    {
+      "item": 3,
+      "part_number": "HB-M10-35",
+      "description": "HEX BOLT M10x1.5 x 35",
+      "qty": 1,
+      "material": "STEEL CL 8.8"
+    },
+    {
+      "item": 4,
+      "part_number": "WS-M10",
+      "description": "PLAIN WASHER M10",
+      "qty": 1,
+      "material": "STEEL"
+    },
+    {
+      "item": 5,
+      "part_number": "HN-M10",
+      "description": "HEX NUT M10x1.5",
+      "qty": 1,
+      "material": "STEEL CL 8"
+    }
+  ],
+  "balloons": [
+    {
+      "id": "balloon_1",
+      "item": 1,
+      "view": "section_a_a",
+      "bbox": [
+        0.1957,
+        0.4248,
+        0.221,
+        0.4575
+      ]
+    },
+    {
+      "id": "balloon_2",
+      "item": 2,
+      "view": "section_a_a",
+      "bbox": [
+        0.5556,
+        0.6209,
+        0.5808,
+        0.6536
+      ]
+    },
+    {
+      "id": "balloon_3",
+      "item": 3,
+      "view": "section_a_a",
+      "bbox": [
+        0.2588,
+        0.4444,
+        0.2841,
+        0.4771
+      ]
+    },
+    {
+      "id": "balloon_4",
+      "item": 4,
+      "view": "section_a_a",
+      "bbox": [
+        0.4798,
+        0.6895,
+        0.5051,
+        0.7222
+      ]
+    },
+    {
+      "id": "balloon_5",
+      "item": 5,
+      "view": "section_a_a",
+      "bbox": [
+        0.2778,
+        0.6732,
+        0.303,
+        0.7059
+      ]
+    }
+  ],
+  "seeded_errors": []
+}
