@@ -1,0 +1,250 @@
+{
+  "units": "in",
+  "general_tolerance": {
+    "linear_plus_minus": 0.01,
+    "text_raw": "UNLESS OTHERWISE SPECIFIED: ±.010"
+  },
+  "title_block": {
+    "title": "COVER PLATE",
+    "drawing_number": "DC-0203",
+    "revision": "A",
+    "material": "STEEL 1018",
+    "scale": "1:1"
+  },
+  "bbox_convention": "[x0, y0, x1, y1] normalized 0..1, origin top-left, covering the annotation's text or symbol",
+  "datums": [
+    {
+      "id": "datum_a",
+      "label": "A",
+      "bbox": [
+        0.4811,
+        0.5752,
+        0.5038,
+        0.6209
+      ]
+    },
+    {
+      "id": "datum_b",
+      "label": "B",
+      "bbox": [
+        0.2298,
+        0.3399,
+        0.2652,
+        0.3693
+      ]
+    },
+    {
+      "id": "datum_b_dup",
+      "label": "B",
+      "bbox": [
+        0.7197,
+        0.3399,
+        0.7551,
+        0.3693
+      ]
+    }
+  ],
+  "dimensions": [
+    {
+      "id": "dim_overall_width",
+      "text_raw": "4.00 ±.010",
+      "value": 4.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.01,
+      "tol_minus": 0.01,
+      "from_ref": "left_edge",
+      "to_ref": "right_edge",
+      "bbox": [
+        0.4624,
+        0.6294,
+        0.5224,
+        0.6462
+      ]
+    },
+    {
+      "id": "dim_overall_height",
+      "text_raw": "3.00 ±.010",
+      "value": 3.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.01,
+      "tol_minus": 0.01,
+      "from_ref": "bottom_edge",
+      "to_ref": "top_edge",
+      "bbox": [
+        0.1913,
+        0.3157,
+        0.2043,
+        0.3934
+      ]
+    },
+    {
+      "id": "dim_hole1_x",
+      "text_raw": ".50",
+      "value": 0.5,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": true,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "left_edge",
+      "to_ref": "hole_1_center",
+      "bbox": [
+        0.2797,
+        0.0804,
+        0.3074,
+        0.1078
+      ]
+    },
+    {
+      "id": "dim_hole2_x",
+      "text_raw": "3.50",
+      "value": 3.5,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": true,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "left_edge",
+      "to_ref": "hole_2_center",
+      "bbox": [
+        0.4467,
+        0.0444,
+        0.4814,
+        0.0719
+      ]
+    },
+    {
+      "id": "dim_hole1_y",
+      "text_raw": ".50",
+      "value": 0.5,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": true,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "bottom_edge",
+      "to_ref": "hole_1_center",
+      "bbox": [
+        0.774,
+        0.5205,
+        0.7952,
+        0.5563
+      ]
+    },
+    {
+      "id": "dim_hole3_y",
+      "text_raw": "2.50",
+      "value": 2.5,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": true,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "bottom_edge",
+      "to_ref": "hole_3_center",
+      "bbox": [
+        0.8056,
+        0.3689,
+        0.8268,
+        0.4138
+      ]
+    },
+    {
+      "id": "dim_hole_diameter",
+      "text_raw": "4X Ø.250 ±.005",
+      "value": 0.25,
+      "unit": null,
+      "feature_type": "diameter",
+      "quantity": 4,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.005,
+      "tol_minus": 0.005,
+      "from_ref": null,
+      "to_ref": null,
+      "bbox": [
+        0.0657,
+        0.6516,
+        0.1589,
+        0.6693
+      ]
+    }
+  ],
+  "fcfs": [
+    {
+      "id": "fcf_position_holes",
+      "text_raw": "position | Ø.010 (M) | A | B",
+      "characteristic": "position",
+      "tolerance": 0.01,
+      "diameter_zone": true,
+      "material_modifier": "MMC",
+      "datum_refs": [
+        {
+          "label": "A",
+          "modifier": null
+        },
+        {
+          "label": "B",
+          "modifier": null
+        }
+      ],
+      "bbox": [
+        0.0631,
+        0.6961,
+        0.2121,
+        0.7386
+      ]
+    },
+    {
+      "id": "fcf_perpendicularity_holes",
+      "text_raw": "perpendicularity | .005 | A",
+      "characteristic": "perpendicularity",
+      "tolerance": 0.005,
+      "diameter_zone": false,
+      "material_modifier": null,
+      "datum_refs": [
+        {
+          "label": "A",
+          "modifier": null
+        }
+      ],
+      "bbox": [
+        0.0631,
+        0.7386,
+        0.1717,
+        0.781
+      ]
+    }
+  ],
+  "notes": [],
+  "seeded_errors": [
+    {
+      "id": "err_1",
+      "rule_id": "GDT-002",
+      "finding_key": "GDT-002@datum_b,datum_b_dup",
+      "description": "Datum B is placed twice: on the left edge and again on the right edge.",
+      "bbox": [
+        0.7197,
+        0.3399,
+        0.7551,
+        0.3693
+      ]
+    }
+  ]
+}

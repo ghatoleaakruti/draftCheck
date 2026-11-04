@@ -1,0 +1,187 @@
+{
+  "units": "mm",
+  "general_tolerance": {
+    "linear_plus_minus": 0.1,
+    "text_raw": "UNLESS OTHERWISE SPECIFIED: ±0.1"
+  },
+  "title_block": {
+    "title": "BASE PLATE",
+    "drawing_number": "DC-0011",
+    "revision": "A",
+    "material": "AL 6061-T6",
+    "scale": "1:1"
+  },
+  "bbox_convention": "[x0, y0, x1, y1] normalized 0..1, origin top-left, covering the annotation's text or symbol",
+  "datums": [
+    {
+      "id": "datum_a",
+      "label": "A",
+      "bbox": [
+        0.4432,
+        0.5588,
+        0.4659,
+        0.6046
+      ]
+    },
+    {
+      "id": "datum_b",
+      "label": "B",
+      "bbox": [
+        0.2172,
+        0.299,
+        0.2525,
+        0.3284
+      ]
+    }
+  ],
+  "dimensions": [
+    {
+      "id": "dim_overall_width",
+      "text_raw": "100 ±0.2",
+      "value": 100.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.2,
+      "tol_minus": 0.2,
+      "from_ref": "left_edge",
+      "to_ref": "right_edge",
+      "bbox": [
+        0.4803,
+        0.6131,
+        0.5298,
+        0.6299
+      ]
+    },
+    {
+      "id": "dim_overall_height",
+      "text_raw": "60 ±0.2",
+      "value": 60.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.2,
+      "tol_minus": 0.2,
+      "from_ref": "bottom_edge",
+      "to_ref": "top_edge",
+      "bbox": [
+        0.1913,
+        0.3353,
+        0.2043,
+        0.3902
+      ]
+    },
+    {
+      "id": "dim_hole1_x",
+      "text_raw": "20",
+      "value": 20.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": true,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "left_edge",
+      "to_ref": "hole_1_center",
+      "bbox": [
+        0.291,
+        0.1016,
+        0.3151,
+        0.1291
+      ]
+    },
+    {
+      "id": "dim_hole2_x",
+      "text_raw": "80",
+      "value": 80.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": true,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "left_edge",
+      "to_ref": "hole_2_center",
+      "bbox": [
+        0.4425,
+        0.0575,
+        0.4666,
+        0.085
+      ]
+    },
+    {
+      "id": "dim_hole_y",
+      "text_raw": "30",
+      "value": 30.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": true,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "bottom_edge",
+      "to_ref": "hole_centers",
+      "bbox": [
+        0.8119,
+        0.4452,
+        0.8331,
+        0.4764
+      ]
+    },
+    {
+      "id": "dim_hole_diameter",
+      "text_raw": "2X Ø8 ±0.1",
+      "value": 8.0,
+      "unit": null,
+      "feature_type": "diameter",
+      "quantity": 2,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.1,
+      "tol_minus": 0.1,
+      "from_ref": null,
+      "to_ref": null,
+      "bbox": [
+        0.0783,
+        0.6598,
+        0.1457,
+        0.6775
+      ]
+    }
+  ],
+  "fcfs": [
+    {
+      "id": "fcf_position_holes",
+      "text_raw": "position | Ø0.25 (M) | A | B",
+      "characteristic": "position",
+      "tolerance": 0.25,
+      "diameter_zone": true,
+      "material_modifier": "MMC",
+      "datum_refs": [
+        {
+          "label": "A",
+          "modifier": null
+        },
+        {
+          "label": "B",
+          "modifier": null
+        }
+      ],
+      "bbox": [
+        0.0758,
+        0.6961,
+        0.2247,
+        0.7386
+      ]
+    }
+  ],
+  "notes": [],
+  "seeded_errors": []
+}

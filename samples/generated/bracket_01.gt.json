@@ -1,0 +1,352 @@
+{
+  "units": "mm",
+  "general_tolerance": {
+    "linear_plus_minus": 0.1,
+    "text_raw": "UNLESS OTHERWISE SPECIFIED: ±0.1"
+  },
+  "title_block": {
+    "title": "MOUNTING BRACKET",
+    "drawing_number": "DC-0102",
+    "revision": "B",
+    "material": "AL 6061-T6",
+    "scale": "1:1"
+  },
+  "bbox_convention": "[x0, y0, x1, y1] normalized 0..1, origin top-left, covering the annotation's text or symbol",
+  "datums": [
+    {
+      "id": "datum_b",
+      "label": "B",
+      "bbox": [
+        0.4179,
+        0.5425,
+        0.4407,
+        0.5882
+      ]
+    },
+    {
+      "id": "datum_a",
+      "label": "A",
+      "bbox": [
+        0.8018,
+        0.2704,
+        0.8371,
+        0.2998
+      ]
+    }
+  ],
+  "dimensions": [
+    {
+      "id": "dim_overall_width",
+      "text_raw": "120 ±0.2",
+      "value": 120.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.2,
+      "tol_minus": 0.2,
+      "from_ref": "left_edge",
+      "to_ref": "right_edge",
+      "bbox": [
+        0.4045,
+        0.5967,
+        0.454,
+        0.6136
+      ]
+    },
+    {
+      "id": "dim_overall_height",
+      "text_raw": "60 ±0.2",
+      "value": 60.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.2,
+      "tol_minus": 0.2,
+      "from_ref": "bottom_edge",
+      "to_ref": "top_edge",
+      "bbox": [
+        0.0777,
+        0.3434,
+        0.0907,
+        0.3984
+      ]
+    },
+    {
+      "id": "dim_hole1_x",
+      "text_raw": "30",
+      "value": 30.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": true,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "left_edge",
+      "to_ref": "hole_1_center",
+      "bbox": [
+        0.2184,
+        0.1343,
+        0.2425,
+        0.1618
+      ]
+    },
+    {
+      "id": "dim_hole_pitch",
+      "text_raw": "60",
+      "value": 60.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": true,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "hole_1_center",
+      "to_ref": "hole_2_center",
+      "bbox": [
+        0.4172,
+        0.1343,
+        0.4414,
+        0.1618
+      ]
+    },
+    {
+      "id": "dim_hole2_x",
+      "text_raw": "30",
+      "value": 30.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": true,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "hole_2_center",
+      "to_ref": "right_edge",
+      "bbox": [
+        0.6161,
+        0.1343,
+        0.6402,
+        0.1618
+      ]
+    },
+    {
+      "id": "dim_hole_y",
+      "text_raw": "30",
+      "value": 30.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": true,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "bottom_edge",
+      "to_ref": "hole_centers",
+      "bbox": [
+        0.1111,
+        0.4411,
+        0.1323,
+        0.4723
+      ]
+    },
+    {
+      "id": "dim_hole3_x",
+      "text_raw": "5",
+      "value": 5.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "hole_3_center",
+      "to_ref": "right_edge",
+      "bbox": [
+        0.6799,
+        0.5592,
+        0.6869,
+        0.576
+      ]
+    },
+    {
+      "id": "dim_hole3_y",
+      "text_raw": "40",
+      "value": 40.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "bottom_edge",
+      "to_ref": "hole_3_center",
+      "bbox": [
+        0.7241,
+        0.419,
+        0.7371,
+        0.4372
+      ]
+    },
+    {
+      "id": "dim_thickness",
+      "text_raw": "10",
+      "value": 10.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "front_face",
+      "to_ref": "back_face",
+      "bbox": [
+        0.7727,
+        0.1392,
+        0.7867,
+        0.156
+      ]
+    },
+    {
+      "id": "dim_hole_diameter",
+      "text_raw": "2X Ø10 ±0.1",
+      "value": 10.0,
+      "unit": null,
+      "feature_type": "diameter",
+      "quantity": 2,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.1,
+      "tol_minus": 0.1,
+      "from_ref": null,
+      "to_ref": null,
+      "bbox": [
+        0.0606,
+        0.6516,
+        0.1354,
+        0.6693
+      ]
+    },
+    {
+      "id": "dim_hole3_diameter",
+      "text_raw": "Ø6",
+      "value": 6.0,
+      "unit": null,
+      "feature_type": "diameter",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": null,
+      "to_ref": null,
+      "bbox": [
+        0.7172,
+        0.2105,
+        0.7349,
+        0.2281
+      ]
+    }
+  ],
+  "fcfs": [
+    {
+      "id": "fcf_position_holes",
+      "text_raw": "position | Ø0.25 (M) | A | B | D",
+      "characteristic": "position",
+      "tolerance": 0.25,
+      "diameter_zone": true,
+      "material_modifier": "MMC",
+      "datum_refs": [
+        {
+          "label": "A",
+          "modifier": null
+        },
+        {
+          "label": "B",
+          "modifier": null
+        },
+        {
+          "label": "D",
+          "modifier": null
+        }
+      ],
+      "bbox": [
+        0.0581,
+        0.6961,
+        0.2298,
+        0.7386
+      ]
+    },
+    {
+      "id": "fcf_flatness",
+      "text_raw": "flatness | 0.05 | A",
+      "characteristic": "flatness",
+      "tolerance": 0.05,
+      "diameter_zone": false,
+      "material_modifier": null,
+      "datum_refs": [
+        {
+          "label": "A",
+          "modifier": null
+        }
+      ],
+      "bbox": [
+        0.7449,
+        0.6307,
+        0.8535,
+        0.6732
+      ]
+    }
+  ],
+  "notes": [
+    "1. BREAK ALL SHARP EDGES 0.2 MAX.",
+    "2. DEBURR ALL HOLES.",
+    "3. FINISH: CLEAR ANODIZE."
+  ],
+  "seeded_errors": [
+    {
+      "id": "err_1",
+      "rule_id": "GDT-001",
+      "finding_key": "GDT-001@fcf_position_holes",
+      "description": "The position frame references datum D, but the drawing defines only A and B.",
+      "bbox": [
+        0.0581,
+        0.6961,
+        0.2298,
+        0.7386
+      ]
+    },
+    {
+      "id": "err_2",
+      "rule_id": "GDT-003",
+      "finding_key": "GDT-003@fcf_flatness",
+      "description": "The flatness frame on the back face references datum A.",
+      "bbox": [
+        0.7449,
+        0.6307,
+        0.8535,
+        0.6732
+      ]
+    },
+    {
+      "id": "err_3",
+      "rule_id": "MFG-001",
+      "finding_key": "MFG-001@dim_hole3_x",
+      "description": "The Ø6 hole has its centre 5 mm from the right edge.",
+      "bbox": [
+        0.6799,
+        0.5592,
+        0.6869,
+        0.576
+      ]
+    }
+  ]
+}

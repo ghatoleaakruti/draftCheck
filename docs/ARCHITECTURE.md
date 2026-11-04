@@ -77,7 +77,9 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/limits.py` | What one demo deployment is willing to spend, and on whom. `Limits.from_env()` holds every number (per-IP uploads and fixes per hour, model calls per day, run retention, sweep interval, `TRUST_PROXY`); `UsageLimiter` counts them in memory over sliding windows and raises `LimitExceeded`, which `api.py` turns into a `429`; `client_ip(...)` decides which address a request is counted against; `sweep_runs(root, max_age_hours)` deletes stale run folders and `Cleaner` keeps that to once an hour — see §4.12 | **BUILT** |
 | `draftcheck/static/` | The browser page, served at `/`: `index.html`, `style.css`, `app.js`, `sheet.js` (the drawing primitives for the sheet: scan band, revision clouds, pen notes, stamp — §4.17), and `fonts/` (Archivo, JetBrains Mono, Nanum Pen Script, each with its OFL licence). Plain HTML, CSS, and JavaScript — no framework, no build step, nothing loaded from a CDN. Laid out as "the checker's desk" (§4.15): a header with a five-stage stepper and a model pill, the drawing as paper on a dark desk with an SVG overlay in image pixels, and a tabbed review panel (Extracted, Issues, Corrections) with one primary button whose label follows the stage. The tables are editable (§4.9), linked to the drawing by item id, and checked and fixed through the same endpoints as before. Cells are written with `textContent` or as an input's `value`, so model output is never treated as markup | **BUILT** (upload + view + edit + check + fix + redline) |
 | `frontend/` | Driving `/fix` from the page and showing the correction report and the redline | PLANNED |
-| `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch. The ground truth is written in `schema.py`'s field names — plus `bbox_convention` and `seeded_errors` — so it parses as a `Drawing` and doubles as the target an extraction is scored against | **BUILT** |
+| `scripts/make_sample_drawing.py` | Generates a synthetic drawing (reportlab) with its ground-truth JSON and a PNG preview; seeds a known error so the rule engine has something to catch. The ground truth is written in `schema.py`'s field names — plus `bbox_convention` and `seeded_errors` — so it parses as a `Drawing` and doubles as the target an extraction is scored against. `--suite` builds the evaluation suite instead (below) and leaves plate_001 alone | **BUILT** |
+| `scripts/drawing_suite.py` | The evaluation suite: eight drawings described as `DrawingSpec` data and drawn by one renderer, so each sheet and its ground truth come from the same spec. Every seeded error names its `rule_id` and exact `finding_key` — see §4.18 | **BUILT** |
+| `scripts/run_eval.py` | Runs each suite drawing × provider through render → extract → rules → correction loop, one call at a time, scores it against the ground truth in plain Python, caches each finished run in `outputs/eval/results.json`, and writes `docs/EVAL.md` — see §4.18 | **BUILT** |
 | `scripts/smoke_test.py` | One-shot check that the configured model answers over the network; `--provider baseten\|meta` picks which one | **BUILT** |
 | `scripts/extract_spike.py` | One extraction pass on a drawing: renders it, calls `chat_json`, and writes `outputs/spike/<name>.raw.txt`, `.json`, and `.overlay.png` (red boxes = model bboxes, green = ground truth from `--gt`). A look-at-it tool; it decides nothing | **BUILT** |
 
@@ -1107,6 +1109,56 @@ the scan, the sweep, and the round replay.
 and not preloaded: `Sheet.loadPenFont()` adds it with the `FontFace` API (`display: swap`)
 the first time a note is written, and the notes are measured again once it arrives.
 
+### 4.18 Evaluation suite — BUILT (step 22)
+
+**Drawings.** `python -m scripts.make_sample_drawing --suite` writes eight sheets to
+`samples/generated/` (PDF, `.gt.json`, PNG preview), next to the unchanged plate_001:
+
+| Drawing | What is seeded | Expected findings |
+| --- | --- | --- |
+| plate_clean | Nothing — tests false alarms | none |
+| plate_dup_datum | Two datum symbols both labelled A | GDT-002 |
+| plate_flatness_datum | A flatness frame that references A | GDT-003 |
+| plate_no_basic | A position frame, but the locating dimensions are plain | GDT-004 |
+| plate_no_gentol | No general tolerance, and the overall 60 prints none | DIM-001 |
+| plate_edge_hole | A Ø6 hole centred 5 mm from the right edge | MFG-001 |
+| bracket_01 | Front + side view (hidden lines), 30/60/30 chain under an overall 120, notes, full title block; position frame A\|B\|D with D undefined, flatness to A, Ø6 hole 5 from the edge | GDT-001, GDT-003, MFG-001 |
+| plate_inch_multi | Inches, 4 holes, position + perpendicularity frames; datum B placed twice | GDT-002 |
+
+**Sanity test.** `tests/test_eval_suite.py` runs the rules on every ground truth and requires
+exactly the seeded findings — by `finding_key`, so the right items too — and nothing else.
+That validates the generator and the rules before a model is involved. plate_001's ground
+truth predates `rule_id`, so `run_eval.LEGACY_ERROR_RULES` maps its error type to GDT-001.
+
+**Running.** `python -m scripts.run_eval [--drawings …] [--providers …] [--force]`. For each
+pair it renders page 1 with the server's `render_settings`, calls `extract_page`, runs the
+rules, and runs `agent.correct`, all through `api.guard_for` — the same time limit and
+Baseten→Meta fallback as a live request. Pairs run strictly one after another. Each result
+is written to `outputs/eval/results.json` as it finishes, and a rerun skips results whose
+status is `ok` or `failed`. A provider that is not configured or not answering
+(`api.outage_reason`) is recorded `skipped`, is not cached, and is not retried for the rest
+of that run.
+
+**Scoring** (`score_run`, pure Python, no model):
+
+- Dimensions: matched to the ground truth by value, taking fully correct pairs first so a
+  correct reading of one of three "30"s is never spent on a wrong one; *correct* means the
+  tolerances and basic flag also agree.
+- Frames: matched by characteristic; *correct* means tolerance, zone, modifier, and datum
+  letters in order. Datums: by label. Units and general tolerance: equal or not.
+- Errors: findings on the extracted drawing matched to `seeded_errors` by rule id (the model
+  names items its own way, so keys cannot be compared). Unmatched seeded errors are
+  *missed*; unmatched findings are *false alarms*.
+- Fixes verified: error-severity findings the loop cleared, decided by re-running the
+  rules. Warnings never start the loop, so they are not counted; a drawing with no error
+  findings shows "n/a". Each result carries `score_version`, and a cached result from an
+  older scoring is run again rather than mixed in (the summary shows it as stale).
+  Rounds, edits applied and rejected, latency (extract, fix, total), and whether any call
+  fell back are recorded alongside.
+
+`docs/EVAL.md` is regenerated from the results file at the end of every run, with one row
+per drawing and provider and a totals row per provider.
+
 ## 5. Repo layout (what exists today)
 
 ```
@@ -1115,7 +1167,8 @@ draftCheck/
 │   └── workflows/
 │       └── ci.yml              # ruff + pytest on push to main and on PRs
 ├── docs/
-│   └── ARCHITECTURE.md         # this file
+│   ├── ARCHITECTURE.md         # this file
+│   └── EVAL.md                 # generated by scripts/run_eval.py (§4.18)
 ├── draftcheck/
 │   ├── __init__.py
 │   ├── agent.py                # BUILT  correction loop, max 3 rounds
@@ -1144,12 +1197,15 @@ draftCheck/
 │   └── generated/              # synthetic drawings, regenerable from scripts/
 │       ├── plate_001.pdf       # the drawing
 │       ├── plate_001.gt.json   # ground truth in schema.py field names, parses as a Drawing
-│       └── plate_001.png       # rendered preview
-├── outputs/                    # git-ignored; spike dumps, overlays, redlined PDFs
+│       ├── plate_001.png       # rendered preview
+│       └── <suite stem>.{pdf,gt.json,png}  # the eight eval drawings (§4.18)
+├── outputs/                    # git-ignored; spike dumps, overlays, redlines, eval/results.json
 ├── scripts/
 │   ├── __init__.py
+│   ├── drawing_suite.py        # the eval drawings as specs + one renderer
 │   ├── extract_spike.py        # python -m scripts.extract_spike <drawing> [--gt ...]
-│   ├── make_sample_drawing.py  # python -m scripts.make_sample_drawing
+│   ├── make_sample_drawing.py  # python -m scripts.make_sample_drawing [--suite]
+│   ├── run_eval.py             # python -m scripts.run_eval
 │   └── smoke_test.py           # python -m scripts.smoke_test
 ├── tests/
 │   ├── fixtures/               # frozen inputs the tests parse
@@ -1160,6 +1216,7 @@ draftCheck/
 │   ├── test_config.py
 │   ├── test_edit_display.py    # short before/after strings and pen labels
 │   ├── test_edits.py
+│   ├── test_eval_suite.py      # generator, ground-truth sanity, eval scoring (no network)
 │   ├── test_limits.py
 │   ├── test_memory.py
 │   ├── test_llm_client.py
@@ -1222,13 +1279,14 @@ draftCheck/
 | 2026-10-30 | `?demo=low-confidence` is served by `/api/demo/low-confidence`, off unless `DRAFTCHECK_ENABLE_DEMO=1` **and** the request arrives from loopback | Reviewing the confidence markings should not cost a model call or need a key, but a route that fabricates runs should not exist in a deployment at all. The two gates fail in different directions and so cover each other: the variable is the deliberate act, defaulting to off so forgetting is safe and nothing has to be removed before a deploy; loopback is the backstop for the variable being set somewhere nobody intended, since it is a property of the connection and cannot be misconfigured. Building a real run folder rather than returning a payload means the demo goes through `/check` like any other drawing, so it exercises the page instead of a special case of it |
 | 2026-10-30 | Demo limits are three separate budgets — 5 uploads and 10 fixes per IP per hour, 100 model calls per day across everyone — held in memory, with `X-Forwarded-For` believed only when `TRUST_PROXY=1`; run folders are swept after 24 hours at startup and at most hourly on upload | A free demo on one person's credits has two different failure modes, and one limit cannot cover both: a per-IP limit does nothing about a crowd, and a global cap alone lets one visitor spend everyone's day in a minute. Separating uploads from fixes matters because a fix is up to three model calls, so sharing one allowance would price them as if they were equal. The header is the client's to write, so trusting it by default would make every per-IP limit bypassable by sending a new address each time — the flag has to be a deliberate statement about what is actually in front of the process. In memory is honest about what this is: a single instance where a restart forgives everyone, and the alternative is a datastore a hackathon demo does not need. Cleanup rides on uploads because there is no scheduler and nothing to keep alive between requests, and a server nobody uploads to is not accumulating anything either |
 | 2026-11-03 | Every rule reports a pass / fail / not-applicable result with a sentence, but the sentence comes from a separate `describe` function that is told whether `check` failed, and `rule_results` raises if the two disagree | A list of findings cannot show what was checked and found fine, and a reviewer trusts a clean result more when it names the values it looked at. Keeping the verdict in `check` alone means adding words cannot move a pass/fail — the same principle that keeps the model out of the verdict keeps the wording out of it too |
+| 2026-11-03 | The eval matches findings to seeded errors by rule id, and counts a finding nobody seeded as a false alarm; the ground-truth sanity test matches by full finding key | The model names items its own way, so its keys never equal the ground truth's, but a rule id is what the user acts on. The stricter key match belongs to the sanity test, where both sides use ground-truth ids, and it is what proves each seeded error is caught on the right item before any model is scored |
 | 2026-10-30 | `render.load_pages` translates pypdfium2's and pillow's own errors into `RenderError`, rather than each caller catching the dependency's error class | Every caller — the CLI's exit code, the API's status code — catches `RenderError` and nothing else, so an error leaking from a dependency is an exit code or a status code that never happens: a corrupt upload came out as a traceback and a 500 instead of a 400. Translating once at the boundary means the file-reading contract is stated in one place, and swapping the PDF library later does not touch any caller |
 
 ## 8. Status
 
 | Layer | What it covers | State |
 | --- | --- | --- |
-| 1 | Extraction + JSON schema + rule engine + test generator | BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`, `rules.py` with 6 rules, and `pipeline.py` + `cli.py` joining them into one `check` command that runs a drawing end to end. More rules can be added to the registry as the sample set grows |
+| 1 | Extraction + JSON schema + rule engine + test generator | BUILT: JSON parser, config, LLM client, renderer, extraction prompts, sample-drawing generator, extraction spike, `schema.py`, `rules.py` with 6 rules, and `pipeline.py` + `cli.py` joining them into one `check` command that runs a drawing end to end. More rules can be added to the registry as the sample set grows. An eight-drawing evaluation suite and `scripts/run_eval.py` score extraction, detection, and fixes per provider (§4.18) |
 | 2 | Agent correction loop + redlined PDF | BUILT: `edits.py` (the four allowed operations and their guards), `agent.py` (the three-round loop), and `redline.py` (the two-page redline), wired into `check --fix --redline` and verified end to end on plate_001 |
 | 3 | Web UI + live deploy | PARTLY BUILT: `api.py` serves the whole flow over HTTP — upload + extract, check the confirmed data, run the loop, fetch the redline — verified end to end against the live model on plate_001. The browser page uploads a drawing, shows what the model read, lets the reviewer correct it, runs the check from it (§4.9), proposes verified fixes with the redline (§4.10), and marks the rows the model was least sure of (§4.11). Production safety is in place — per-IP and global usage limits, run-folder cleanup, and `/healthz` (§4.12). The Render deploy is configured in `render.yaml` (§4.13) but not yet run |
 | 4 | After hackathon: SAM 3.1 precision, revisions, link to Research Paper Recommender | PLANNED (post-hackathon) |
