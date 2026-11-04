@@ -155,3 +155,69 @@ def test_toasts_last_five_seconds_and_are_not_repeated() -> None:
     assert "item.dataset.message === message" in source
     # Lifted clear of both bottom bars rather than parked over them.
     assert "for (const bar of [actionBar, statusBar])" in source
+
+
+def test_the_issues_tab_has_a_checks_list_below_the_rounds_strip() -> None:
+    """index.html supplies the Checks box; it sits after the rounds strip and before cards."""
+    index = read_index()
+    for element_id in ("checks", "checks-summary", "checks-list"):
+        assert f'id="{element_id}"' in index
+        assert f'$("{element_id}")' in read_app_js()
+    assert index.index('id="rounds-strip"') < index.index('id="checks"')
+    assert index.index('id="checks"') < index.index('id="findings-list"')
+
+
+def test_checks_use_the_servers_results_and_icons() -> None:
+    """The page lays out rule_results and checks_summary; it decides no status itself."""
+    source = read_app_js()
+    assert "result.rule_results" in source
+    assert "result.checks_summary" in source
+    for icon in ('icon: "✓"', 'icon: "✗"', 'icon: "–"'):
+        assert icon in source
+    # A failed check opens its first issue, which selects the card and the cloud.
+    assert "openIssue(first)" in source
+
+
+def test_check_icons_have_pass_fail_and_na_colours() -> None:
+    css = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+    assert ".check.is-pass .check-icon" in css
+    assert ".check.is-fail .check-icon" in css
+    assert ".check.is-na .check-icon" in css
+
+
+def test_checks_can_switch_between_submitted_and_after_fixes() -> None:
+    index = read_index()
+    source = read_app_js()
+    for element_id in ("checks-toggle", "checks-summary-after"):
+        assert f'id="{element_id}"' in index
+        assert f'$("{element_id}")' in source
+    assert 'data-view="after"' in index and 'data-view="submitted"' in index
+    assert 'const SUBMITTED_LEAD = "On the submitted drawing";' in source
+    assert "const AFTER_FIXES_LEAD = \"After the agent's verified fixes\";" in source
+    # The fix reply's re-run results are what the after view shows, by default.
+    assert "result.final_rule_results" in source
+    assert "result.final_checks_summary" in source
+    assert 'checks.view = "after";' in source
+
+
+def test_page_and_redline_use_the_same_lead_ins() -> None:
+    from draftcheck.redline import AFTER_FIXES_LEAD, SUBMITTED_LEAD
+
+    source = read_app_js()
+    assert f'"{SUBMITTED_LEAD}"' in source
+    assert f'"{AFTER_FIXES_LEAD}"' in source
+
+
+@pytest.mark.parametrize("name", ["app.js", "sheet.js"])
+def test_page_scripts_parse(name: str) -> None:
+    """A syntax error stops the whole page; `node --check` catches it without a browser."""
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    result = subprocess.run(
+        [node, "--check", str(STATIC_DIR / name)], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr

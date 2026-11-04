@@ -79,6 +79,11 @@ const issuesEmpty = $("issues-empty");
 const findingsList = $("findings-list");
 const roundsStrip = $("rounds-strip");
 const findingsNone = $("findings-none");
+const checksBox = $("checks");
+const checksSummary = $("checks-summary");
+const checksSummaryAfter = $("checks-summary-after");
+const checksToggle = $("checks-toggle");
+const checksList = $("checks-list");
 const checkStatus = $("check-status");
 const checkIssuesBox = $("check-parse-issues");
 const checkIssuesList = $("check-parse-issues-list");
@@ -1736,6 +1741,10 @@ function clearFindings() {
   cloudLayer.replaceChildren();
   clouds.clear();
   roundsStrip.hidden = true;
+  checksList.replaceChildren();
+  checksBox.hidden = true;
+  checks.submitted = null;
+  checks.after = null;
 }
 
 /** Where a finding is: its own bbox, or the first of its items that has one. */
@@ -1957,7 +1966,128 @@ function renderFindings(result) {
   setBoxesShown(false);
   drawClouds();
   resetRoundsStrip();
+  renderChecks(result);
 }
+
+/* ---- Checks: every rule's verdict on the whole drawing -------------------- */
+
+/*
+ * The server decides each status and writes each sentence; this only lays them out.
+ * A failed check is a button that opens its first issue, card and cloud together.
+ */
+
+const CHECK_ICONS = {
+  pass: { icon: "✓", word: "passed", className: "is-pass" },
+  fail: { icon: "✗", word: "failed", className: "is-fail" },
+  not_applicable: { icon: "–", word: "not applicable", className: "is-na" },
+};
+
+function checkRow(result) {
+  const look = CHECK_ICONS[result.status] || CHECK_ICONS.not_applicable;
+  const issues = Array.isArray(result.issues) ? result.issues : [];
+  const first = result.status === "fail" ? issues.find((number) => issueCards.has(number)) : undefined;
+
+  const row = document.createElement(first ? "button" : "div");
+  row.className = `check ${look.className}`;
+  if (first) {
+    row.type = "button";
+    row.addEventListener("click", () => {
+      openIssue(first);
+      issueCards.get(first).scrollIntoView({ block: "nearest", behavior: Sheet.reducedMotion() ? "auto" : "smooth" });
+    });
+  }
+
+  const icon = document.createElement("span");
+  icon.className = "check-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = look.icon;
+
+  const name = document.createElement("p");
+  name.className = "check-name";
+  const id = document.createElement("span");
+  id.className = "check-id";
+  id.textContent = text(result.rule_id);
+  name.append(id, document.createTextNode(text(result.title)));
+
+  const why = document.createElement("p");
+  why.className = "check-why";
+  why.textContent = text(result.explanation);
+
+  row.append(icon, name, why);
+  const label = `${text(result.rule_id)} ${text(result.title)}: ${look.word}. ${text(result.explanation)}`;
+  row.setAttribute("aria-label", first ? `${label} Open issue ${first}.` : label);
+
+  const item = document.createElement("li");
+  item.appendChild(row);
+  return item;
+}
+
+/*
+ * Two sets of results once a fix has run: the drawing as submitted (from /check) and the
+ * corrected drawing (from /fix, where the server re-ran the rules on it). The toggle picks
+ * which one the list shows; both summary lines stay visible.
+ */
+const SUBMITTED_LEAD = "On the submitted drawing";
+const AFTER_FIXES_LEAD = "After the agent's verified fixes";
+
+const checks = { submitted: null, after: null, view: "submitted" };
+
+function checkSet(results, summary) {
+  return { results: Array.isArray(results) ? results : [], summary: text(summary) };
+}
+
+function paintChecks() {
+  const shown = checks.view === "after" && checks.after ? checks.after : checks.submitted;
+  if (!shown) {
+    checksBox.hidden = true;
+    return;
+  }
+  const rows = document.createDocumentFragment();
+  for (const ruleResult of shown.results) {
+    rows.appendChild(checkRow(ruleResult));
+  }
+  checksList.replaceChildren(rows);
+  checksList.dataset.view = checks.after ? checks.view : "submitted";
+
+  const both = Boolean(checks.after);
+  checksSummary.textContent = both ? `${SUBMITTED_LEAD}: ${checks.submitted.summary}` : checks.submitted.summary;
+  checksSummaryAfter.textContent = both ? `${AFTER_FIXES_LEAD}: ${checks.after.summary}` : "";
+  checksSummaryAfter.hidden = !both;
+  checksSummary.classList.toggle("is-shown", both && checks.view === "submitted");
+  checksSummaryAfter.classList.toggle("is-shown", both && checks.view === "after");
+  checksToggle.hidden = !both;
+  for (const button of checksToggle.querySelectorAll("button")) {
+    button.setAttribute("aria-pressed", String(button.dataset.view === checks.view));
+  }
+  checksBox.hidden = shown.results.length === 0;
+}
+
+/** After /check: the submitted drawing's results, and no after-fixes set yet. */
+function renderChecks(result) {
+  checks.submitted = checkSet(result.rule_results, result.checks_summary);
+  checks.after = null;
+  checks.view = "submitted";
+  paintChecks();
+}
+
+/** After /fix: add the corrected drawing's results and show them by default. */
+function renderFixChecks(result) {
+  if (!checks.submitted || !Array.isArray(result.final_rule_results)) {
+    return;
+  }
+  checks.after = checkSet(result.final_rule_results, result.final_checks_summary);
+  checks.view = "after";
+  paintChecks();
+}
+
+checksToggle.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-view]");
+  if (!button || !checks.after) {
+    return;
+  }
+  checks.view = button.dataset.view;
+  paintChecks();
+});
 
 /* ---- The rounds strip ----------------------------------------------------- */
 
@@ -2151,6 +2281,12 @@ function clearAgent() {
   const other = findingsList.querySelector(".finding.is-other");
   if (other) other.remove();
   if (state.checked) resetRoundsStrip();
+  // The after-fixes checks belonged to that fix; back to the submitted drawing's.
+  if (checks.after) {
+    checks.after = null;
+    checks.view = "submitted";
+    paintChecks();
+  }
 }
 
 /** Every edit the loop proposed that has something to write on the sheet, in order. */
@@ -2443,6 +2579,7 @@ async function renderAgent(result) {
   replaying = false;
   setAgentStatus();
   renderCorrections(result);
+  renderFixChecks(result);
 
   colourClouds(new Map(statuses.map((entry) => [entry.finding, entry.outcome || "unresolved"])));
   const notes = drawPenNotes(result);

@@ -279,6 +279,25 @@
                   <p class="strip-sub">Waiting</p>
                 </div>
               </div>
+
+              <!-- Every rule's verdict on the whole drawing, passes included. -->
+              <section id="checks" class="checks" aria-labelledby="checks-heading" hidden>
+                <div class="checks-head">
+                  <h3 id="checks-heading" class="checks-heading">Checks</h3>
+                  <!-- Shown once a fix has run: which drawing the list below describes. -->
+                  <div id="checks-toggle" class="checks-toggle" role="group"
+                    aria-label="Show checks for" hidden>
+                    <button type="button" data-view="after" aria-pressed="true">After fixes</button>
+                    <button type="button" data-view="submitted" aria-pressed="false">Submitted</button>
+                  </div>
+                </div>
+                <div class="checks-summaries">
+                  <p id="checks-summary" class="checks-summary"></p>
+                  <p id="checks-summary-after" class="checks-summary" hidden></p>
+                </div>
+                <ul id="checks-list" class="checks-list"></ul>
+              </section>
+
               <p id="findings-none" class="pane-empty is-ok" hidden>No issues found.</p>
               <ol id="findings-list" class="findings-list"></ol>
             </div>
