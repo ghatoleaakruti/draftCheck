@@ -55,6 +55,8 @@ def test_suite_has_the_requested_drawings() -> None:
         "flange",
         "stepped_shaft",
         "gripper_claw",
+        "block_3view",
+        "bolted_joint",
     }
 
 

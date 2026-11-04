@@ -1,0 +1,663 @@
+{
+  "units": "mm",
+  "general_tolerance": {
+    "linear_plus_minus": 0.1,
+    "text_raw": "UNLESS OTHERWISE SPECIFIED: ±0.1"
+  },
+  "title_block": {
+    "title": "MACHINED BLOCK",
+    "drawing_number": "DC-0307",
+    "revision": "A",
+    "material": "AL 6061-T6",
+    "scale": "1:1"
+  },
+  "expected_part_type": "machined_block",
+  "views": [
+    {
+      "name": "front",
+      "kind": "front"
+    },
+    {
+      "name": "top",
+      "kind": "top"
+    },
+    {
+      "name": "right",
+      "kind": "right_side"
+    },
+    {
+      "name": "iso",
+      "kind": "isometric"
+    }
+  ],
+  "bbox_convention": "[x0, y0, x1, y1] normalized 0..1, origin top-left, covering the annotation's text or symbol",
+  "datums": [
+    {
+      "id": "datum_a",
+      "label": "A",
+      "bbox": [
+        0.1739,
+        0.5915,
+        0.1966,
+        0.6405
+      ]
+    }
+  ],
+  "dimensions": [
+    {
+      "id": "dim_overall_length",
+      "text_raw": "80 ±0.2",
+      "value": 80.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.2,
+      "tol_minus": 0.2,
+      "from_ref": "left_face",
+      "to_ref": "right_face",
+      "bbox": [
+        0.2356,
+        0.6371,
+        0.278,
+        0.6539
+      ],
+      "view": "front"
+    },
+    {
+      "id": "dim_overall_height",
+      "text_raw": "30 ±0.1",
+      "value": 30.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.1,
+      "tol_minus": 0.1,
+      "from_ref": "bottom_face",
+      "to_ref": "top_face",
+      "bbox": [
+        0.0714,
+        0.4945,
+        0.0844,
+        0.5495
+      ],
+      "view": "front"
+    },
+    {
+      "id": "dim_slot_position",
+      "text_raw": "32",
+      "value": 32.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "left_face",
+      "to_ref": "slot_left_wall",
+      "bbox": [
+        0.1639,
+        0.4055,
+        0.1779,
+        0.4223
+      ],
+      "view": "front"
+    },
+    {
+      "id": "dim_slot_width",
+      "text_raw": "16 ±0.05",
+      "value": 16.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.05,
+      "tol_minus": 0.05,
+      "from_ref": "slot_left_wall",
+      "to_ref": "slot_right_wall",
+      "bbox": [
+        0.2321,
+        0.4055,
+        0.2815,
+        0.4223
+      ],
+      "view": "front"
+    },
+    {
+      "id": "dim_slot_depth",
+      "text_raw": "10",
+      "value": 10.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "slot_floor",
+      "to_ref": "top_face",
+      "bbox": [
+        0.2432,
+        0.4666,
+        0.2562,
+        0.4848
+      ],
+      "view": "front"
+    },
+    {
+      "id": "dim_overall_depth",
+      "text_raw": "50 ±0.2",
+      "value": 50.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": 0.2,
+      "tol_minus": 0.2,
+      "from_ref": "front_face",
+      "to_ref": "back_face",
+      "bbox": [
+        0.0535,
+        0.2358,
+        0.0665,
+        0.2908
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_cbore_y",
+      "text_raw": "25",
+      "value": 25.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "front_face",
+      "to_ref": "cbore_center",
+      "bbox": [
+        0.0785,
+        0.3121,
+        0.0915,
+        0.3303
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_cbore_x",
+      "text_raw": "16",
+      "value": 16.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "left_face",
+      "to_ref": "cbore_center",
+      "bbox": [
+        0.1352,
+        0.1004,
+        0.1493,
+        0.1173
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_cbore_hole",
+      "text_raw": "Ø6.6 THRU ⌴Ø11 ↧6.8",
+      "value": 6.6,
+      "unit": null,
+      "feature_type": "diameter",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": null,
+      "to_ref": null,
+      "bbox": [
+        0.2551,
+        0.0503,
+        0.3249,
+        0.0892
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_cbore_diameter",
+      "text_raw": "⌴Ø11",
+      "value": 11.0,
+      "unit": null,
+      "feature_type": "diameter",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": null,
+      "to_ref": null,
+      "bbox": [
+        0.2551,
+        0.0503,
+        0.3249,
+        0.0892
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_cbore_depth",
+      "text_raw": "↧6.8",
+      "value": 6.8,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": null,
+      "to_ref": null,
+      "bbox": [
+        0.2551,
+        0.0503,
+        0.3249,
+        0.0892
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_chamfer",
+      "text_raw": "3 X 45°",
+      "value": 3.0,
+      "unit": null,
+      "feature_type": "chamfer",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": null,
+      "to_ref": null,
+      "bbox": [
+        0.4444,
+        0.3771,
+        0.4881,
+        0.3948
+      ],
+      "view": "right"
+    },
+    {
+      "id": "dim_hole_a1_x",
+      "text_raw": "60",
+      "value": 60.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "origin_x",
+      "to_ref": "hole_a1_center",
+      "bbox": [
+        0.7576,
+        0.4248,
+        0.8081,
+        0.4461
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_hole_a1_y",
+      "text_raw": "10",
+      "value": 10.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "origin_y",
+      "to_ref": "hole_a1_center",
+      "bbox": [
+        0.8081,
+        0.4248,
+        0.8586,
+        0.4461
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_hole_a1_size",
+      "text_raw": "M5x0.8 THRU",
+      "value": 5.0,
+      "unit": null,
+      "feature_type": "thread",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": null,
+      "to_ref": null,
+      "bbox": [
+        0.8586,
+        0.4248,
+        0.9596,
+        0.4461
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_hole_a2_x",
+      "text_raw": "72",
+      "value": 72.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "origin_x",
+      "to_ref": "hole_a2_center",
+      "bbox": [
+        0.7576,
+        0.4461,
+        0.8081,
+        0.4673
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_hole_a2_y",
+      "text_raw": "10",
+      "value": 10.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "origin_y",
+      "to_ref": "hole_a2_center",
+      "bbox": [
+        0.8081,
+        0.4461,
+        0.8586,
+        0.4673
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_hole_a2_size",
+      "text_raw": "M5x0.8 THRU",
+      "value": 5.0,
+      "unit": null,
+      "feature_type": "thread",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": null,
+      "to_ref": null,
+      "bbox": [
+        0.8586,
+        0.4461,
+        0.9596,
+        0.4673
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_hole_a3_x",
+      "text_raw": "60",
+      "value": 60.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "origin_x",
+      "to_ref": "hole_a3_center",
+      "bbox": [
+        0.7576,
+        0.4673,
+        0.8081,
+        0.4886
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_hole_a3_y",
+      "text_raw": "40",
+      "value": 40.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "origin_y",
+      "to_ref": "hole_a3_center",
+      "bbox": [
+        0.8081,
+        0.4673,
+        0.8586,
+        0.4886
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_hole_a3_size",
+      "text_raw": "M5x0.8 THRU",
+      "value": 5.0,
+      "unit": null,
+      "feature_type": "thread",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": null,
+      "to_ref": null,
+      "bbox": [
+        0.8586,
+        0.4673,
+        0.9596,
+        0.4886
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_hole_a4_x",
+      "text_raw": "72",
+      "value": 72.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "origin_x",
+      "to_ref": "hole_a4_center",
+      "bbox": [
+        0.7576,
+        0.4886,
+        0.8081,
+        0.5098
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_hole_a4_y",
+      "text_raw": "40",
+      "value": 40.0,
+      "unit": null,
+      "feature_type": "linear",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": "origin_y",
+      "to_ref": "hole_a4_center",
+      "bbox": [
+        0.8081,
+        0.4886,
+        0.8586,
+        0.5098
+      ],
+      "view": "top"
+    },
+    {
+      "id": "dim_hole_a4_size",
+      "text_raw": "M5x0.8 THRU",
+      "value": 5.0,
+      "unit": null,
+      "feature_type": "thread",
+      "quantity": 1,
+      "is_basic": false,
+      "is_reference": false,
+      "tol_plus": null,
+      "tol_minus": null,
+      "from_ref": null,
+      "to_ref": null,
+      "bbox": [
+        0.8586,
+        0.4886,
+        0.9596,
+        0.5098
+      ],
+      "view": "top"
+    }
+  ],
+  "fcfs": [
+    {
+      "id": "fcf_parallelism_top",
+      "text_raw": "parallelism | 0.05 | A",
+      "characteristic": "parallelism",
+      "tolerance": 0.05,
+      "diameter_zone": false,
+      "material_modifier": null,
+      "datum_refs": [
+        {
+          "label": "A",
+          "modifier": null
+        }
+      ],
+      "bbox": [
+        0.5556,
+        0.3693,
+        0.6641,
+        0.4118
+      ]
+    },
+    {
+      "id": "fcf_flatness_bottom",
+      "text_raw": "flatness | 0.02 | A",
+      "characteristic": "flatness",
+      "tolerance": 0.02,
+      "diameter_zone": false,
+      "material_modifier": null,
+      "datum_refs": [
+        {
+          "label": "A",
+          "modifier": null
+        }
+      ],
+      "bbox": [
+        0.5556,
+        0.6307,
+        0.6641,
+        0.6732
+      ]
+    }
+  ],
+  "notes": [
+    "1. HOLE TABLE POSITIONS ARE FROM THE 0,0 CORNER OF THE TOP VIEW.",
+    "2. BREAK SHARP EDGES 0.2 MAX.",
+    "3. FINISH: CLEAR ANODIZE."
+  ],
+  "hole_table": [
+    {
+      "hole": "A1",
+      "x": 60.0,
+      "y": 10.0,
+      "size": "M5x0.8 THRU",
+      "bbox": [
+        0.7071,
+        0.4248,
+        0.7576,
+        0.4461
+      ]
+    },
+    {
+      "hole": "A2",
+      "x": 72.0,
+      "y": 10.0,
+      "size": "M5x0.8 THRU",
+      "bbox": [
+        0.7071,
+        0.4461,
+        0.7576,
+        0.4673
+      ]
+    },
+    {
+      "hole": "A3",
+      "x": 60.0,
+      "y": 40.0,
+      "size": "M5x0.8 THRU",
+      "bbox": [
+        0.7071,
+        0.4673,
+        0.7576,
+        0.4886
+      ]
+    },
+    {
+      "hole": "A4",
+      "x": 72.0,
+      "y": 40.0,
+      "size": "M5x0.8 THRU",
+      "bbox": [
+        0.7071,
+        0.4886,
+        0.7576,
+        0.5098
+      ]
+    }
+  ],
+  "seeded_errors": [
+    {
+      "id": "err_1",
+      "rule_id": "GDT-003",
+      "finding_key": "GDT-003@fcf_flatness_bottom",
+      "description": "The flatness frame on the bottom face references datum A. Flatness is a form control and takes no datum.",
+      "bbox": [
+        0.5556,
+        0.6307,
+        0.6641,
+        0.6732
+      ]
+    }
+  ]
+}

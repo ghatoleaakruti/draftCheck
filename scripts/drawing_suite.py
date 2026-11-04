@@ -265,8 +265,16 @@ def profile_surface_symbol(c: rl_canvas.Canvas, cx: float, cy: float) -> None:
     c.line(cx - r, cy - 4.0, cx + r, cy - 4.0)
 
 
+def parallelism_symbol(c: rl_canvas.Canvas, cx: float, cy: float) -> None:
+    """Two parallel lines leaning to the right."""
+    c.setLineWidth(0.8)
+    for dx in (-3.0, 3.0):
+        c.line(cx + dx - 3.0, cy - 6.0, cx + dx + 3.0, cy + 6.0)
+
+
 SYMBOLS = {
     "position": position_symbol,
+    "parallelism": parallelism_symbol,
     "profile_surface": profile_surface_symbol,
     "flatness": flatness_symbol,
     "perpendicularity": perpendicularity_symbol,
@@ -687,14 +695,18 @@ class Shape:
     start: float = 0.0
     extent: float = 360.0
     text: str = ""
+    #: Text size for "text"; for "hatch", 45 or 135, the lining's direction in degrees
+    #: (adjacent parts in a section are lined in opposite directions).
+    size: float = 11.0
+    angle: float = 45.0
 
 
-def hatch(view: str, *points: Point) -> Shape:
-    return Shape(view, "thin", "hatch", tuple(points), closed=True)
+def hatch(view: str, *points: Point, angle: float = 45.0) -> Shape:
+    return Shape(view, "thin", "hatch", tuple(points), closed=True, angle=angle)
 
 
-def label_text(view: str, at: Point, text: str) -> Shape:
-    return Shape(view, "thin", "text", (at,), text=text)
+def label_text(view: str, at: Point, text: str, size: float = 11.0) -> Shape:
+    return Shape(view, "thin", "text", (at,), text=text, size=size)
 
 
 def path(view: str, style: str, *points: Point, closed: bool = False) -> Shape:
@@ -828,6 +840,71 @@ class Callout:
     #: Page point where the datum symbol's triangle sits, when it should hang from
     #: something other than the middle of the shoulder (the bottom of a frame, say).
     datum_at: Point | None = None
+    #: Further text lines stacked under ``text``, e.g. the counterbore line of a hole
+    #: callout. ``[CB]`` and ``[DP]`` draw the counterbore and depth symbols.
+    more_lines: tuple[str, ...] = ()
+    #: Further values the callout states, each its own dimension in the ground truth
+    #: (sharing the callout's box): the counterbore diameter and depth, say.
+    extras: tuple[CalloutValue, ...] = ()
+
+
+@dataclass(frozen=True)
+class CalloutValue:
+    """One more value stated in a multi-line callout."""
+
+    id: str
+    text: str
+    value: float
+    feature_type: str
+
+
+#: Symbol tokens in callout text, and the Unicode a reader would transcribe them as.
+SYMBOL_TOKENS = {"[CB]": "⌴", "[DP]": "↧"}
+
+
+def plain_text(text: str) -> str:
+    """Callout text with symbol tokens replaced by their Unicode characters."""
+    for token, char in SYMBOL_TOKENS.items():
+        text = text.replace(token, char)
+    return text
+
+
+@dataclass(frozen=True)
+class Table:
+    """A ruled table: a hole table or a parts list.
+
+    ``x``, ``y`` is the table's bottom-left corner on the page. With ``header_at_bottom``
+    (a parts list sitting on the title block) the header is the bottom row and the first
+    data row sits just above it; otherwise the header is on top.
+    """
+
+    id: str
+    kind: str
+    x: float
+    y: float
+    widths: tuple[float, ...]
+    header: tuple[str, ...]
+    rows: tuple[tuple[str, ...], ...]
+    title: str | None = None
+    header_at_bottom: bool = False
+    row_h: float = 13.0
+    size: float = 7.5
+    #: For a hole table: the view its X and Y coordinates are measured in.
+    view: str | None = None
+
+
+@dataclass(frozen=True)
+class Balloon:
+    """An item balloon: a numbered circle with a leader ending in a dot on the part."""
+
+    id: str
+    item: int
+    view: str
+    #: Part point the leader's dot sits on.
+    target: Point
+    #: Page point of the balloon's centre.
+    centre: Point
+    r: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -859,6 +936,8 @@ class PartSpec:
     angles: tuple[AngleDim, ...] = ()
     surface_datums: tuple[SurfaceDatum, ...] = ()
     cutting_planes: tuple[CuttingPlane, ...] = ()
+    tables: tuple[Table, ...] = ()
+    balloons: tuple[Balloon, ...] = ()
     projection: str | None = "third"
     notes_heading: str = "GENERAL NOTES:"
 
@@ -1009,11 +1088,11 @@ def draw_shape(c: rl_canvas.Canvas, view: PartView, shape: Shape) -> None:
         )
         c.drawPath(p, stroke=1, fill=0)
     elif shape.kind == "hatch":
-        draw_hatch(c, [view.pt(*point) for point in shape.points])
+        draw_hatch(c, [view.pt(*point) for point in shape.points], shape.angle)
     elif shape.kind == "text":
         x, y = view.pt(*shape.points[0])
-        c.setFont(FONT_BOLD, 11.0)
-        c.drawCentredString(x, y - 4.0, shape.text)
+        c.setFont(FONT_BOLD, shape.size)
+        c.drawCentredString(x, y - 4.0 * shape.size / 11.0, shape.text)
     else:
         raise ValueError(f"unknown shape kind {shape.kind!r}")
     c.restoreState()
@@ -1023,8 +1102,10 @@ def draw_shape(c: rl_canvas.Canvas, view: PartView, shape: Shape) -> None:
 HATCH_PITCH = 4.0
 
 
-def draw_hatch(c: rl_canvas.Canvas, points: list[Point]) -> None:
-    """45° section lining inside a closed polygon given in page points."""
+def draw_hatch(c: rl_canvas.Canvas, points: list[Point], angle: float = 45.0) -> None:
+    """Section lining at 45° (or 135°) inside a closed polygon given in page points."""
+    if angle not in (45.0, 135.0):
+        raise ValueError(f"hatch angle must be 45 or 135, not {angle}")
     clip = c.beginPath()
     clip.moveTo(*points[0])
     for point in points[1:]:
@@ -1036,11 +1117,18 @@ def draw_hatch(c: rl_canvas.Canvas, points: list[Point]) -> None:
     ys = [y for _, y in points]
     lo_y, hi_y = min(ys), max(ys)
     step = HATCH_PITCH * math.sqrt(2.0)
-    offset = min(xs) - hi_y
-    while offset < max(xs) - lo_y:
-        # The line y = x - offset, across the polygon's whole height.
-        c.line(lo_y + offset, lo_y, hi_y + offset, hi_y)
-        offset += step
+    if angle == 45.0:
+        offset = min(xs) - hi_y
+        while offset < max(xs) - lo_y:
+            # The line y = x - offset, across the polygon's whole height.
+            c.line(lo_y + offset, lo_y, hi_y + offset, hi_y)
+            offset += step
+    else:
+        offset = min(xs) + lo_y
+        while offset < max(xs) + hi_y:
+            # The line y = offset - x.
+            c.line(offset - lo_y, lo_y, offset - hi_y, hi_y)
+            offset += step
     c.restoreState()
 
 
@@ -1237,9 +1325,19 @@ def draw_callout(
     c.setFont(FONT, NOTE_SIZE)
     text_x = min(ex, callout.tail_x) + (6.0 if callout.basic else 2.0)
     text_y = ey + (8.0 if callout.basic else 5.0)
-    c.drawString(text_x, text_y, callout.text)
-    width = c.stringWidth(callout.text, FONT, NOTE_SIZE)
-    text_box = Box(text_x, text_y - 2.6, text_x + width, text_y + 8.2)
+    if callout.more_lines:
+        # Stacked lines: the last one sits on the shoulder, earlier ones above it.
+        lines = (callout.text, *callout.more_lines)
+        widths = []
+        for index, line in enumerate(lines):
+            line_y = text_y + LINE_PITCH * (len(lines) - 1 - index)
+            widths.append(draw_rich(c, text_x, line_y, line, NOTE_SIZE))
+        top = text_y + LINE_PITCH * (len(lines) - 1)
+        text_box = Box(text_x, text_y - 2.6, text_x + max(widths), top + 8.2)
+    else:
+        c.drawString(text_x, text_y, callout.text)
+        width = c.stringWidth(callout.text, FONT, NOTE_SIZE)
+        text_box = Box(text_x, text_y - 2.6, text_x + width, text_y + 8.2)
     if callout.basic:
         text_box = Box(text_box.x0 - 3.0, text_box.y0 - 1.5, text_box.x1 + 3.0,
                        text_box.y1 + 1.5)
@@ -1252,6 +1350,140 @@ def draw_callout(
         dx, dy = callout.datum_at or ((ex + callout.tail_x) / 2, ey)
         datum_box = hanging_datum(c, dx, dy, callout.datum)
     return text_box, datum_box
+
+
+#: Baseline-to-baseline spacing of stacked callout lines.
+LINE_PITCH = 13.0
+#: Width a drawn symbol takes in a line of callout text.
+SYMBOL_W = 9.0
+
+
+def counterbore_symbol(c: rl_canvas.Canvas, x: float, y: float) -> None:
+    """An open-topped box: two sides and a floor."""
+    c.setLineWidth(0.8)
+    p = c.beginPath()
+    p.moveTo(x + 1.0, y + 7.5)
+    p.lineTo(x + 1.0, y)
+    p.lineTo(x + 7.0, y)
+    p.lineTo(x + 7.0, y + 7.5)
+    c.drawPath(p, stroke=1, fill=0)
+
+
+def depth_symbol(c: rl_canvas.Canvas, x: float, y: float) -> None:
+    """A downward arrow hanging from a short bar."""
+    c.setLineWidth(0.8)
+    c.line(x + 1.5, y + 8.0, x + 6.5, y + 8.0)
+    c.line(x + 4.0, y + 8.0, x + 4.0, y + 1.5)
+    p = c.beginPath()
+    p.moveTo(x + 4.0, y - 0.5)
+    p.lineTo(x + 2.2, y + 3.0)
+    p.lineTo(x + 5.8, y + 3.0)
+    p.close()
+    c.drawPath(p, stroke=0, fill=1)
+
+
+_SYMBOL_DRAW = {"[CB]": counterbore_symbol, "[DP]": depth_symbol}
+
+
+def draw_rich(c: rl_canvas.Canvas, x: float, y: float, text: str, size: float) -> float:
+    """Draw one line of text with ``[CB]``/``[DP]`` symbols; returns its width."""
+    start = x
+    rest = text
+    while rest:
+        positions = [(rest.find(token), token) for token in _SYMBOL_DRAW if token in rest]
+        if not positions:
+            c.setFont(FONT, size)
+            c.drawString(x, y, rest)
+            x += c.stringWidth(rest, FONT, size)
+            break
+        at, token = min(positions)
+        if at:
+            c.setFont(FONT, size)
+            c.drawString(x, y, rest[:at])
+            x += c.stringWidth(rest[:at], FONT, size)
+        _SYMBOL_DRAW[token](c, x, y)
+        x += SYMBOL_W
+        rest = rest[at + len(token):]
+    return x - start
+
+
+def draw_table(c: rl_canvas.Canvas, table: Table) -> tuple[Box, list[list[Box]]]:
+    """Draw a ruled table. Returns its box and each data row's cell boxes."""
+    n = len(table.rows) + 1
+    total_w = sum(table.widths)
+    height = n * table.row_h
+    c.setLineWidth(1.0)
+    c.rect(table.x, table.y, total_w, height, stroke=1, fill=0)
+    c.setLineWidth(0.6)
+    for k in range(1, n):
+        c.line(table.x, table.y + k * table.row_h, table.x + total_w, table.y + k * table.row_h)
+    edge = table.x
+    for width in table.widths[:-1]:
+        edge += width
+        c.line(edge, table.y, edge, table.y + height)
+
+    def row_bottom(index: int) -> float:
+        """Bottom of row ``index``: 0 is the header, 1.. the data rows."""
+        if table.header_at_bottom:
+            return table.y + index * table.row_h
+        return table.y + height - (index + 1) * table.row_h
+
+    cells: list[list[Box]] = []
+    for index, row in enumerate((table.header, *table.rows)):
+        bottom = row_bottom(index)
+        c.setFont(FONT_BOLD if index == 0 else FONT, table.size)
+        left = table.x
+        row_cells = []
+        for width, text in zip(table.widths, row, strict=True):
+            c.drawCentredString(left + width / 2, bottom + (table.row_h - table.size) / 2 + 1.0,
+                                text)
+            row_cells.append(Box(left, bottom, left + width, bottom + table.row_h))
+            left += width
+        if index:
+            cells.append(row_cells)
+    box = Box(table.x, table.y, table.x + total_w, table.y + height)
+    if table.title:
+        c.setFont(FONT_BOLD, 9.0)
+        c.drawString(table.x, table.y + height + 4.0, table.title)
+        box = Box(box.x0, box.y0, box.x1, box.y1 + 14.0)
+    return box, cells
+
+
+def draw_balloon(c: rl_canvas.Canvas, view: PartView, balloon: Balloon) -> Box:
+    """A numbered circle, a leader from its rim toward the part, and a dot on the part."""
+    bx, by = balloon.centre
+    tx, ty = view.pt(*balloon.target)
+    length = math.hypot(tx - bx, ty - by)
+    sx, sy = bx + balloon.r * (tx - bx) / length, by + balloon.r * (ty - by) / length
+    c.setLineWidth(0.8)
+    c.circle(bx, by, balloon.r, stroke=1, fill=0)
+    c.line(sx, sy, tx, ty)
+    c.circle(tx, ty, 1.8, stroke=0, fill=1)
+    c.setFont(FONT, 10.0)
+    c.drawCentredString(bx, by - 3.5, str(balloon.item))
+    return Box(bx - balloon.r, by - balloon.r, bx + balloon.r, by + balloon.r)
+
+
+def iso(x: float, y: float, z: float) -> Point:
+    """Isometric projection, seen from the front-right-top (x right, y back, z up)."""
+    return (x + y) / math.sqrt(2.0), (-x + y + 2.0 * z) / math.sqrt(6.0)
+
+
+def iso_edges(view: str, *edges: tuple[tuple[float, float, float], ...]) -> list[Shape]:
+    """Visible-line paths for 3D polylines, projected isometrically."""
+    return [path(view, "visible", *(iso(*point) for point in edge)) for edge in edges]
+
+
+def iso_circle(
+    view: str, centre: tuple[float, float, float], r: float, style: str = "visible"
+) -> Shape:
+    """A circle on a horizontal (top) face, which projects to an ellipse."""
+    x, y, z = centre
+    points = [
+        iso(x + r * math.cos(2 * math.pi * k / 36), y + r * math.sin(2 * math.pi * k / 36), z)
+        for k in range(36)
+    ]
+    return path(view, style, *points, closed=True)
 
 
 def datum_id(label: str) -> str:
@@ -1286,6 +1518,14 @@ def draw_part_sheet(c: rl_canvas.Canvas, spec: PartSpec) -> dict[str, Box]:
             boxes[datum_id(callout.datum)] = datum_box
     for frame in spec.frames:
         boxes[frame.id] = draw_frame(c, frame)
+    for table in spec.tables:
+        table_box, cells = draw_table(c, table)
+        boxes[table.id] = table_box
+        for row, row_cells in zip(table.rows, cells, strict=True):
+            for column, cell in enumerate(row_cells):
+                boxes[f"{table.id}:{row[0]}:{column}"] = cell
+    for balloon in spec.balloons:
+        boxes[balloon.id] = draw_balloon(c, spec.view(balloon.view), balloon)
     draw_notes(c, spec)
     draw_title_block(c, spec)
     return boxes
@@ -1342,14 +1582,21 @@ def part_ground_truth(spec: PartSpec, boxes: dict[str, Box]) -> dict:
         )
         for dim in spec.dims
     ]
-    dimensions += [
-        _dimension_record(
-            id=co.id, text=co.text, value=co.value, feature_type=co.feature_type,
-            quantity=co.quantity, reference=co.reference, tol=co.tol, from_ref=None,
-            to_ref=None, box=boxes[co.id], view=co.view, basic=co.basic,
-        )
-        for co in spec.callouts
-    ]
+    for co in spec.callouts:
+        dimensions.append(_dimension_record(
+            id=co.id, text=plain_text(" ".join((co.text, *co.more_lines))), value=co.value,
+            feature_type=co.feature_type, quantity=co.quantity, reference=co.reference,
+            tol=co.tol, from_ref=None, to_ref=None, box=boxes[co.id], view=co.view,
+            basic=co.basic,
+        ))
+        dimensions += [
+            _dimension_record(
+                id=extra.id, text=plain_text(extra.text), value=extra.value,
+                feature_type=extra.feature_type, quantity=co.quantity, reference=False,
+                tol=None, from_ref=None, to_ref=None, box=boxes[co.id], view=co.view,
+            )
+            for extra in co.extras
+        ]
     dimensions += [
         _dimension_record(
             id=a.id, text=a.text, value=a.value, feature_type="angular", quantity=1,
@@ -1358,6 +1605,23 @@ def part_ground_truth(spec: PartSpec, boxes: dict[str, Box]) -> dict:
         )
         for a in spec.angles
     ]
+    for table in spec.tables:
+        if table.kind != "hole_table":
+            continue
+        for row in table.rows:
+            hole, x, y, size = row
+            key = hole.lower()
+            for column, (axis, text, feature) in enumerate(
+                (("x", x, "linear"), ("y", y, "linear"), ("size", size, "thread")), start=1
+            ):
+                value = float(text) if feature == "linear" else _thread_size(text)
+                dimensions.append(_dimension_record(
+                    id=f"dim_hole_{key}_{axis}", text=text, value=value,
+                    feature_type=feature, quantity=1, reference=False, tol=None,
+                    from_ref=f"origin_{axis}" if feature == "linear" else None,
+                    to_ref=f"hole_{key}_center" if feature == "linear" else None,
+                    box=boxes[f"{table.id}:{hole}:{column}"], view=table.view or "",
+                ))
     labels = [co.datum for co in spec.callouts if co.datum is not None]
     labels += [dim.datum for dim in spec.dims if dim.datum is not None]
     datums = [
@@ -1398,6 +1662,7 @@ def part_ground_truth(spec: PartSpec, boxes: dict[str, Box]) -> dict:
             for frame in spec.frames
         ],
         "notes": list(spec.notes),
+        **_table_truth(spec, boxes),
         "seeded_errors": [
             {
                 "id": f"err_{index}",
@@ -1409,6 +1674,42 @@ def part_ground_truth(spec: PartSpec, boxes: dict[str, Box]) -> dict:
             for index, error in enumerate(spec.seeded, start=1)
         ],
     }
+
+
+def _thread_size(text: str) -> float:
+    """The nominal diameter in a metric thread callout: "M5x0.8 THRU" -> 5.0."""
+    return float(text.split("x")[0].lstrip("M"))
+
+
+def _table_truth(spec: PartSpec, boxes: dict[str, Box]) -> dict:
+    """Hole table rows, parts list rows, and balloons, for sheets that have them.
+
+    These keys are not in the schema (the rules do not check them); they are here so an
+    extraction of the tables and balloons can be scored. Sheets without them get no keys,
+    so earlier ground truth files are unchanged.
+    """
+    extra: dict = {}
+    for table in spec.tables:
+        if table.kind == "hole_table":
+            extra["hole_table"] = [
+                {"hole": hole, "x": float(x), "y": float(y), "size": size,
+                 "bbox": norm_bbox(boxes[f"{table.id}:{hole}:0"])}
+                for hole, x, y, size in table.rows
+            ]
+        elif table.kind == "parts_list":
+            extra["parts_list"] = [
+                {"item": int(item), "part_number": number, "description": description,
+                 "qty": int(qty), "material": material}
+                for item, number, description, qty, material in table.rows
+            ]
+        else:
+            raise ValueError(f"{spec.stem}: unknown table kind {table.kind!r}")
+    if spec.balloons:
+        extra["balloons"] = [
+            {"id": b.id, "item": b.item, "view": b.view, "bbox": norm_bbox(boxes[b.id])}
+            for b in spec.balloons
+        ]
+    return extra
 
 
 # --- The suite -------------------------------------------------------------------------
@@ -2217,6 +2518,255 @@ GRIPPER_CLAW = PartSpec(
     ),
 )
 
+
+# --- Part drawings (step 26c): three-view block, bolted joint assembly ----------------
+
+# Machined block 80 x 50 x 30 (X length, Y depth, Z height). A 16-wide, 10-deep slot runs
+# through front to back at X 32..48; a Ø6.6 hole with a Ø11 x 6.8 counterbore at X16 Y25;
+# a 3 x 45° chamfer on the top front edge; four M5 tapped holes listed in a hole table,
+# measured from the 0,0 corner (front left of the top view).
+_K_FRONT = PartView("front", "front", 90.0, 250.0, _per_mm(1.0))
+_K_TOP = PartView("top", "top", 90.0, 380.0, _per_mm(1.0))
+_K_RIGHT = PartView("right", "right_side", 380.0, 250.0, _per_mm(1.0))
+_K_ISO = PartView("iso", "isometric", 620.0, 470.0 + 32.7 * _per_mm(0.45), _per_mm(0.45),
+                  label=("ISOMETRIC",), label_at=(678.0, 458.0))
+_K_CBORE = (16.0, 25.0)
+_K_CB_DEPTH = 30.0 - 6.8
+_K_TAPPED = (("A1", 60.0, 10.0), ("A2", 72.0, 10.0), ("A3", 60.0, 40.0), ("A4", 72.0, 40.0))
+_K_TAP_MINOR = (5.0 - 1.0825 * 0.8) / 2
+
+BLOCK_3VIEW = PartSpec(
+    stem="block_3view",
+    title="MACHINED BLOCK",
+    drawing_number="DC-0307",
+    revision="A",
+    material="AL 6061-T6",
+    units="mm",
+    units_text="MILLIMETERS",
+    general_tol=0.1,
+    general_tol_text="UNLESS OTHERWISE SPECIFIED: ±0.1",
+    scale_text="1:1",
+    part_type="machined_block",
+    views=(_K_FRONT, _K_TOP, _K_RIGHT, _K_ISO),
+    notes_at=(40.0, 150.0),
+    shapes=(
+        # Front: slot notch in the top, chamfer edge, counterbored hole hidden.
+        path("front", "visible", (0, 0), (80, 0), (80, 30), (48, 30), (48, 20), (32, 20),
+             (32, 30), (0, 30), closed=True),
+        path("front", "visible", (0, 27), (32, 27)),
+        path("front", "visible", (48, 27), (80, 27)),
+        path("front", "hidden", (12.7, 0), (12.7, _K_CB_DEPTH)),
+        path("front", "hidden", (19.3, 0), (19.3, _K_CB_DEPTH)),
+        path("front", "hidden", (10.5, _K_CB_DEPTH), (10.5, 30)),
+        path("front", "hidden", (21.5, _K_CB_DEPTH), (21.5, 30)),
+        path("front", "hidden", (10.5, _K_CB_DEPTH), (21.5, _K_CB_DEPTH)),
+        path("front", "center", (16, -2), (16, 32)),
+        # Top: slot edges, chamfer edge, counterbore, tapped holes with their ids.
+        path("top", "visible", (0, 0), (80, 0), (80, 50), (0, 50), closed=True),
+        path("top", "visible", (32, 0), (32, 50)),
+        path("top", "visible", (48, 0), (48, 50)),
+        path("top", "visible", (0, 3), (32, 3)),
+        path("top", "visible", (48, 3), (80, 3)),
+        circle("top", "visible", _K_CBORE, 5.5),
+        circle("top", "visible", _K_CBORE, 3.3),
+        *centre_cross("top", _K_CBORE, 7.5),
+        *(circle("top", "visible", (x, y), _K_TAP_MINOR) for _, x, y in _K_TAPPED),
+        *(arc("top", "thin", (x, y), 2.5, 90.0, 270.0) for _, x, y in _K_TAPPED),
+        *(line for _, x, y in _K_TAPPED for line in centre_cross("top", (x, y), 4.0)),
+        *(label_text("top", (x + 5.0, y + 4.5), hole, size=8.0) for hole, x, y in _K_TAPPED),
+        label_text("top", (-4.0, -4.0), "0,0", size=8.0),
+        # Right: the chamfer at the top front corner, slot floor and counterbore hidden.
+        path("right", "visible", (0, 0), (50, 0), (50, 30), (3, 30), (0, 27), closed=True),
+        path("right", "hidden", (0, 20), (50, 20)),
+        path("right", "hidden", (21.7, 0), (21.7, _K_CB_DEPTH)),
+        path("right", "hidden", (28.3, 0), (28.3, _K_CB_DEPTH)),
+        path("right", "hidden", (19.5, _K_CB_DEPTH), (19.5, 30)),
+        path("right", "hidden", (30.5, _K_CB_DEPTH), (30.5, 30)),
+        path("right", "hidden", (19.5, _K_CB_DEPTH), (30.5, _K_CB_DEPTH)),
+        path("right", "center", (25, -2), (25, 32)),
+        # Isometric: visible edges only.
+        *iso_edges(
+            "iso",
+            ((0, 0, 0), (80, 0, 0), (80, 0, 27), (48, 0, 27), (48, 0, 20), (32, 0, 20),
+             (32, 0, 27), (0, 0, 27), (0, 0, 0)),
+            ((0, 0, 27), (0, 3, 30), (32, 3, 30), (32, 0, 27)),
+            ((48, 0, 27), (48, 3, 30), (80, 3, 30), (80, 0, 27)),
+            ((0, 3, 30), (0, 50, 30), (32, 50, 30), (32, 3, 30)),
+            ((48, 3, 30), (48, 50, 30), (80, 50, 30), (80, 3, 30)),
+            ((80, 0, 0), (80, 50, 0), (80, 50, 30)),
+            ((32, 0, 20), (32, 50, 20), (32, 50, 30)),
+            ((32, 50, 20), (38, 50, 20)),
+        ),
+        iso_circle("iso", (*_K_CBORE, 30.0), 5.5),
+        iso_circle("iso", (*_K_CBORE, 30.0), 3.3),
+        *(iso_circle("iso", (x, y, 30.0), 2.5) for _, x, y in _K_TAPPED),
+    ),
+    dims=(
+        PointDim("dim_overall_length", "80 ±0.2", 80, "front", "x", (0, 0), (80, 0), -14.0,
+                 "left_face", "right_face", tol=0.2),
+        PointDim("dim_overall_height", "30 ±0.1", 30, "front", "y", (0, 0), (0, 30), -8.0,
+                 "bottom_face", "top_face", tol=0.1),
+        PointDim("dim_slot_position", "32", 32, "front", "x", (0, 30), (32, 30), 36.0,
+                 "left_face", "slot_left_wall"),
+        PointDim("dim_slot_width", "16 ±0.05", 16, "front", "x", (32, 30), (48, 30), 36.0,
+                 "slot_left_wall", "slot_right_wall", tol=0.05),
+        PointDim("dim_slot_depth", "10", 10, "front", "y", (40, 20), (32, 30), 40.0,
+                 "slot_floor", "top_face"),
+        PointDim("dim_overall_depth", "50 ±0.2", 50, "top", "y", (0, 0), (0, 50), -13.0,
+                 "front_face", "back_face", tol=0.2),
+        PointDim("dim_cbore_y", "25", 25, "top", "y", (0, 0), _K_CBORE, -6.0,
+                 "front_face", "cbore_center"),
+        PointDim("dim_cbore_x", "16", 16, "top", "x", (0, 50), _K_CBORE, 56.0,
+                 "left_face", "cbore_center"),
+    ),
+    callouts=(
+        Callout("dim_cbore_hole", "Ø6.6 THRU", 6.6, "top",
+                polar(5.5, 45.0, _K_CBORE), (200.0, 555.0), 300.0, "diameter",
+                more_lines=("[CB]Ø11 [DP]6.8",),
+                extras=(CalloutValue("dim_cbore_diameter", "[CB]Ø11", 11, "diameter"),
+                        CalloutValue("dim_cbore_depth", "[DP]6.8", 6.8, "linear"))),
+        Callout("dim_chamfer", "3 X 45°", 3, "right", (1.5, 28.5), (350.0, 368.0), 400.0,
+                "chamfer"),
+    ),
+    frames=(
+        Frame("fcf_parallelism_top", "parallelism", 0.05, "0.05", False, None, ("A",),
+              440.0, 360.0, leader_to=_K_RIGHT.pt(30.0, 30.0)),
+        Frame("fcf_flatness_bottom", "flatness", 0.02, "0.02", False, None, ("A",),
+              440.0, 200.0, leader_to=_K_RIGHT.pt(35.0, 0.0)),
+    ),
+    surface_datums=(SurfaceDatum("datum_a", "A", "front", (20.0, 0.0), "down"),),
+    tables=(
+        Table("hole_table", "hole_table", 560.0, 300.0, (40.0, 40.0, 40.0, 80.0),
+              ("HOLE", "X", "Y", "SIZE"),
+              tuple((hole, f"{x:g}", f"{y:g}", "M5x0.8 THRU") for hole, x, y in _K_TAPPED),
+              title="HOLE TABLE", view="top"),
+    ),
+    notes=(
+        "1. HOLE TABLE POSITIONS ARE FROM THE 0,0 CORNER OF THE TOP VIEW.",
+        "2. BREAK SHARP EDGES 0.2 MAX.",
+        "3. FINISH: CLEAR ANODIZE.",
+    ),
+    seeded=(
+        SeededError(
+            "GDT-003",
+            "GDT-003@fcf_flatness_bottom",
+            "The flatness frame on the bottom face references datum A. Flatness is a form "
+            "control and takes no datum.",
+            "fcf_flatness_bottom",
+        ),
+    ),
+)
+
+# Bolted lap joint: upper plate (item 1, 10 thick, X -60..20) over lower plate (item 2,
+# 12 thick, X -20..60), 40 overlap, 50 wide; M10x35 hex bolt (3) through Ø11 holes, washer
+# (4) and nut (5) underneath. The front view looks at the upper plate; SECTION A-A is cut
+# on the bolt axis and seen from below the front view, so it sits below it with the bolt
+# head at the top. Fasteners are not sectioned.
+_J_FRONT = PartView("front", "front", 300.0, 440.0, _per_mm(1.0))
+_J_SECTION = PartView("section_a_a", "section", 300.0, 300.0, _per_mm(1.0),
+                      label=("SECTION A-A",), label_at=(300.0, 172.0))
+_J_R = 16.0 / math.sqrt(3.0)  # M10 head and nut corner radius
+_J_HEAD = 6.4
+_J_NUT_TOP, _J_NUT_BOTTOM = -24.0, -24.0 - 8.4
+_J_TIP = -35.0
+_J_MINOR = (10.0 - 1.226 * 1.5) / 2
+_J_THREAD_END = _J_TIP + 26.0
+_J_PLATE1 = (((-60, -10), (-60, 0), (-5.5, 0), (-5.5, -10)),
+             ((5.5, -10), (5.5, 0), (20, 0), (20, -10)))
+_J_PLATE2 = (((-20, -22), (-20, -10), (-5.5, -10), (-5.5, -22)),
+             ((5.5, -22), (5.5, -10), (60, -10), (60, -22)))
+_J_HEX = [-_J_R, -_J_R / 2, _J_R / 2, _J_R]
+
+BOLTED_JOINT = PartSpec(
+    stem="bolted_joint",
+    title="BOLTED JOINT ASSY",
+    drawing_number="DC-0310",
+    revision="A",
+    material="SEE PARTS LIST",
+    units="mm",
+    units_text="MILLIMETERS",
+    general_tol=0.5,
+    general_tol_text="UNLESS OTHERWISE SPECIFIED: ±0.5",
+    scale_text="1:1",
+    part_type="bolted_joint_assembly",
+    views=(_J_FRONT, _J_SECTION),
+    shapes=(
+        # Front: upper plate whole, lower plate's exposed end, its hidden left edge,
+        # the bolt head.
+        path("front", "visible", (-60, -25), (20, -25), (20, 25), (-60, 25), closed=True),
+        path("front", "visible", (20, 25), (60, 25), (60, -25), (20, -25)),
+        path("front", "hidden", (-20, -25), (-20, 25)),
+        path("front", "visible", *hexagon(16.0, pointy_top=False), closed=True),
+        circle("front", "visible", (0.0, 0.0), 7.3),
+        *centre_cross("front", (0.0, 0.0), 12.0),
+        # Section: plates hatched in opposite directions, fasteners whole.
+        *(hatch("section_a_a", *region) for region in _J_PLATE1),
+        *(hatch("section_a_a", *region, angle=135.0) for region in _J_PLATE2),
+        *(path("section_a_a", "visible", *region, closed=True)
+          for region in (*_J_PLATE1, *_J_PLATE2)),
+        # Bolt head: three faces seen across corners, chamfer curves on top.
+        path("section_a_a", "visible", (-_J_R, 0), (_J_R, 0)),
+        path("section_a_a", "visible", (-_J_R, 0), (-_J_R, _J_HEAD - 0.5)),
+        path("section_a_a", "visible", (_J_R, 0), (_J_R, _J_HEAD - 0.5)),
+        path("section_a_a", "visible", (-_J_R / 2, 0), (-_J_R / 2, _J_HEAD - 0.5)),
+        path("section_a_a", "visible", (_J_R / 2, 0), (_J_R / 2, _J_HEAD - 0.5)),
+        path("section_a_a", "visible", (-0.75 * _J_R, _J_HEAD), (0.75 * _J_R, _J_HEAD)),
+        *hex_face_bows("section_a_a", _J_HEX, ((_J_HEAD, -0.5),), "v"),
+        # Shank through both plates, then hidden by washer and nut, then the tip.
+        path("section_a_a", "visible", (-5, 0), (-5, -22)),
+        path("section_a_a", "visible", (5, 0), (5, -22)),
+        path("section_a_a", "visible", (-5, _J_THREAD_END), (5, _J_THREAD_END)),
+        path("section_a_a", "thin", (-_J_MINOR, _J_THREAD_END), (-_J_MINOR, -22)),
+        path("section_a_a", "thin", (_J_MINOR, _J_THREAD_END), (_J_MINOR, -22)),
+        path("section_a_a", "visible", (-5, _J_NUT_BOTTOM), (-5, _J_TIP + 0.8),
+             (-_J_MINOR, _J_TIP), (_J_MINOR, _J_TIP), (5, _J_TIP + 0.8), (5, _J_NUT_BOTTOM)),
+        path("section_a_a", "thin", (-_J_MINOR, _J_NUT_BOTTOM), (-_J_MINOR, _J_TIP)),
+        path("section_a_a", "thin", (_J_MINOR, _J_NUT_BOTTOM), (_J_MINOR, _J_TIP)),
+        # Washer, then the nut: faces, chamfer curves at both ends.
+        path("section_a_a", "visible", (-10, -22), (10, -22), (10, -24), (-10, -24),
+             closed=True),
+        path("section_a_a", "visible", (-_J_R, _J_NUT_TOP), (_J_R, _J_NUT_TOP)),
+        *(path("section_a_a", "visible", (u, _J_NUT_BOTTOM + 0.5), (u, _J_NUT_TOP))
+          for u in _J_HEX),
+        path("section_a_a", "visible", (-0.75 * _J_R, _J_NUT_BOTTOM),
+             (0.75 * _J_R, _J_NUT_BOTTOM)),
+        *hex_face_bows("section_a_a", _J_HEX, ((_J_NUT_BOTTOM, 0.5),), "v"),
+        path("section_a_a", "center", (0, 9), (0, -38)),
+    ),
+    cutting_planes=(CuttingPlane("front", (-66.0, 0.0), (66.0, 0.0), "A", (0.0, 1.0)),),
+    dims=(
+        PointDim("dim_plate_overlap", "40 ±0.5", 40, "front", "x", (-20, -25), (20, -25),
+                 -33.0, "lower_plate_end", "upper_plate_end", tol=0.5),
+        PointDim("dim_stack_height", "(41.4)", 41.4, "section_a_a", "y",
+                 (0.75 * _J_R, _J_HEAD), (_J_MINOR, _J_TIP), 72.0, "bolt_head_top",
+                 "bolt_tip", reference=True),
+        PointDim("dim_joint_thickness", "22 ±0.2", 22, "section_a_a", "y", (-60, 0),
+                 (-20, -22), -68.0, "upper_plate_top", "lower_plate_bottom", tol=0.2),
+    ),
+    balloons=(
+        Balloon("balloon_1", 1, "section_a_a", (-45.0, -5.0), (165.0, 342.0)),
+        Balloon("balloon_2", 2, "section_a_a", (40.0, -16.0), (450.0, 222.0)),
+        Balloon("balloon_3", 3, "section_a_a", (-3.5, 3.2), (215.0, 330.0)),
+        Balloon("balloon_4", 4, "section_a_a", (9.6, -23.0), (390.0, 180.0)),
+        Balloon("balloon_5", 5, "section_a_a", (-6.0, -28.0), (230.0, 190.0)),
+    ),
+    tables=(
+        Table("parts_list", "parts_list", TB_X0, TB_Y1, (24.0, 58.0, 96.0, 26.0, 56.0),
+              ("ITEM", "PART NO.", "DESCRIPTION", "QTY", "MATERIAL"),
+              (("1", "DC-0311", "PLATE, UPPER 10 THK", "1", "AL 6061-T6"),
+               ("2", "DC-0312", "PLATE, LOWER 12 THK", "1", "AL 6061-T6"),
+               ("3", "HB-M10-35", "HEX BOLT M10x1.5 x 35", "1", "STEEL CL 8.8"),
+               ("4", "WS-M10", "PLAIN WASHER M10", "1", "STEEL"),
+               ("5", "HN-M10", "HEX NUT M10x1.5", "1", "STEEL CL 8")),
+              header_at_bottom=True),
+    ),
+    notes=(
+        "1. TIGHTEN BOLT TO 45 Nm.",
+        "2. FASTENERS ARE SHOWN UNSECTIONED.",
+        "3. BREAK SHARP EDGES ON PLATES.",
+    ),
+)
+
 #: Every drawing in the suite, by stem, in the order the eval runs them.
 SUITE: dict[str, DrawingSpec | PartSpec] = {
     spec.stem: spec
@@ -2235,6 +2785,8 @@ SUITE: dict[str, DrawingSpec | PartSpec] = {
         FLANGE,
         STEPPED_SHAFT,
         GRIPPER_CLAW,
+        BLOCK_3VIEW,
+        BOLTED_JOINT,
     )
 }
 

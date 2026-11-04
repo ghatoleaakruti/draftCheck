@@ -17,6 +17,8 @@ from reportlab.pdfgen import canvas as rl_canvas
 from draftcheck.rules import run_rules
 from draftcheck.schema import finding_key, parse_drawing
 from scripts.drawing_suite import (
+    BLOCK_3VIEW,
+    BOLTED_JOINT,
     FLANGE,
     GEAR_SPUR,
     GRIPPER_CLAW,
@@ -25,20 +27,27 @@ from scripts.drawing_suite import (
     STEPPED_SHAFT,
     SUITE,
     AngleDim,
+    Balloon,
     Callout,
     PartSpec,
     PartView,
     PointDim,
+    Table,
     build_one,
     centre_cross,
     draw_angle_dim,
+    draw_balloon,
     draw_callout,
     draw_hatch,
     draw_point_dim,
     draw_point_dim_with_datum,
+    draw_rich,
+    draw_table,
     hex_face_bows,
     hexagon,
+    iso,
     keyed_circle,
+    plain_text,
     rim_toward,
     spur_gear_outline,
     surface_datum,
@@ -48,7 +57,8 @@ from scripts.run_eval import load_ground_truth
 
 PARTS = (GEAR_SPUR, HEX_NUT, HEX_BOLT)
 PARTS_B = (FLANGE, STEPPED_SHAFT, GRIPPER_CLAW)
-PART_STEMS = [spec.stem for spec in (*PARTS, *PARTS_B)]
+PARTS_C = (BLOCK_3VIEW, BOLTED_JOINT)
+PART_STEMS = [spec.stem for spec in (*PARTS, *PARTS_B, *PARTS_C)]
 
 
 def _radius(point: tuple[float, float]) -> float:
@@ -201,7 +211,9 @@ def test_part_sheet_has_title_block_essentials_and_general_notes(stem: str) -> N
         assert truth["general_tolerance"]["linear_plus_minus"] is not None
 
 
-@pytest.mark.parametrize("stem", ["gear_spur", "hex_nut", "hex_bolt", "gripper_claw"])
+@pytest.mark.parametrize(
+    "stem", ["gear_spur", "hex_nut", "hex_bolt", "gripper_claw", "bolted_joint"]
+)
 def test_clean_parts_raise_no_findings(stem: str) -> None:
     truth = load_ground_truth(stem)
     assert truth["seeded_errors"] == []
@@ -365,3 +377,111 @@ def test_claw_profile_and_angle() -> None:
     assert dims["dim_taper_angle"]["value"] == 15.0
     assert dims["dim_jaw_radius"]["is_basic"] is True
     assert dims["dim_thickness"]["view"] == "top"
+
+
+# --- Part c helpers ---------------------------------------------------------------------
+
+
+def test_iso_projects_the_three_axes_at_120_degrees() -> None:
+    angles = sorted(
+        math.degrees(math.atan2(v, u)) % 360
+        for u, v in (iso(1, 0, 0), iso(0, 1, 0), iso(0, 0, 1))
+    )
+    assert angles == pytest.approx([30.0, 90.0, 330.0])
+    assert all(math.hypot(*iso(*axis)) == pytest.approx(math.sqrt(2 / 3))
+               for axis in ((1, 0, 0), (0, 1, 0), (0, 0, 1)))
+
+
+def test_plain_text_spells_symbol_tokens_as_unicode() -> None:
+    assert plain_text("[CB]Ø11 [DP]6.8") == "⌴Ø11 ↧6.8"
+
+
+def test_rich_text_counts_symbols_in_its_width(tmp_path: Path) -> None:
+    c = _canvas(tmp_path)
+    plain = draw_rich(c, 0.0, 0.0, "Ø11 6.8", 10.0)
+    with_symbols = draw_rich(c, 0.0, 0.0, "[CB]Ø11 [DP]6.8", 10.0)
+    assert with_symbols == pytest.approx(plain + 18.0)
+
+
+def test_table_header_at_bottom_puts_the_first_row_just_above_it(tmp_path: Path) -> None:
+    table = Table("t", "parts_list", 100.0, 100.0, (20.0, 40.0), ("A", "B"),
+                  (("1", "x"), ("2", "y")), header_at_bottom=True)
+    box, cells = draw_table(_canvas(tmp_path), table)
+    assert (box.y0, box.y1) == (100.0, 139.0)
+    assert cells[0][0].y0 == pytest.approx(113.0)  # row 1 sits on the header
+    assert cells[1][0].y0 == pytest.approx(126.0)
+
+
+def test_table_header_on_top_by_default(tmp_path: Path) -> None:
+    table = Table("t", "hole_table", 100.0, 100.0, (20.0,), ("H",), (("A1",), ("A2",)),
+                  title="HOLE TABLE")
+    box, cells = draw_table(_canvas(tmp_path), table)
+    assert cells[0][0].y1 == pytest.approx(126.0)  # first row right under the header
+    assert box.y1 > 139.0  # the title sits above the table
+
+
+def test_balloon_box_is_its_circle(tmp_path: Path) -> None:
+    view = PartView("f", "front", 100.0, 100.0, 2.0)
+    box = draw_balloon(_canvas(tmp_path), view, Balloon("b", 3, "f", (0.0, 0.0),
+                                                       (200.0, 200.0)))
+    assert (box.x0, box.y0, box.x1, box.y1) == (190.0, 190.0, 210.0, 210.0)
+
+
+# --- Part c sheets ----------------------------------------------------------------------
+
+
+def test_block_views_are_third_angle_with_an_isometric() -> None:
+    front, top, right = (BLOCK_3VIEW.view(n) for n in ("front", "top", "right"))
+    assert top.ox == front.ox and top.oy > front.oy
+    assert right.oy == front.oy and right.ox > front.ox
+    assert BLOCK_3VIEW.view("iso").kind == "isometric"
+
+
+def test_block_counterbore_callout_and_hole_table() -> None:
+    truth = load_ground_truth("block_3view")
+    dims = {d["id"]: d for d in truth["dimensions"]}
+    assert dims["dim_cbore_hole"]["text_raw"] == "Ø6.6 THRU ⌴Ø11 ↧6.8"
+    assert dims["dim_cbore_diameter"]["value"] == 11.0
+    assert dims["dim_cbore_depth"]["value"] == 6.8
+    assert dims["dim_slot_width"]["view"] == "front"
+    assert dims["dim_chamfer"]["view"] == "right"
+    assert [row["hole"] for row in truth["hole_table"]] == ["A1", "A2", "A3", "A4"]
+    assert {(row["x"], row["y"]) for row in truth["hole_table"]} == {
+        (60.0, 10.0), (72.0, 10.0), (60.0, 40.0), (72.0, 40.0)}
+    assert dims["dim_hole_a3_y"]["value"] == 40.0
+    assert dims["dim_hole_a3_size"]["feature_type"] == "thread"
+    assert dims["dim_hole_a3_size"]["value"] == 5.0
+
+
+def test_block_seeds_flatness_to_a_and_keeps_parallelism() -> None:
+    truth = load_ground_truth("block_3view")
+    frames = {f["id"]: f for f in truth["fcfs"]}
+    assert frames["fcf_parallelism_top"]["characteristic"] == "parallelism"
+    assert frames["fcf_flatness_bottom"]["characteristic"] == "flatness"
+    findings = run_rules(parse_drawing(truth))
+    assert [finding_key(f) for f in findings] == ["GDT-003@fcf_flatness_bottom"]
+
+
+def test_assembly_parts_list_and_balloons_agree() -> None:
+    truth = load_ground_truth("bolted_joint")
+    items = [row["item"] for row in truth["parts_list"]]
+    assert items == [1, 2, 3, 4, 5]
+    assert sorted(b["item"] for b in truth["balloons"]) == items
+    assert {row["description"] for row in truth["parts_list"]} >= {
+        "HEX BOLT M10x1.5 x 35", "PLAIN WASHER M10", "HEX NUT M10x1.5"}
+    dims = {d["id"]: d for d in truth["dimensions"]}
+    assert dims["dim_stack_height"]["is_reference"] is True
+    assert dims["dim_plate_overlap"]["value"] == 40.0
+
+
+def test_assembly_section_hatches_plates_only_in_opposite_directions() -> None:
+    hatches = [shape for shape in BOLTED_JOINT.shapes if shape.kind == "hatch"]
+    assert sorted({shape.angle for shape in hatches}) == [45.0, 135.0]
+    # Every hatched region lies within the two plates (Z 0 to -22): no fastener is cut.
+    assert all(-22 <= v <= 0 for shape in hatches for _, v in shape.points)
+
+
+def test_older_ground_truth_has_no_table_keys() -> None:
+    for stem in ("gear_spur", "flange", "plate_clean"):
+        truth = load_ground_truth(stem)
+        assert not {"hole_table", "parts_list", "balloons"} & truth.keys()
