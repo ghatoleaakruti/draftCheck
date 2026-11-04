@@ -49,7 +49,7 @@ Stage notes:
 | Confirm | User reviews and edits the extracted values before any checking. The extraction goes back from `POST /api/runs` and the (possibly edited) data comes in to `POST /api/runs/{id}/check`; the browser page shows it as editable tables, see §4.9 | **BUILT** |
 | Check | Python rules produce pass/fail per rule, with no model involvement, via `rules.run_rules`, wrapped as `pipeline.check` | **BUILT** |
 | Correct | Agent proposes edits from a fixed menu, Python applies the safe ones and re-runs the rules to verify; **max 3 rounds**, then stop. `agent.correct`, see §4.5 | **BUILT** |
-| Output | Two-page redline: the drawing with a numbered marker per located finding, and a findings page behind it. `redline.render_redline` / `redline.save_redline`, see §4.7 | **BUILT** |
+| Output | Two-page redline: the drawing with a revision cloud and numbered delta for each located finding, pen labels for the proposed edits, and a CHECKED stamp after a fix; then a findings page with a Corrections table. `redline.render_redline` / `redline.save_redline`, see §4.7 | **BUILT** |
 
 Render → Extract → Check → Correct runs end to end today from one command,
 `python -m draftcheck.cli check --fix` — see §4.3.
@@ -72,7 +72,7 @@ reported unresolved rather than retried indefinitely.
 | `draftcheck/cli.py` | The `check` subcommand — see §4.3. Writes the run's files, prints the findings table and any `parse_issues`, and sets the exit code | **BUILT** |
 | `draftcheck/edits.py` | The four operations the agent may propose — `set_field`, `add_datum`, `remove_datum_ref`, `add_dimension` — as pydantic models, plus `apply_edits(drawing, edits)` returning `(new_drawing, applied, rejected)`. Applies one edit at a time to a copy, re-validating the whole drawing after each, and refuses anything that deletes a feature, touches a protected field, names an unknown id, uses an unknown operation, or silently fails to take. Never raises on bad model output — see §4.6 | **BUILT** |
 | `draftcheck/agent.py` | `correct(drawing, image_png, client, max_rounds=3)` → `CorrectionReport`. One round = ask, apply, re-run `rules.run_rules`, diff the findings. Records `proposed`, `applied`, `rejected`, findings before and after, `resolved`, and `introduced` per round, and a resolved/unresolved verdict per original finding — all computed from the re-run, never from the model's claim. Stops when no error-severity finding is left or after `max_rounds` — see §4.5 | **BUILT** |
-| `draftcheck/redline.py` | `render_redline(page_png, findings, report=None, model_name=None, when=None)` → two pillow pages, and `save_redline(pages, path_pdf, path_png)` → a 2-page PDF plus page 1 as a PNG. Pillow only, drawn on the rendered page image. Markers are numbered in `run_rules` order, so a number means the same finding on page 1, on page 2, and in `findings.json`. `findings_text(findings, report)` returns page 2's wording as styled lines, so the text can be tested without reading pixels — see §4.7 | **BUILT** |
+| `draftcheck/redline.py` | `render_redline(page_png, findings, report=None, model_name=None, when=None)` → two pillow pages, and `save_redline(pages, path_pdf, path_png)` → a 2-page PDF plus page 1 as a PNG. Pillow only, drawn on the rendered page image, with the pen and print fonts from `static/fonts`. Clouds, deltas, pen labels, and the CHECKED stamp match the on-screen sheet; edit verdicts come from `api.edit_verdict` through `corrections(report)`. Deltas are numbered in `run_rules` order, so a number means the same finding on page 1, on page 2, and in `findings.json`. `findings_text(findings, report)` returns page 2's wording, including the Corrections table, as styled lines, so the text can be tested without reading pixels — see §4.7 | **BUILT** |
 | `draftcheck/api.py` | FastAPI app over the same four modules the CLI drives: upload + extract, check the confirmed data, run the correction loop, serve the page image and the redline. One run is one folder under `outputs/web/<uuid4>/`, so each request reads what the previous one wrote — see §4.8. Decides nothing itself | **BUILT** |
 | `draftcheck/limits.py` | What one demo deployment is willing to spend, and on whom. `Limits.from_env()` holds every number (per-IP uploads and fixes per hour, model calls per day, run retention, sweep interval, `TRUST_PROXY`); `UsageLimiter` counts them in memory over sliding windows and raises `LimitExceeded`, which `api.py` turns into a `429`; `client_ip(...)` decides which address a request is counted against; `sweep_runs(root, max_age_hours)` deletes stale run folders and `Cleaner` keeps that to once an hour — see §4.12 | **BUILT** |
 | `draftcheck/static/` | The browser page, served at `/`: `index.html`, `style.css`, `app.js`, `sheet.js` (the drawing primitives for the sheet: scan band, revision clouds, pen notes, stamp — §4.17), and `fonts/` (Archivo, JetBrains Mono, Nanum Pen Script, each with its OFL licence). Plain HTML, CSS, and JavaScript — no framework, no build step, nothing loaded from a CDN. Laid out as "the checker's desk" (§4.15): a header with a five-stage stepper and a model pill, the drawing as paper on a dark desk with an SVG overlay in image pixels, and a tabbed review panel (Extracted, Issues, Corrections) with one primary button whose label follows the stage. The tables are editable (§4.9), linked to the drawing by item id, and checked and fixed through the same endpoints as before. Cells are written with `textContent` or as an input's `value`, so model output is never treated as markup | **BUILT** (upload + view + edit + check + fix + redline) |
@@ -407,24 +407,65 @@ edit being proposed three times running.
 ### 4.7 The redlined output — BUILT
 
 `redline.render_redline(page_png, findings, report=None, model_name=None, when=None,
-rule_results=None)`
+rule_results=None, final_rule_results=None)`
 returns two pillow images; `redline.save_redline(pages, path_pdf, path_png)` writes them as
 a 2-page PDF (at 200 dpi, so the page comes out its real physical size) and page 1 on its
-own as a PNG.
+own as a PNG. The CLI (`check --redline`) and the API's `/fix` both call these two
+functions.
 
-**Page 1** is the rendered drawing. Every finding that has a bounding box gets the mark a
-checker would draw by hand: a red rectangle around the box, padded by 0.5% of the page
-width and drawn 0.3% wide, with a numbered balloon — a filled red disc 3% of the page
-width across, white number inside — just off the rectangle's top-right corner on a short
-leader. The rectangle encloses rather than covers, so the callout under review stays
-readable. If the balloon would hang off the sheet the other three corners are tried in
-turn, and as a last resort it is clamped into the page, because a finding must never lose
-its number. A stamp in the top-left corner gives the finding count, the model that ran,
-and the date, separated by ` | `.
+**Page 1** is the rendered drawing, marked up the same way as the on-screen sheet (§4.17),
+so the PDF and the screen look alike. All sizes are fractions of the page width, so a mark
+looks the same on a small sheet and a large one. Every finding that has a bounding box gets:
+
+- **A revision cloud** around the box, padded by 0.5% of the page width and drawn 0.3%
+  wide. It is a closed chain of outward arcs: the rectangle is walked clockwise, cut into
+  equal steps (about one per 1.1% of the page width), and each step is drawn as an arc whose
+  centre is inside the box, so it bulges outward (`_cloud_arcs`, the same construction as
+  `Sheet.cloudPath` in `sheet.js`). The cloud goes around the callout rather than over it,
+  so the callout stays readable. Its colour is the finding's final outcome:
+  **red** when no correction report was given, then **green** when the rules confirm the
+  finding cleared (`verified`) and **amber** when a designer still has to act (`held`, or
+  still `unresolved`). The colours are the page's pen colours from `style.css`.
+- **A delta triangle**: filled, in the cloud's colour, about 2.5% of the page width, with
+  the finding's number in white bold Archivo. It sits just outside the cloud's top-left
+  corner and is clamped onto the page, so a finding never loses its number. When two
+  findings share one box (on plate_001, GDT-001 and GDT-004 both sit on the position
+  frame), the second triangle moves one place to the right so it doesn't cover the first.
+- **Pen labels**, one for each edit the loop proposed, written beside the cloud of the
+  first finding the edit cites, or beside the edited item's own box if that finding has no
+  cloud. The text is `pen_label` (e.g. `drop C`, `±0.1`), the same helper `/fix` uses for
+  its pen notes. A label goes to the right of the cloud, or to the left if it would run off
+  the sheet, and several labels for one cloud stack downward. An applied edit's label is in
+  the cloud's colour; a refused edit's label is red with a slightly rising line through it.
+- **The CHECKED stamp**, only when there is a correction report: a green rounded rectangle
+  with a double border, rotated −7°, reading `CHECKED`,
+  `DRAFTCHECK RULE ENGINE <date>`, and `<N> VERIFIED, <M> FOR DESIGNER`. N counts the
+  `verified` findings and M counts the rest. It is drawn at about 90% opacity on its own
+  transparent layer, rotated, and composited onto the page. It goes in the emptiest spot
+  on a 9×9 grid: a spot that touches no cloud, delta, pen label, or the review stamp, and
+  sits on almost no ink in the drawing, preferring spots nearest the lower middle. If no
+  spot is clear it falls back to the lower middle (`_stamp_spot`, the same rule as
+  `Sheet.stampSpot`).
+
+The review stamp in the top-left corner stays as it was: the finding count, the model that
+ran, and the date, separated by ` | `.
+
+Outcomes come from `finding_outcomes(report)`, and each edit's verdict comes from
+`corrections(report)`. `corrections` replays each round's applied edits one at a time to read
+every before/after off the drawing either side of the edit. That is the same walk as
+`api._round_summary`, and it takes the verdict from `api.edit_verdict` (imported inside the
+function, because `api` imports `redline`). The verdict therefore has one source, and the
+PDF can't call an edit `held` that the page calls `verified`.
 
 **Page 2** is a clean white sheet the same size: every finding by number, with its rule id,
 severity, and message. With a `CorrectionReport` it also carries each applied edit, that
-edit's rationale, and `verified resolved` or `unresolved`. When `render_redline` is given
+edit's rationale, and `verified resolved` or `unresolved`, followed by a **Corrections**
+table (`corrections_text`). The table has one row per proposed edit, applied or refused:
+the number(s) of the findings it cites, the callout **before** and **after**, and the status
+in the page's words (`Verified`, `Held for designer`, `Not verified`, `Rejected`). The
+before/after strings are `edit_display`'s, the ones `/fix` returns and the Issues card
+shows, and a test compares the two directly. A refused edit's "after" is what it asked
+for. When `render_redline` is given
 `rule_results=` (the CLI and the API both pass it), a "Checks run" section follows: the
 `checks_summary` line, then every rule as `PASS`/`FAIL`/`N/A`, id, and title, with its
 explanation underneath — red for a fail, grey otherwise (§4.1). The footer reads *Proposed
@@ -442,8 +483,9 @@ edit turned it into.
 
 Two things are worth being explicit about:
 
-- **Numbering is `run_rules` order.** Marker 3 on page 1, entry 3 on page 2, and the third
-  object in `findings.json` are the same finding. Nothing re-sorts for presentation.
+- **Numbering is `run_rules` order.** Delta 3 on page 1, entry 3 on page 2, row 3's
+  number in the Corrections table, and the third object in `findings.json` are the same
+  finding. Nothing re-sorts for presentation.
 - **The verdict is still the rule engine's.** An edit's `finding_ids` is the model's own
   claim, and it is used only to decide which finding an edit is printed under.
   `verified resolved` comes from `CorrectionReport.statuses`, which `agent.correct`
@@ -457,11 +499,34 @@ stamp like any other.
 Text is sized as a fraction of the page width — title 2.5%, body 1.6% — and wrapped to the
 page, so the sheet is readable on screen at full width rather than only when zoomed in.
 
-Pillow's bundled font covers Latin-1 and little else, and a missing glyph draws as a blank
-box that reads as markup rather than as a font problem. `ascii_safe(text)` runs over every
-string the page draws: it substitutes the typographic punctuation we might emit (em dash,
-curly quotes, ellipsis) and keeps `±`, `Ø`, `×`, `°`, which carry engineering meaning and
-which the font has.
+**Fonts.** A missing glyph draws as a blank box that reads as markup rather than as a font
+problem, so every string goes through a font that can draw it. Pillow can't say directly
+whether a font has a character, so `_has_glyph` renders the character and compares it
+with what the font draws for a code point it certainly lacks.
+
+- **Pen labels** use the bundled Nanum Pen Script (`static/fonts/nanum-pen-script`), the
+  page's handwriting font. It has `±` but not `Ø` or `−`. If a label contains any character
+  the pen font can't draw, the **whole label** is drawn in the bundled Archivo instead, at
+  a slightly smaller size because Archivo reads larger.
+- **The delta numbers, the CHECKED stamp, and the Corrections table** use Archivo, with the
+  weight always named explicitly (Bold or Regular) because the variable font's default
+  instance isn't Regular. Table cells fall back **character by character**: Archivo first
+  (it has `±`, `Ø`, `−`, `—`), then JetBrains Mono (it adds `∥` and `◎`). A character that
+  neither font has is written out as a word: the position symbol `⌖` becomes **`pos`** and
+  the MMC/LMC circled letters `Ⓜ`/`Ⓛ` become **`(M)`**/**`(L)`**. The other frame symbols
+  get similar short words (`flat`, `perp`, `prof`…). So on plate_001 the frame row reads
+  `pos Ø0.25 (M) | A | B | C` → `pos Ø0.25 (M) | A | B`. Only the drawn table uses these
+  words. The `Line` text the tests read, and the strings `/fix` returns, keep the real
+  symbols. A cell too wide for its column is cut short with `...`.
+- **Everything else on page 2**, and the top-left review stamp, still use Pillow's
+  built-in font, which covers Latin-1 and little else. `ascii_safe(text)` runs over those
+  strings: it replaces the typographic punctuation we might emit (em dash, curly quotes,
+  ellipsis) and keeps `±`, `Ø`, `×`, `°`, which carry engineering meaning and which the
+  font has.
+
+If page 2 runs out of room, a note says how many findings or checks were left off, or
+`... the rest of this list is not shown.` when only part of the last check's explanation
+didn't fit.
 
 `findings_text(findings, report)` returns page 2's content as styled `Line` objects before
 anything is drawn, which is what lets the tests assert on the wording instead of inspecting
@@ -1330,6 +1395,7 @@ draftCheck/
 | 2026-11-03 | Every rule reports a pass / fail / not-applicable result with a sentence, but the sentence comes from a separate `describe` function that is told whether `check` failed, and `rule_results` raises if the two disagree | A list of findings cannot show what was checked and found fine, and a reviewer trusts a clean result more when it names the values it looked at. Keeping the verdict in `check` alone means adding words cannot move a pass/fail — the same principle that keeps the model out of the verdict keeps the wording out of it too |
 | 2026-11-03 | The eval matches findings to seeded errors by rule id, and counts a finding nobody seeded as a false alarm; the ground-truth sanity test matches by full finding key | The model names items its own way, so its keys never equal the ground truth's, but a rule id is what the user acts on. The stricter key match belongs to the sanity test, where both sides use ground-truth ids, and it is what proves each seeded error is caught on the right item before any model is scored |
 | 2026-11-03 | The cross-check compares two Meta models' readings in Python and only marks cells; the rules never use it | Two models agreeing is not proof and disagreeing is not an error — either could be the one that is right. A disagreement is worth a reviewer's glance, which is what it gets; letting it move a verdict would hand the decision back to the models |
+| 2026-11-03 | The redline PDF draws the on-screen sheet's markup — revision clouds coloured by outcome, numbered deltas, pen labels, a CHECKED stamp — replacing the 2026-10-29 rectangle and balloon; the per-edit verdict is reused from `api.edit_verdict` rather than worked out again | The PDF is what leaves the building, and a reviewer who has just seen green clouds and "drop C" on screen should see the same thing on paper, not a different vocabulary. Clouds still enclose rather than cover, for the reason the rectangle did. Reusing the API's verdict (imported inside the function, since `api` imports `redline`) means the screen and the PDF cannot disagree about whether an edit was verified or held. Symbols no bundled font can draw are written as short words (`pos`, `(M)`) in the table, because a blank box would read as part of the markup |
 | 2026-10-30 | `render.load_pages` translates pypdfium2's and pillow's own errors into `RenderError`, rather than each caller catching the dependency's error class | Every caller — the CLI's exit code, the API's status code — catches `RenderError` and nothing else, so an error leaking from a dependency is an exit code or a status code that never happens: a corrupt upload came out as a traceback and a 500 instead of a 400. Translating once at the boundary means the file-reading contract is stated in one place, and swapping the PDF library later does not touch any caller |
 
 ## 8. Status

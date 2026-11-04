@@ -1,16 +1,18 @@
 """Turn a run's findings into a two-page redline a person can read.
 
-Page 1 is the drawing itself with a numbered red marker over each finding's bounding box.
-Page 2 is a plain white sheet listing every finding in words, and — when the correction
-loop ran — the edits it applied, why, and whether the rule engine confirmed the finding
-cleared.
+Page 1 is the drawing itself, marked up the way the on-screen sheet is: a revision cloud
+around each finding's bounding box with a numbered delta at its top-left, a handwritten
+pen note beside it for each edit the correction loop proposed, and — when the loop ran —
+a green CHECKED stamp. Page 2 is a plain white sheet listing every finding in words, the
+corrections as a before/after table, and every check the rules ran.
 
 The markup is drawn on the *rendered image* of the drawing rather than onto the PDF's own
 content stream. That means one code path covers PDF and image inputs alike, and it needs
-no library beyond pillow.
+no library beyond pillow. The pen and stamp fonts are the ones the page serves, from
+``static/fonts``.
 
-A mark is the shape a checker draws by hand: a red rectangle around the thing that is
-wrong, and a numbered balloon on a short leader just outside it.
+A cloud is red while no correction has run, then green when the rules confirm its finding
+cleared and amber when a designer still has to act (held, or still reported).
 
 Nothing here decides anything. Severity, message, and resolved/unresolved all arrive
 already decided — the last two from :mod:`draftcheck.agent`, which gets them by re-running
@@ -19,7 +21,9 @@ the rules. This module only lays them out.
 
 from __future__ import annotations
 
+import functools
 import io
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date as date_type
@@ -30,7 +34,15 @@ from PIL import Image, ImageDraw, ImageFont
 from pydantic import ValidationError
 
 from draftcheck.agent import CorrectionReport
-from draftcheck.edits import AddDatum, AddDimension, Edit, RemoveDatumRef, SetField
+from draftcheck.edits import (
+    AddDatum,
+    AddDimension,
+    Edit,
+    RemoveDatumRef,
+    SetField,
+    apply_edits,
+    parse_edit,
+)
 from draftcheck.rules import checks_summary
 from draftcheck.schema import (
     FCF,
@@ -47,12 +59,38 @@ INK = (25, 25, 25)
 GREY = (95, 95, 95)
 WHITE = (255, 255, 255)
 
-#: Marker geometry, all as a fraction of the page width so a mark looks the same on a
-#: small sheet and a large one. The rectangle encloses the finding's bounding box; the
-#: balloon carries its number and sits just outside one corner.
-BOX_PAD_RATIO = 0.005
-BOX_LINE_RATIO = 0.003
-BALLOON_WIDTH_RATIO = 0.03
+#: The checker's pens, the same three colours the on-screen sheet uses (style.css).
+PEN_RED = (212, 42, 26)
+PEN_GREEN = (22, 128, 73)
+PEN_AMBER = (194, 108, 0)
+
+#: A finding's final outcome, and the pen its cloud is drawn in. ``open`` is a finding no
+#: correction run has looked at yet.
+OUTCOME_COLOURS = {
+    "open": PEN_RED,
+    "verified": PEN_GREEN,
+    "held": PEN_AMBER,
+    "unresolved": PEN_AMBER,
+}
+
+#: Mark geometry, all as a fraction of the page width so a mark looks the same on a small
+#: sheet and a large one. The cloud encloses the finding's bounding box; the delta carries
+#: its number and sits just outside the cloud's top-left corner.
+CLOUD_PAD_RATIO = 0.005
+CLOUD_LINE_RATIO = 0.003
+DELTA_WIDTH_RATIO = 0.025
+#: Roughly one arc per this fraction of the page width of cloud outline.
+CLOUD_ARC_RATIO = 0.011
+PEN_SIZE_RATIO = 0.024
+STAMP_WIDTH_RATIO = 0.2
+STAMP_HEIGHT_RATIO = 0.074
+#: The stamp's ink: the verified green at about 90% opacity.
+STAMP_ALPHA = 230
+
+FONTS_DIR = Path(__file__).resolve().parent / "static" / "fonts"
+PEN_FONT = FONTS_DIR / "nanum-pen-script" / "NanumPenScript-Regular.ttf"
+ARCHIVO_FONT = FONTS_DIR / "archivo" / "Archivo-Variable.ttf"
+MONO_FONT = FONTS_DIR / "jetbrains-mono" / "JetBrainsMono-Variable.ttf"
 
 #: Written into the PDF so a page comes out at its real physical size rather than at
 #: pillow's 72 dpi default, which would make a 2200 px sheet about 30 inches wide.
@@ -142,73 +180,126 @@ def _box_pixels(
     return (x0 * width - pad, y0 * height - pad, x1 * width + pad, y1 * height + pad)
 
 
-def _balloon_spot(
-    box: tuple[float, float, float, float],
-    radius: float,
-    size: tuple[int, int],
-) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Where the balloon goes, and which corner of the box its leader starts from.
+@functools.lru_cache(maxsize=64)
+def _bundled_font(path: Path, size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+    """One of the fonts in ``static/fonts`` at a pixel size; ``bold`` picks the Bold cut."""
+    font = ImageFont.truetype(str(path), max(8, size))
+    # A variable font's default instance is not always Regular, so the weight is always
+    # named rather than left to the file.
+    try:
+        font.set_variation_by_name("Bold" if bold else "Regular")
+    except (OSError, ValueError):
+        pass  # not a variable font (Nanum Pen), or no such instance: the file's own weight
+    return font
 
-    Top-right is the convention, and the other three corners are tried in turn when it
-    would hang off the sheet — a balloon half over the edge is worse than one on the
-    wrong corner. If the box is up against two edges at once, the last candidate is
-    clamped into the page rather than dropped, so a finding never loses its number.
+
+#: A code point no font here has, so it always comes out as the "missing glyph" box.
+_NEVER_A_GLYPH = "\U0010fffd"
+
+
+@functools.lru_cache(maxsize=2048)
+def _has_glyph(path: Path, character: str) -> bool:
+    """Whether a bundled font can draw ``character``.
+
+    Pillow has no direct question for this, so the character is rendered and compared
+    with what the font draws for a code point it certainly lacks.
+    """
+    if character.isspace():
+        return True
+    font = _bundled_font(path, 40)
+    return bytes(font.getmask(character)) != bytes(font.getmask(_NEVER_A_GLYPH))
+
+
+def _pen_font_for(text: str, size: float) -> ImageFont.FreeTypeFont:
+    """Nanum Pen Script for a label, or Archivo if the pen font is missing any character."""
+    if all(_has_glyph(PEN_FONT, character) for character in text):
+        return _bundled_font(PEN_FONT, round(size))
+    # Archivo is a print face and reads larger than the handwriting at the same size.
+    return _bundled_font(ARCHIVO_FONT, round(size * 0.72))
+
+
+Box = tuple[float, float, float, float]
+
+
+def _cloud_arcs(box: Box, arc_length: float) -> list[tuple[Box, float, float]]:
+    """The arcs of a revision cloud around ``box``, as pillow ``arc`` arguments.
+
+    The rectangle is walked clockwise (on screen, y down) and cut into equal steps. Each
+    step becomes an arc from one point to the next whose centre sits inside the box, so it
+    bulges outward. Same construction as ``Sheet.cloudPath`` in sheet.js.
     """
     x0, y0, x1, y1 = box
+    w, h = x1 - x0, y1 - y0
+    perimeter = 2 * (w + h)
+    count = max(8, round(perimeter / arc_length))
+    step = perimeter / count
+    radius = step * 0.62
+
+    def point_at(distance: float) -> tuple[float, float]:
+        d = distance % perimeter
+        if d < w:
+            return x0 + d, y0
+        d -= w
+        if d < h:
+            return x1, y0 + d
+        d -= h
+        if d < w:
+            return x1 - d, y1
+        d -= w
+        return x0, y1 - d
+
+    arcs = []
+    for index in range(count):
+        (px, py), (qx, qy) = point_at(index * step), point_at((index + 1) * step)
+        dx, dy = qx - px, qy - py
+        chord = math.hypot(dx, dy) or 1.0
+        # Clockwise on screen, (dy, -dx) points out of the box.
+        nx, ny = dy / chord, -dx / chord
+        sink = math.sqrt(max(radius**2 - (chord / 2) ** 2, 0.0))
+        cx, cy = (px + qx) / 2 - nx * sink, (py + qy) / 2 - ny * sink
+        start = math.degrees(math.atan2(py - cy, px - cx))
+        end = math.degrees(math.atan2(qy - cy, qx - cx))
+        if end < start:
+            end += 360
+        arcs.append(((cx - radius, cy - radius, cx + radius, cy + radius), start, end))
+    return arcs
+
+
+def _draw_cloud(draw: ImageDraw.ImageDraw, ring: Box, colour, width: int) -> None:
+    """A closed chain of outward arcs around ``ring``: a revision cloud."""
+    line = max(2, round(width * CLOUD_LINE_RATIO))
+    for bounds, start, end in _cloud_arcs(ring, width * CLOUD_ARC_RATIO):
+        draw.arc(bounds, start, end, fill=colour, width=line)
+
+
+def _delta_box(ring: Box, size: tuple[int, int], shift: int = 0) -> Box:
+    """Where the delta goes: just outside the cloud's top-left corner, kept on the page.
+
+    ``shift`` moves it one triangle to the right per earlier finding on the same box, so
+    two findings on one callout show both numbers instead of one hiding the other.
+    """
     width, height = size
-    offset = radius * 0.9
-
-    candidates = (
-        ((x1, y0), (x1 + offset, y0 - offset)),
-        ((x0, y0), (x0 - offset, y0 - offset)),
-        ((x1, y1), (x1 + offset, y1 + offset)),
-        ((x0, y1), (x0 - offset, y1 + offset)),
-    )
-    for corner, (cx, cy) in candidates:
-        if radius <= cx <= width - radius and radius <= cy <= height - radius:
-            return corner, (cx, cy)
-
-    corner, (cx, cy) = candidates[0]
-    return corner, (
-        min(max(cx, radius), width - radius),
-        min(max(cy, radius), height - radius),
-    )
+    side = width * DELTA_WIDTH_RATIO
+    tall = side * 0.88
+    margin = width * 0.002
+    right = min(max(ring[0] + margin + shift * side * 1.1, side + margin), width - margin)
+    base = min(max(ring[1] + margin / 2, tall + margin), height - margin)
+    return (right - side, base - tall, right, base)
 
 
-def _draw_marker(
-    draw: ImageDraw.ImageDraw,
-    box: tuple[float, float, float, float],
-    number: int,
-    size: tuple[int, int],
-) -> None:
-    """Draw one redline mark: a rectangle round the box, and a numbered balloon."""
-    width = size[0]
-    line = max(2, round(width * BOX_LINE_RATIO))
-    radius = width * BALLOON_WIDTH_RATIO / 2
-
-    draw.rectangle(list(box), outline=RED, width=line)
-
-    corner, (cx, cy) = _balloon_spot(box, radius, size)
-    draw.line([corner, (cx, cy)], fill=RED, width=line)
-    draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill=RED)
-
-    # No bold cut in the bundled font, so the stroke thickens the glyph instead. White on
-    # a filled balloon is what makes the number readable over whatever it is sitting on.
-    draw.text(
-        (cx, cy),
-        str(number),
-        fill=WHITE,
-        font=_font(radius * 1.15),
-        anchor="mm",
-        stroke_width=max(1, round(radius / 14)),
-        stroke_fill=WHITE,
-    )
+def _draw_delta(draw: ImageDraw.ImageDraw, box: Box, number: int, colour) -> None:
+    """A filled triangle with the finding's number in white bold."""
+    left, top, right, base = box
+    side, tall = right - left, base - top
+    draw.polygon([(left, base), (right, base), (left + side / 2, top)], fill=colour)
+    font = _bundled_font(ARCHIVO_FONT, round(tall * (0.5 if number < 10 else 0.4)), bold=True)
+    draw.text((left + side / 2, base - tall * 0.3), str(number), fill=WHITE, font=font, anchor="mm")
 
 
-def _draw_stamp(
+def _draw_review_stamp(
     draw: ImageDraw.ImageDraw, width: int, count: int, model_name: str, when: date_type
-) -> None:
-    """Put the review's header in the top-left corner of the drawing."""
+) -> Box:
+    """Put the review's header in the top-left corner of the drawing; returns its box."""
     margin = max(12, round(width * 0.012))
     title_font = _font(width * 0.013)
     small_font = _font(width * 0.0095)
@@ -221,7 +312,7 @@ def _draw_stamp(
         draw.textlength(title, font=title_font), draw.textlength(detail, font=small_font)
     )
     line_height = title_font.size + small_font.size + pad
-    box = [margin, margin, margin + text_width + 2 * pad, margin + line_height + 2 * pad]
+    box = (margin, margin, margin + text_width + 2 * pad, margin + line_height + 2 * pad)
 
     draw.rectangle(box, fill=WHITE, outline=RED, width=max(2, round(width * 0.0015)))
     draw.text((box[0] + pad, box[1] + pad), title, fill=RED, font=title_font)
@@ -231,26 +322,214 @@ def _draw_stamp(
         fill=GREY,
         font=small_font,
     )
+    return box
+
+
+def _draw_pen_label(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    anchor: Box,
+    slot: int,
+    colour,
+    struck: bool,
+    size: tuple[int, int],
+) -> Box:
+    """Write a short note beside ``anchor``: to its right, or to its left if that runs off.
+
+    ``slot`` stacks several notes for the same cloud. A refused edit's note gets a line
+    through it, rising a little as a hand does. Returns the note's box.
+    """
+    width, height = size
+    pen = width * PEN_SIZE_RATIO
+    unit = width / 1000
+    font = _pen_font_for(text, pen)
+    text_width = draw.textlength(text, font=font)
+    gap = 6 * unit
+    x = anchor[2] + gap
+    if x + text_width > width - 4 * unit:
+        x = anchor[0] - gap - text_width
+    x = min(max(x, 4 * unit), width - 4 * unit - text_width)
+    middle = (anchor[1] + anchor[3]) / 2 + slot * pen * 1.05
+    y = min(max(middle, pen / 2), height - pen / 2)
+    draw.text((x, y), text, fill=colour, font=font, anchor="lm")
+    if struck:
+        line = max(2, round(width * CLOUD_LINE_RATIO * 0.8))
+        draw.line(
+            [(x - 2 * unit, y + 1.5 * unit), (x + text_width + 2 * unit, y - 1.5 * unit)],
+            fill=colour,
+            width=line,
+        )
+    return (x, y - pen / 2, x + text_width, y + pen / 2)
+
+
+def _overlaps(a: Box, b: Box) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def _stamp_spot(image: Image.Image, avoid: list[Box]) -> tuple[float, float]:
+    """The clearest spot for the stamp's centre, nearest the lower middle; same rule as
+    ``Sheet.stampSpot``: touch no mark, sit on (almost) no ink, else go lower middle."""
+    width, height = image.size
+    w, h = width * STAMP_WIDTH_RATIO * 1.06, width * STAMP_HEIGHT_RATIO * 1.25
+    margin = width * 0.01
+    fallback = (width / 2, height * 0.78)
+
+    scale = 240 / width
+    small = image.convert("L").resize(
+        (max(1, round(width * scale)), max(1, round(height * scale)))
+    )
+    grey = small.load()
+
+    def darkness(box: Box) -> float:
+        cx0, cy0 = max(0, math.floor(box[0] * scale)), max(0, math.floor(box[1] * scale))
+        cx1 = min(small.width, math.ceil(box[2] * scale))
+        cy1 = min(small.height, math.ceil(box[3] * scale))
+        cells = [(x, y) for y in range(cy0, cy1) for x in range(cx0, cx1)]
+        if not cells:
+            return 1.0
+        return sum(1 for x, y in cells if grey[x, y] < 200) / len(cells)
+
+    pad = width * 0.004
+    best: tuple[float, float, float] | None = None
+    steps = 9
+    for row in range(steps):
+        for column in range(steps):
+            cx = margin + w / 2 + column / (steps - 1) * (width - 2 * margin - w)
+            cy = margin + h / 2 + row / (steps - 1) * (height - 2 * margin - h)
+            box = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+            if any(_overlaps(box, (o[0] - pad, o[1] - pad, o[2] + pad, o[3] + pad)) for o in avoid):
+                continue
+            dark = darkness(box)
+            if dark > 0.02:
+                continue
+            score = dark * 20 + math.hypot((cx - fallback[0]) / width, (cy - fallback[1]) / height)
+            if best is None or score < best[0]:
+                best = (score, cx, cy)
+    return (best[1], best[2]) if best else fallback
+
+
+def _checked_stamp(width: int, when: date_type, verified: int, designer: int) -> Image.Image:
+    """The CHECKED stamp on its own transparent layer, already rotated -7°."""
+    w, h = width * STAMP_WIDTH_RATIO, width * STAMP_HEIGHT_RATIO
+    unit = width / 1000
+    layer = Image.new("RGBA", (math.ceil(w + 8 * unit), math.ceil(h + 8 * unit)), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    ink = (*PEN_GREEN, STAMP_ALPHA)
+    x0, y0 = 4 * unit, 4 * unit
+    draw.rounded_rectangle(
+        (x0, y0, x0 + w, y0 + h), radius=7 * unit, outline=ink, width=max(2, round(3 * unit))
+    )
+    inset = 4.5 * unit
+    draw.rounded_rectangle(
+        (x0 + inset, y0 + inset, x0 + w - inset, y0 + h - inset),
+        radius=4 * unit,
+        outline=ink,
+        width=max(1, round(1.4 * unit)),
+    )
+    middle = x0 + w / 2
+    title = _bundled_font(ARCHIVO_FONT, round(h * 0.34), bold=True)
+    small = _bundled_font(ARCHIVO_FONT, round(h * 0.105), bold=True)
+    draw.text((middle, y0 + h * 0.36), "CHECKED", fill=ink, font=title, anchor="mm")
+    draw.text(
+        (middle, y0 + h * 0.66),
+        f"DRAFTCHECK RULE ENGINE  {when.isoformat()}",
+        fill=ink,
+        font=small,
+        anchor="mm",
+    )
+    draw.text(
+        (middle, y0 + h * 0.83),
+        f"{verified} VERIFIED, {designer} FOR DESIGNER",
+        fill=ink,
+        font=small,
+        anchor="mm",
+    )
+    # Pillow turns counter-clockwise for a positive angle, which is SVG's rotate(-7).
+    return layer.rotate(7, resample=Image.Resampling.BICUBIC, expand=True)
+
+
+def _item_bbox(drawing: Drawing, item_id: str | None) -> list[float] | None:
+    """The bounding box of the dimension, frame, or datum with this id, if it has one."""
+    for list_name in ("dimensions", "fcfs", "datums"):
+        item = _find_item(drawing, list_name, item_id)
+        if item is not None:
+            return item.bbox
+    return None
 
 
 def _mark_drawing(
-    page_png: bytes, findings: list[Finding], model_name: str, when: date_type
+    page_png: bytes,
+    findings: list[Finding],
+    report: CorrectionReport | None,
+    model_name: str,
+    when: date_type,
 ) -> Image.Image:
-    """Page 1: the drawing with a numbered marker over every finding that has a bbox."""
+    """Page 1: the drawing with a cloud, delta, and pen notes over every located finding."""
     with Image.open(io.BytesIO(page_png)) as source:
         source.load()
         image = source.convert("RGB")
 
+    size = image.size
     draw = ImageDraw.Draw(image)
-    pad = image.width * BOX_PAD_RATIO
+    pad = image.width * CLOUD_PAD_RATIO
+    outcomes = finding_outcomes(report) if report else {}
 
+    rings: dict[str, Box] = {}
+    colours: dict[str, tuple[int, int, int]] = {}
+    marks: list[Box] = []
+    shared: dict[Box, int] = defaultdict(int)
     for number, finding in enumerate(findings, start=1):
         if finding.bbox is None:
             continue
-        box = _box_pixels(finding.bbox, image.width, image.height, pad)
-        _draw_marker(draw, box, number, image.size)
+        key = finding_key(finding)
+        colour = OUTCOME_COLOURS[outcomes.get(key, "unresolved") if report else "open"]
+        ring = _box_pixels(finding.bbox, image.width, image.height, pad)
+        _draw_cloud(draw, ring, colour, image.width)
+        delta = _delta_box(ring, size, shared[ring])
+        shared[ring] += 1
+        _draw_delta(draw, delta, number, colour)
+        rings[key], colours[key] = ring, colour
+        marks.extend([ring, delta])
 
-    _draw_stamp(draw, image.width, len(findings), model_name, when)
+    if report is not None:
+        slots: dict[Box, int] = defaultdict(int)
+        for row in corrections(report):
+            anchor_key = next((key for key in row.finding_ids if key in rings), None)
+            if anchor_key is not None:
+                anchor, colour = rings[anchor_key], colours[anchor_key]
+            else:
+                bbox = _item_bbox(report.original_drawing, row.display.target_id)
+                if bbox is None:
+                    continue
+                anchor = _box_pixels(bbox, image.width, image.height, 0)
+                colour = PEN_GREEN if row.status == "verified" else PEN_AMBER
+            rejected = row.status == "rejected"
+            note = _draw_pen_label(
+                draw,
+                row.display.pen,
+                anchor,
+                slots[anchor],
+                PEN_RED if rejected else colour,
+                rejected,
+                size,
+            )
+            slots[anchor] += 1
+            marks.append(note)
+
+    marks.append(_draw_review_stamp(draw, image.width, len(findings), model_name, when))
+
+    if report is not None:
+        verified = sum(1 for outcome in outcomes.values() if outcome == "verified")
+        stamp = _checked_stamp(image.width, when, verified, len(outcomes) - verified)
+        # A sheet shorter than the stamp (a thin strip) still gets it, cut to fit.
+        stamp = stamp.crop((0, 0, min(stamp.width, image.width), min(stamp.height, image.height)))
+        cx, cy = _stamp_spot(image, marks)
+        left = round(min(max(cx - stamp.width / 2, 0), max(image.width - stamp.width, 0)))
+        top = round(min(max(cy - stamp.height / 2, 0), max(image.height - stamp.height, 0)))
+        canvas = image.convert("RGBA")
+        canvas.alpha_composite(stamp, dest=(left, top))
+        image = canvas.convert("RGB")
+
     return image
 
 
@@ -685,6 +964,69 @@ def edit_display(edit: Edit, before: Drawing, after: Drawing | None) -> EditDisp
     )
 
 
+@dataclass(frozen=True)
+class Correction:
+    """One proposed edit as the redline shows it: what changed, and what came of it."""
+
+    display: EditDisplay
+    #: ``verified``, ``held``, ``failed``, or ``rejected`` — the same words /fix uses.
+    status: str
+    finding_ids: tuple[str, ...]
+
+
+def corrections(report: CorrectionReport) -> list[Correction]:
+    """Every applied and refused edit, in order, with the same strings and verdicts as /fix.
+
+    The report keeps each round's edits but not the drawing between them, so the applied
+    edits are replayed one at a time to read each before/after off the drawing as it was
+    either side — the same walk ``api._round_summary`` does. A refused edit is shown against
+    the drawing as its round found it, and one that cannot be read as an edit is left out:
+    there is nothing to write beside a cloud for it.
+    """
+    # Imported here because the API imports this module; the verdict is worded in one place.
+    from draftcheck.api import edit_verdict
+
+    rows: list[Correction] = []
+    current = report.original_drawing
+    for record in report.rounds:
+        start = current
+        for edit in record.applied:
+            changed, took, _ = apply_edits(current, [edit])
+            after = changed if took else current
+            status, _ = edit_verdict(edit, record)
+            rows.append(
+                Correction(edit_display(edit, current, after), status, tuple(edit.finding_ids))
+            )
+            current = after
+        for item in record.rejected:
+            edit, _ = parse_edit(item.edit)
+            if edit is None:
+                continue
+            rows.append(
+                Correction(edit_display(edit, start, None), "rejected", tuple(edit.finding_ids))
+            )
+    return rows
+
+
+def finding_outcomes(report: CorrectionReport) -> dict[str, str]:
+    """Each original finding's outcome: ``verified``, ``held``, or ``unresolved``.
+
+    Whether a finding cleared comes from ``report.statuses`` (the rules, re-run). A cleared
+    finding is ``held`` when the edit that cleared it adds something a designer must place.
+    Same split as ``api._outcomes``, so a cloud is the colour its card is on screen.
+    """
+    held = {
+        key for row in corrections(report) if row.status == "held" for key in row.finding_ids
+    }
+    outcomes = {}
+    for status in report.statuses:
+        if status.status != "resolved":
+            outcomes[status.key] = "unresolved"
+        else:
+            outcomes[status.key] = "held" if status.key in held else "verified"
+    return outcomes
+
+
 class _Column:
     """A cursor that lays text down a page and knows when it has run out of room."""
 
@@ -711,6 +1053,75 @@ class _Column:
     def space(self, amount: float) -> None:
         self.y += amount
 
+    def row(self, cells: list[str], size: float, fill=INK, bold: bool = False) -> None:
+        """Write one table row, each cell at its column and cut short if it is too wide."""
+        if self.full:
+            return
+        span = self.right - self.left
+        edges = [self.left + span * start for start in TABLE_COLUMNS] + [self.right]
+        for index, cell in enumerate(cells[: len(TABLE_COLUMNS)]):
+            room = edges[index + 1] - edges[index] - size * 0.6
+            _draw_mixed(self.draw, (edges[index], self.y), cell, size, fill, room, bold)
+        self.y += size * 1.35
+
+
+#: What to write for a frame symbol none of the bundled fonts can draw.
+_SYMBOL_WORDS = {
+    "⌖": "pos",
+    "Ⓜ": "(M)",
+    "Ⓛ": "(L)",
+    "⏥": "flat",
+    "⏤": "straight",
+    "○": "circ",
+    "⌭": "cyl",
+    "⟂": "perp",
+    "∥": "par",
+    "∠": "ang",
+    "⌒": "line prof",
+    "⌓": "surf prof",
+    "↗": "runout",
+    "⌰": "total runout",
+    "◎": "conc",
+    "⌯": "sym",
+}
+
+
+def _runs(text: str) -> list[tuple[str, Path]]:
+    """Split ``text`` into runs, each in the first bundled font that has its glyphs."""
+    runs: list[tuple[str, Path]] = []
+    for character in text:
+        path = next((p for p in (ARCHIVO_FONT, MONO_FONT) if _has_glyph(p, character)), None)
+        if path is None:
+            character, path = _SYMBOL_WORDS.get(character, ascii_safe(character)), ARCHIVO_FONT
+        if runs and runs[-1][1] == path:
+            runs[-1] = (runs[-1][0] + character, path)
+        else:
+            runs.append((character, path))
+    return runs
+
+
+def _draw_mixed(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[float, float],
+    text: str,
+    size: float,
+    fill,
+    room: float,
+    bold: bool = False,
+) -> None:
+    """Draw ``text`` with per-character font fallback, stopping with ``...`` at ``room``."""
+    x, y = xy
+    limit = x + room
+    for chunk, path in _runs(text):
+        font = _bundled_font(path, round(size), bold=bold)
+        for character in chunk:
+            advance = draw.textlength(character, font=font)
+            if x + advance > limit:
+                draw.text((x, y), "...", fill=fill, font=_bundled_font(ARCHIVO_FONT, round(size)))
+                return
+            draw.text((x, y), character, fill=fill, font=font)
+            x += advance
+
 
 #: ``(style, indent level)`` for each kind of line page 2 can carry. Keeping the wording
 #: separate from the drawing is what lets the tests read the page as text instead of
@@ -723,6 +1134,9 @@ VERDICT = "verdict"
 NOTE = "note"
 #: One rule's line in "Checks run": spaced like an entry, but not counted as a finding.
 CHECK = "check"
+#: The Corrections table's header and its rows; cells are separated by tabs.
+TABLE_HEAD = "table_head"
+TABLE_ROW = "table_row"
 
 
 @dataclass(frozen=True)
@@ -792,9 +1206,44 @@ def findings_text(
         for edit in unattributed:
             lines.append(Line(f"fix: {plain_edit(edit, names)}", DETAIL, indent=1.6))
 
+    if report is not None:
+        lines.extend(corrections_text(findings, report))
+
     if rule_results:
         lines.extend(checks_text(rule_results, final_rule_results))
 
+    return lines
+
+
+#: How each edit's verdict is written in the Corrections table, as the page words it.
+CORRECTION_STATUS_WORDS = {
+    "verified": "Verified",
+    "held": "Held for designer",
+    "failed": "Not verified",
+    "rejected": "Rejected",
+}
+
+#: Each Corrections cell's left edge, as a fraction of the text width.
+TABLE_COLUMNS = (0.0, 0.08, 0.42, 0.76)
+
+
+def corrections_text(findings: list[Finding], report: CorrectionReport) -> list[Line]:
+    """The "Corrections" table: issue number, the callout before and after, and verdict.
+
+    Cells are tab-separated in ``Line.text`` so the tests can read the table as text; the
+    layout puts each cell in its column. The before/after strings are ``edit_display``'s,
+    the same ones the page shows in its Issues card.
+    """
+    numbers = {finding_key(finding): number for number, finding in enumerate(findings, 1)}
+    lines = [Line("Corrections", HEADING), Line("#\tBefore\tAfter\tStatus", TABLE_HEAD)]
+    rows = corrections(report)
+    if not rows:
+        lines.append(Line("No edits were proposed.", DETAIL))
+    for row in rows:
+        cited = ", ".join(str(numbers[key]) for key in row.finding_ids if key in numbers)
+        status = CORRECTION_STATUS_WORDS.get(row.status, row.status)
+        cells = [cited or "-", row.display.before, row.display.after, status]
+        lines.append(Line("\t".join(cells), TABLE_ROW))
     return lines
 
 
@@ -878,12 +1327,18 @@ def _list_findings(
             column.bottom = height  # the note itself still has to fit
             if remaining:
                 note = f"... {remaining} more finding(s) not shown; see findings.json."
-            else:
+            elif checks:
                 note = f"... {checks} more check(s) not shown."
+            else:
+                note = "... the rest of this list is not shown."
             column.write(note, *styles[NOTE])
             break
         if line.style in (HEADING, ENTRY, CHECK):
             column.space(body_font.size * 0.6)
+        if line.style in (TABLE_HEAD, TABLE_ROW):
+            head = line.style == TABLE_HEAD
+            column.row(line.text.split("\t"), body_font.size, GREY if head else INK, bold=head)
+            continue
         font, fill = styles[line.style]
         column.write(line.text, font, fill=fill, indent=line.indent * body_font.size)
 
@@ -923,7 +1378,9 @@ def render_redline(
     Returns:
         ``(page_1, page_2)`` as pillow images, both the size of the rendered drawing.
     """
-    marked = _mark_drawing(page_png, findings, model_name or NO_MODEL, when or date_type.today())
+    marked = _mark_drawing(
+        page_png, findings, report, model_name or NO_MODEL, when or date_type.today()
+    )
     return marked, _list_findings(
         marked.size, findings, report, rule_results, final_rule_results
     )
